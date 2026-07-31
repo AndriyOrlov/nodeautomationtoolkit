@@ -1,4 +1,4 @@
-name: Build first Windows release
+name: Build Windows release
 
 on:
   push:
@@ -8,6 +8,9 @@ on:
 
 permissions:
   contents: write
+
+env:
+  RELEASE_VERSION: "0.2.0"
 
 jobs:
   windows-release:
@@ -26,6 +29,9 @@ jobs:
       - name: Install dependencies
         run: python -m pip install ".[windows]" pyinstaller
 
+      - name: Run tests
+        run: python -m pip install ".[dev,windows]" && python -m pytest
+
       - name: Build portable application
         shell: pwsh
         run: |
@@ -37,38 +43,43 @@ jobs:
             --paths src `
             --collect-all NodeGraphQt `
             --collect-all PySide6 `
+            --collect-all docx `
             --hidden-import nodeautomationtoolkit.builtin_nodes.files `
             --hidden-import nodeautomationtoolkit.builtin_nodes.text `
             --hidden-import nodeautomationtoolkit.builtin_nodes.logic `
             --hidden-import nodeautomationtoolkit.builtin_nodes.windows_dialogs `
+            --hidden-import nodeautomationtoolkit.builtin_nodes.word `
+            --hidden-import nodeautomationtoolkit.builtin_nodes.output `
             --add-data "plugins;plugins" `
+            --add-data "examples;examples" `
             src/nodeautomationtoolkit/__main__.py
 
       - name: Create ZIP
         shell: pwsh
         run: |
-          Compress-Archive `
-            -Path dist/NodeAutomationToolkit/* `
-            -DestinationPath dist/NodeAutomationToolkit-v0.1.0-windows-x64.zip
+          $archive = "dist/NodeAutomationToolkit-v$env:RELEASE_VERSION-windows-x64.zip"
+          Compress-Archive -Path dist/NodeAutomationToolkit/* -DestinationPath $archive
 
       - name: Upload workflow artifact
         uses: actions/upload-artifact@v4
         with:
-          name: NodeAutomationToolkit-v0.1.0-windows-x64
-          path: dist/NodeAutomationToolkit-v0.1.0-windows-x64.zip
+          name: NodeAutomationToolkit-v${{ env.RELEASE_VERSION }}-windows-x64
+          path: dist/NodeAutomationToolkit-v${{ env.RELEASE_VERSION }}-windows-x64.zip
 
       - name: Create GitHub release
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          if (gh release view v0.1.0 2>$null) {
-            gh release upload v0.1.0 dist/NodeAutomationToolkit-v0.1.0-windows-x64.zip --clobber
+          $tag = "v$env:RELEASE_VERSION"
+          $archive = "dist/NodeAutomationToolkit-$tag-windows-x64.zip"
+          if (gh release view $tag 2>$null) {
+            gh release upload $tag $archive --clobber
           } else {
-            gh release create v0.1.0 `
-              dist/NodeAutomationToolkit-v0.1.0-windows-x64.zip `
+            gh release create $tag `
+              $archive `
               --target "${{ github.sha }}" `
-              --title "Node Automation Toolkit 0.1.0" `
+              --title "Node Automation Toolkit $env:RELEASE_VERSION" `
               --notes-file RELEASE_NOTES.md `
               --prerelease
           }

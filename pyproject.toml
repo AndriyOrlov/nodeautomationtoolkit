@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "nodeautomationtoolkit"
-version = "0.1.0"
+version = "0.2.0"
 description = "Local visual automation toolkit with Python-powered nodes"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -14,6 +14,7 @@ dependencies = [
   "NodeGraphQt>=0.6.44,<0.7",
   "PySide6>=6.7,<7",
   "pydantic>=2.8,<3",
+  "python-docx>=1.1,<2",
 ]
 
 [project.optional-dependencies]

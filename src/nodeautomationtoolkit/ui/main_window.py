@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import QSettings, Qt
+from PySide6.QtCore import QSettings, QStandardPaths, Qt, QTimer
 from PySide6.QtGui import QAction, QKeySequence
 from PySide6.QtWidgets import (
     QFileDialog,
@@ -21,6 +21,7 @@ from nodeautomationtoolkit.core.executor import GraphExecutor
 from nodeautomationtoolkit.core.models import GraphModel
 from nodeautomationtoolkit.core.project import load_graph, save_graph
 from nodeautomationtoolkit.core.registry import NodeRegistry
+from nodeautomationtoolkit.core.templates import build_word_smoke_graph
 
 from .automation_assistant_dialog import AutomationAssistantDialog
 from .graph_view import GraphScene, GraphView, NodePalette
@@ -36,6 +37,25 @@ class MainWindow(QMainWindow):
         self.plugin_dir = plugin_dir
         self.current_path: Path | None = None
         self.dirty = False
+        self._suppress_graph_changes = False
+        self.app_data_dir = Path(
+            QStandardPaths.writableLocation(
+                QStandardPaths.StandardLocation.AppDataLocation
+            )
+        )
+        documents_dir = Path(
+            QStandardPaths.writableLocation(
+                QStandardPaths.StandardLocation.DocumentsLocation
+            )
+        )
+        self.graphs_dir = documents_dir / "Node Automation Toolkit" / "Graphs"
+        self.autosave_path = self.app_data_dir / "autosave.nat.json"
+        self.graphs_dir.mkdir(parents=True, exist_ok=True)
+        self.app_data_dir.mkdir(parents=True, exist_ok=True)
+        self.autosave_timer = QTimer(self)
+        self.autosave_timer.setSingleShot(True)
+        self.autosave_timer.setInterval(700)
+        self.autosave_timer.timeout.connect(self._autosave_graph)
         self.setWindowTitle("Node Automation Toolkit")
         self.resize(1500, 900)
 
@@ -82,6 +102,7 @@ class MainWindow(QMainWindow):
         self.properties.changed.connect(self._mark_dirty)
         self._create_toolbar()
         self._restore_window_state()
+        self._restore_working_graph()
         self._report_plugin_errors()
         self._update_title()
 
@@ -95,6 +116,7 @@ class MainWindow(QMainWindow):
             ("Відкрити", QKeySequence.StandardKey.Open, self.open_graph),
             ("Зберегти", QKeySequence.StandardKey.Save, self.save_graph),
             ("Зберегти як", QKeySequence.StandardKey.SaveAs, self.save_graph_as),
+            ("Word тест", "Ctrl+Shift+W", self.open_word_smoke_graph),
             ("Запустити", "F5", self.run_graph),
             ("AI-сценарій", "Ctrl+Shift+A", self.open_automation_assistant),
             ("AI-нода", "Ctrl+Shift+N", self.open_node_assistant),
@@ -119,12 +141,24 @@ class MainWindow(QMainWindow):
     def new_graph(self) -> None:
         if not self._confirm_discard():
             return
-        self.scene.set_graph(GraphModel())
-        self.blueprint.set_graph_model(GraphModel())
+        self._set_graph_everywhere(GraphModel())
         self.current_path = None
         self.dirty = False
+        self._autosave_graph()
+        QSettings().setValue("workspace/dirty", False)
         self._update_title()
         self.log.clear()
+
+    def open_word_smoke_graph(self) -> None:
+        if not self._confirm_discard():
+            return
+        self._set_graph_everywhere(build_word_smoke_graph())
+        self.current_path = None
+        self.dirty = True
+        QSettings().setValue("workspace/dirty", True)
+        self._autosave_graph()
+        self._update_title()
+        self._log("Створено тестовий Word-граф. Натисніть F5 і виберіть DOCX.")
 
     def open_graph(self) -> None:
         if not self._confirm_discard():
@@ -132,7 +166,7 @@ class MainWindow(QMainWindow):
         filename, _ = QFileDialog.getOpenFileName(
             self,
             "Відкрити сценарій",
-            "",
+            str(self.graphs_dir),
             "Node Automation Toolkit (*.nat.json);;JSON (*.json)",
         )
         if not filename:
@@ -142,10 +176,12 @@ class MainWindow(QMainWindow):
             missing = [node.type_id for node in graph.nodes if not self._has_node(node.type_id)]
             if missing:
                 raise ValueError("Не встановлені ноди:\n" + "\n".join(sorted(set(missing))))
-            self.scene.set_graph(graph)
-            self.blueprint.set_graph_model(graph)
+            self._set_graph_everywhere(graph)
             self.current_path = Path(filename)
             self.dirty = False
+            self._remember_current_path()
+            QSettings().setValue("workspace/dirty", False)
+            self._autosave_graph()
             self._update_title()
             self._log(f"Відкрито: {filename}")
         except Exception as error:  # noqa: BLE001 - UI boundary
@@ -157,6 +193,9 @@ class MainWindow(QMainWindow):
         try:
             save_graph(self._current_graph(), self.current_path)
             self.dirty = False
+            self._remember_current_path()
+            QSettings().setValue("workspace/dirty", False)
+            self._autosave_graph()
             self._update_title()
             self._log(f"Збережено: {self.current_path}")
             return True
@@ -168,7 +207,7 @@ class MainWindow(QMainWindow):
         filename, _ = QFileDialog.getSaveFileName(
             self,
             "Зберегти сценарій",
-            str(self.current_path or Path.cwd() / "scenario.nat.json"),
+            str(self.current_path or self.graphs_dir / "scenario.nat.json"),
             "Node Automation Toolkit (*.nat.json)",
         )
         if not filename:
@@ -215,8 +254,13 @@ class MainWindow(QMainWindow):
         return self.scene.graph
 
     def _set_graph_everywhere(self, graph: GraphModel) -> None:
-        self.scene.set_graph(graph)
-        self.blueprint.set_graph_model(graph)
+        previous = self._suppress_graph_changes
+        self._suppress_graph_changes = True
+        try:
+            self.scene.set_graph(graph)
+            self.blueprint.set_graph_model(graph)
+        finally:
+            self._suppress_graph_changes = previous
 
     def _has_node(self, type_id: str) -> bool:
         try:
@@ -239,11 +283,15 @@ class MainWindow(QMainWindow):
             self._log(f"ПОМИЛКА ПЛАГІНА: {error}")
 
     def _mark_dirty(self) -> None:
+        if self._suppress_graph_changes:
+            return
         self.dirty = True
+        QSettings().setValue("workspace/dirty", True)
+        self.autosave_timer.start()
         self._update_title()
 
     def _update_title(self) -> None:
-        name = self.current_path.name if self.current_path else self.scene.graph.name
+        name = self.current_path.name if self.current_path else self._current_graph().name
         marker = " *" if self.dirty else ""
         self.setWindowTitle(f"{name}{marker} — Node Automation Toolkit")
 
@@ -263,7 +311,49 @@ class MainWindow(QMainWindow):
         )
         if answer == QMessageBox.StandardButton.Save:
             return self.save_graph()
-        return answer == QMessageBox.StandardButton.Discard
+        if answer == QMessageBox.StandardButton.Discard:
+            self._discard_autosave_changes()
+            return True
+        return False
+
+    def _autosave_graph(self) -> None:
+        try:
+            save_graph(self._current_graph(), self.autosave_path)
+            self._remember_current_path()
+        except Exception as error:  # noqa: BLE001 - recovery boundary
+            self._log(f"ПОМИЛКА АВТОЗБЕРЕЖЕННЯ: {error}")
+
+    def _restore_working_graph(self) -> None:
+        settings = QSettings()
+        if not self.autosave_path.is_file():
+            return
+        try:
+            graph = load_graph(self.autosave_path)
+            missing = [node.type_id for node in graph.nodes if not self._has_node(node.type_id)]
+            if missing:
+                raise ValueError("Не встановлені ноди: " + ", ".join(sorted(set(missing))))
+            self._set_graph_everywhere(graph)
+            stored_path = settings.value("workspace/current_path", "", type=str)
+            self.current_path = Path(stored_path) if stored_path else None
+            self.dirty = settings.value("workspace/dirty", False, type=bool)
+            self._log(f"Відновлено робочий граф: {graph.name}")
+        except Exception as error:  # noqa: BLE001 - recovery boundary
+            self._log(f"Не вдалося відновити автозбереження: {error}")
+
+    def _remember_current_path(self) -> None:
+        QSettings().setValue(
+            "workspace/current_path",
+            str(self.current_path) if self.current_path is not None else "",
+        )
+
+    def _discard_autosave_changes(self) -> None:
+        try:
+            if self.current_path is not None and self.current_path.is_file():
+                save_graph(load_graph(self.current_path), self.autosave_path)
+            elif self.autosave_path.exists():
+                self.autosave_path.unlink()
+        finally:
+            QSettings().setValue("workspace/dirty", False)
 
     def _restore_window_state(self) -> None:
         settings = QSettings()
@@ -275,4 +365,6 @@ class MainWindow(QMainWindow):
             event.ignore()
             return
         QSettings().setValue("window/geometry", self.saveGeometry())
+        if not self.dirty:
+            self._autosave_graph()
         event.accept()

@@ -20,6 +20,9 @@ TYPE_COLORS = {
     "int": (34, 197, 94),
     "List": (168, 85, 247),
     "str": (236, 72, 153),
+    "WordDocument": (37, 99, 235),
+    "WordParagraphs": (6, 182, 212),
+    "WordSaveResult": (22, 163, 74),
 }
 EXECUTION_COLOR = (245, 245, 245)
 
@@ -94,6 +97,7 @@ class NodeGraphQtEditor(QWidget):
         from NodeGraphQt.constants import ViewerEnum
 
         self.registry = registry
+        self._graph_name = "Новий сценарій"
         self.graph = NodeGraph()
         self.graph.set_acyclic(True)
         self.graph.set_background_color(11, 17, 32)
@@ -129,6 +133,7 @@ class NodeGraphQtEditor(QWidget):
             )
 
     def set_graph_model(self, model: GraphModel) -> None:
+        self._graph_name = model.name
         self.graph.clear_session()
         created = {}
         for item in model.nodes:
@@ -154,7 +159,7 @@ class NodeGraphQtEditor(QWidget):
         self.graph_changed.emit()
 
     def graph_model(self) -> GraphModel:
-        model = GraphModel(name="Blueprint")
+        model = GraphModel(name=self._graph_name)
         node_ids = {}
         for node in self.graph.all_nodes():
             definition: NodeDefinition | None = getattr(node, "NAT_DEFINITION", None)
