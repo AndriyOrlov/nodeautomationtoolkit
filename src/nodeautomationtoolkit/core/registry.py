@@ -47,6 +47,7 @@ class NodeRegistry:
             "nodeautomationtoolkit.builtin_nodes.files",
             "nodeautomationtoolkit.builtin_nodes.text",
             "nodeautomationtoolkit.builtin_nodes.logic",
+            "nodeautomationtoolkit.builtin_nodes.windows_dialogs",
         ]
         for module_name in modules:
             module = importlib.import_module(module_name)
@@ -82,4 +83,3 @@ class NodeRegistry:
             definition = getattr(value, "__nat_node_definition__", None)
             if isinstance(definition, NodeDefinition):
                 yield definition
-

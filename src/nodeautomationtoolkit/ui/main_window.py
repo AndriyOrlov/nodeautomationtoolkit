@@ -21,7 +21,9 @@ from nodeautomationtoolkit.core.models import GraphModel
 from nodeautomationtoolkit.core.project import load_graph, save_graph
 from nodeautomationtoolkit.core.registry import NodeRegistry
 
+from .automation_assistant_dialog import AutomationAssistantDialog
 from .graph_view import GraphScene, GraphView, NodePalette
+from .node_assistant_dialog import NodeAssistantDialog
 from .properties import PropertiesPanel
 
 
@@ -86,6 +88,8 @@ class MainWindow(QMainWindow):
             ("Зберегти", QKeySequence.StandardKey.Save, self.save_graph),
             ("Зберегти як", QKeySequence.StandardKey.SaveAs, self.save_graph_as),
             ("Запустити", "F5", self.run_graph),
+            ("AI-сценарій", "Ctrl+Shift+A", self.open_automation_assistant),
+            ("AI-нода", "Ctrl+Shift+N", self.open_node_assistant),
             ("Оновити плагіни", "Ctrl+R", self.reload_plugins),
         ]
         for text, shortcut, callback in actions:
@@ -93,6 +97,16 @@ class MainWindow(QMainWindow):
             action.setShortcut(shortcut)
             action.triggered.connect(callback)
             toolbar.addAction(action)
+
+    def open_node_assistant(self) -> None:
+        dialog = NodeAssistantDialog(self.plugin_dir, self)
+        dialog.node_installed.connect(lambda path: self._log(f"Створено AI-ноду: {path}"))
+        dialog.exec()
+
+    def open_automation_assistant(self) -> None:
+        dialog = AutomationAssistantDialog(self.registry, self.scene.graph, self)
+        dialog.graph_created.connect(self.scene.set_graph)
+        dialog.exec()
 
     def new_graph(self) -> None:
         if not self._confirm_discard():
@@ -237,4 +251,3 @@ class MainWindow(QMainWindow):
             return
         QSettings().setValue("window/geometry", self.saveGeometry())
         event.accept()
-

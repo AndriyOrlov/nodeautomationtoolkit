@@ -5,6 +5,31 @@ from typing import Any
 from nodeautomationtoolkit.core.definition import node
 
 
+@node(name="І", category="Логіка", type_id="builtin.logic.and")
+def logical_and(first: bool, second: bool) -> bool:
+    return first and second
+
+
+@node(name="АБО", category="Логіка", type_id="builtin.logic.or")
+def logical_or(first: bool, second: bool) -> bool:
+    return first or second
+
+
+@node(name="НЕ", category="Логіка", type_id="builtin.logic.not")
+def logical_not(value: bool) -> bool:
+    return not value
+
+
+@node(name="Виключне АБО", category="Логіка", type_id="builtin.logic.xor")
+def logical_xor(first: bool, second: bool) -> bool:
+    return bool(first) ^ bool(second)
+
+
+@node(name="Дорівнює", category="Логіка", type_id="builtin.logic.equals")
+def equals(first: Any, second: Any) -> bool:
+    return first == second
+
+
 @node(name="Умова", category="Логіка", type_id="builtin.logic.if_else")
 def if_else(condition: bool, when_true: Any, when_false: Any) -> Any:
     return when_true if condition else when_false
@@ -28,4 +53,3 @@ def unique(items: list) -> list:
         if item not in result:
             result.append(item)
     return result
-
