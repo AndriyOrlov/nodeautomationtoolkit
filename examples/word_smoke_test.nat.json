@@ -1,0 +1,64 @@
+{
+  "format": "nodeautomationtoolkit",
+  "version": 1,
+  "name": "Word — швидкий тест",
+  "nodes": [
+    {
+      "id": "start",
+      "type_id": "builtin.flow.start",
+      "x": -720.0,
+      "y": -40.0,
+      "parameters": {}
+    },
+    {
+      "id": "pick-word-file",
+      "type_id": "builtin.windows.open_file",
+      "x": -720.0,
+      "y": 220.0,
+      "parameters": {
+        "title": "Виберіть Word-документ",
+        "file_filter": "Документи Word (*.docx)",
+        "initial_folder": ""
+      }
+    },
+    {
+      "id": "read-word-file",
+      "type_id": "builtin.word.read_docx",
+      "x": -380.0,
+      "y": 180.0,
+      "parameters": {}
+    },
+    {
+      "id": "show-word-text",
+      "type_id": "builtin.output.show_result",
+      "x": 20.0,
+      "y": -40.0,
+      "parameters": {
+        "title": "Текст Word-документа"
+      }
+    }
+  ],
+  "connections": [
+    {
+      "source_node": "start",
+      "source_port": "then",
+      "target_node": "show-word-text",
+      "target_port": "exec",
+      "kind": "execution"
+    },
+    {
+      "source_node": "pick-word-file",
+      "source_port": "result",
+      "target_node": "read-word-file",
+      "target_port": "path",
+      "kind": "data"
+    },
+    {
+      "source_node": "read-word-file",
+      "source_port": "text",
+      "target_node": "show-word-text",
+      "target_port": "value",
+      "kind": "data"
+    }
+  ]
+}

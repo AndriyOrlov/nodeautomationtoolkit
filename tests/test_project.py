@@ -23,3 +23,14 @@ def test_old_connections_default_to_data_kind():
         }
     )
     assert connection.kind == "data"
+
+
+def test_save_graph_creates_missing_parent_directory(tmp_path):
+    target = tmp_path / "persistent" / "graphs" / "test.nat.json"
+    graph = GraphModel(name="Постійний граф")
+
+    from nodeautomationtoolkit.core.project import load_graph, save_graph
+
+    save_graph(graph, target)
+
+    assert load_graph(target).name == "Постійний граф"

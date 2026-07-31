@@ -48,6 +48,8 @@ class NodeRegistry:
             "nodeautomationtoolkit.builtin_nodes.text",
             "nodeautomationtoolkit.builtin_nodes.logic",
             "nodeautomationtoolkit.builtin_nodes.windows_dialogs",
+            "nodeautomationtoolkit.builtin_nodes.word",
+            "nodeautomationtoolkit.builtin_nodes.output",
         ]
         for module_name in modules:
             module = importlib.import_module(module_name)
