@@ -1,0 +1,43 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "nodeautomationtoolkit"
+version = "0.1.0"
+description = "Local visual automation toolkit with Python-powered nodes"
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "MIT" }
+authors = [{ name = "Andrii Orlov" }]
+dependencies = [
+  "PySide6>=6.7,<7",
+]
+
+[project.optional-dependencies]
+windows = [
+  "pywin32>=306; platform_system == 'Windows'",
+  "openpyxl>=3.1",
+]
+dev = [
+  "pytest>=8.2",
+  "ruff>=0.6",
+]
+
+[project.scripts]
+nodeautomationtoolkit = "nodeautomationtoolkit.app:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/nodeautomationtoolkit"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
