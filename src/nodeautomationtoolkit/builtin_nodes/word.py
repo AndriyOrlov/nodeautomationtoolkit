@@ -129,6 +129,7 @@ def paragraphs_to_text(paragraphs: WordParagraphs, separator: str = "\n") -> str
     type_id="builtin.word.create_docx",
     execution_inputs=("exec",),
     execution_outputs=("then",),
+    preview_policy="never",
 )
 def create_docx(text: str, output_path: str, title: str = "") -> WordSaveResult:
     target_path = _validated_docx_path(output_path, must_exist=False)
@@ -156,6 +157,7 @@ def create_docx(text: str, output_path: str, title: str = "") -> WordSaveResult:
     type_id="builtin.word.save_selected_paragraphs",
     execution_inputs=("exec",),
     execution_outputs=("then",),
+    preview_policy="never",
 )
 def save_selected_paragraphs(
     document: WordDocument,

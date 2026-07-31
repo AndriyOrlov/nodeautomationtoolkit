@@ -17,12 +17,16 @@ def _qt_widgets():
     category="Windows",
     description="Показує стандартне системне вікно Windows і повертає вибраний шлях.",
     type_id="builtin.windows.open_file",
+    preview_policy="manual",
 )
 def open_file_dialog(
     title: str = "Виберіть файл",
     file_filter: str = "Усі файли (*.*)",
     initial_folder: str = "",
+    selected_path: str = "",
 ) -> str:
+    if selected_path:
+        return selected_path
     file_dialog = _qt_widgets()
     path, _selected_filter = file_dialog.getOpenFileName(
         None,
@@ -38,6 +42,7 @@ def open_file_dialog(
     category="Windows",
     description="Показує стандартне системне вікно Windows для вибору кількох файлів.",
     type_id="builtin.windows.open_files",
+    preview_policy="manual",
 )
 def open_files_dialog(
     title: str = "Виберіть файли",
@@ -59,6 +64,7 @@ def open_files_dialog(
     category="Windows",
     description="Показує стандартне системне вікно Windows для вибору папки.",
     type_id="builtin.windows.select_folder",
+    preview_policy="manual",
 )
 def select_folder_dialog(
     title: str = "Виберіть папку",
@@ -73,6 +79,7 @@ def select_folder_dialog(
     category="Windows",
     description="Показує стандартне системне вікно Windows і повертає шлях збереження.",
     type_id="builtin.windows.save_file",
+    preview_policy="manual",
 )
 def save_file_dialog(
     title: str = "Зберегти файл як",

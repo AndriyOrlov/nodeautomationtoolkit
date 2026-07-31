@@ -52,6 +52,7 @@ def _show_result_dialog(title: str, text: str) -> None:
     description="Фінальна тестова нода: показує отримане значення в окремому вікні.",
     type_id="builtin.output.show_result",
     execution_inputs=("exec",),
+    preview_policy="never",
 )
 def show_result(value: Any, title: str = "Результат") -> Any:
     _show_result_dialog(title, format_result(value))

@@ -2,13 +2,31 @@ from __future__ import annotations
 
 import hashlib
 import re
+from collections import deque
 from typing import Any
 
-from PySide6.QtCore import Signal
-from PySide6.QtWidgets import QSplitter, QVBoxLayout, QWidget
+from PySide6.QtCore import QObject, QRunnable, Qt, QThreadPool, QTimer, Signal
+from PySide6.QtGui import QAction, QKeySequence
+from PySide6.QtWidgets import (
+    QApplication,
+    QCheckBox,
+    QFileDialog,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QPlainTextEdit,
+    QPushButton,
+    QSplitter,
+    QStyle,
+    QTextEdit,
+    QVBoxLayout,
+    QWidget,
+)
 
 from nodeautomationtoolkit.core.definition import NodeDefinition, PortDefinition, PortKind
+from nodeautomationtoolkit.core.executor import GraphExecutor, PreviewResult
 from nodeautomationtoolkit.core.models import ConnectionModel, GraphModel, NodeModel
+from nodeautomationtoolkit.core.preview import format_live_preview
 from nodeautomationtoolkit.core.registry import NodeRegistry
 
 TYPE_COLORS = {
@@ -25,6 +43,42 @@ TYPE_COLORS = {
     "WordSaveResult": (22, 163, 74),
 }
 EXECUTION_COLOR = (245, 245, 245)
+NODE_STATE_COLORS = {
+    "idle": (15, 118, 110),
+    "running": (180, 83, 9),
+    "success": (21, 128, 61),
+    "error": (185, 28, 28),
+}
+
+
+class _PreviewWorkerSignals(QObject):
+    finished = Signal(int, object)
+
+
+class _PreviewWorker(QRunnable):
+    def __init__(
+        self,
+        generation: int,
+        registry: NodeRegistry,
+        graph: GraphModel,
+        trigger_node_id: str | None,
+        initial_values: dict[str, dict[str, Any]],
+    ) -> None:
+        super().__init__()
+        self.generation = generation
+        self.registry = registry
+        self.graph = graph
+        self.trigger_node_id = trigger_node_id
+        self.initial_values = initial_values
+        self.signals = _PreviewWorkerSignals()
+
+    def run(self) -> None:
+        result = GraphExecutor(self.registry).preview(
+            self.graph,
+            trigger_node_id=self.trigger_node_id,
+            initial_values=self.initial_values,
+        )
+        self.signals.finished.emit(self.generation, result)
 
 
 def port_color(port: PortDefinition) -> tuple[int, int, int]:
@@ -39,20 +93,126 @@ def _safe_class_name(type_id: str) -> str:
     return f"Nat_{stem}_{digest}"
 
 
-def create_nodegraphqt_class(definition: NodeDefinition):
+def _node_widget_classes():
+    from NodeGraphQt.widgets.node_widgets import NodeBaseWidget
+
+    class NodeStatusWidget(NodeBaseWidget):
+        def __init__(self, parent=None, name="_nat_status") -> None:
+            super().__init__(parent, name, "Стан")
+            self._label_widget = QLabel("ОЧІКУЄ")
+            self._label_widget.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            self._label_widget.setMinimumWidth(220)
+            self.set_custom_widget(self._label_widget)
+            self.set_state("idle", "ОЧІКУЄ")
+
+        def get_value(self):
+            return self._label_widget.text()
+
+        def set_value(self, value):
+            self._label_widget.setText(str(value))
+
+        def set_state(self, state: str, text: str) -> None:
+            colors = {
+                "idle": (51, 65, 85),
+                "running": (180, 83, 9),
+                "success": (21, 128, 61),
+                "error": (185, 28, 28),
+            }
+            red, green, blue = colors.get(state, colors["idle"])
+            self._label_widget.setText(text)
+            self._label_widget.setStyleSheet(
+                "QLabel {"
+                f"background: rgb({red}, {green}, {blue});"
+                "border-radius: 4px; color: white; font-weight: 700;"
+                "padding: 4px 8px;"
+                "}"
+            )
+
+    class NodePreviewWidget(NodeBaseWidget):
+        def __init__(self, parent=None, name="_nat_preview") -> None:
+            super().__init__(parent, name, "Прев'ю")
+            self._label_widget = QLabel("Результат ще не обчислено")
+            self._label_widget.setWordWrap(True)
+            self._label_widget.setMinimumWidth(250)
+            self._label_widget.setMaximumWidth(310)
+            self._label_widget.setMaximumHeight(88)
+            self._label_widget.setTextInteractionFlags(
+                Qt.TextInteractionFlag.TextSelectableByMouse
+            )
+            self._label_widget.setStyleSheet(
+                "QLabel { background: rgba(15, 23, 42, 180);"
+                "border: 1px solid rgba(148, 163, 184, 90);"
+                "border-radius: 4px; color: #dbeafe; padding: 6px; }"
+            )
+            self.set_custom_widget(self._label_widget)
+
+        def get_value(self):
+            return self._label_widget.text()
+
+        def set_value(self, value):
+            text = str(value)
+            self._label_widget.setText(text)
+            self._label_widget.setToolTip(text)
+
+    return NodeStatusWidget, NodePreviewWidget
+
+
+def create_nodegraphqt_class(
+    definition: NodeDefinition,
+    action_handler,
+):
     """Build a NodeGraphQt class lazily so core tests need no display server."""
     from NodeGraphQt import BaseNode
 
+    NodeStatusWidget, NodePreviewWidget = _node_widget_classes()
+
     def init(self) -> None:
         BaseNode.__init__(self)
-        self.set_color(15, 118, 110)
+        self.set_color(*NODE_STATE_COLORS["idle"])
         for port in definition.execution_inputs + definition.inputs:
             self.add_input(port.name, multi_input=False, color=port_color(port))
         for port in definition.execution_outputs + definition.outputs:
             self.add_output(port.name, multi_output=True, color=port_color(port))
+
+        hidden_inputs = set()
+        if definition.type_id == "builtin.windows.open_file":
+            hidden_inputs = {"title", "file_filter", "initial_folder"}
         for port in definition.inputs:
-            if not port.required:
-                _add_parameter_widget(self, port)
+            if not port.required and port.name not in hidden_inputs:
+                label = "Файл" if port.name == "selected_path" else ""
+                _add_parameter_widget(self, port, label=label)
+
+        self.add_custom_widget(NodeStatusWidget(self.view))
+        self.add_button(
+            "_nat_run",
+            text="Виконати ноду",
+            tooltip="Виконати цю ноду та потрібні їй вхідні ноди",
+        )
+        run_button = self.get_widget("_nat_run")
+        run_control = run_button.get_custom_widget()
+        run_control.setIcon(
+            run_control.style().standardIcon(QStyle.StandardPixmap.SP_MediaPlay)
+        )
+        run_button.value_changed.connect(lambda *_args: action_handler("run", self))
+
+        if definition.type_id == "builtin.windows.open_file":
+            self.add_button(
+                "_nat_pick_file",
+                text="Вибрати файл…",
+                tooltip="Відкрити системне вікно вибору файла",
+            )
+            picker = self.get_widget("_nat_pick_file")
+            picker_control = picker.get_custom_widget()
+            picker_control.setIcon(
+                picker_control.style().standardIcon(
+                    QStyle.StandardPixmap.SP_DialogOpenButton
+                )
+            )
+            picker.value_changed.connect(
+                lambda *_args: action_handler("pick_file", self)
+            )
+
+        self.add_custom_widget(NodePreviewWidget(self.view))
 
     category = re.sub(r"[^a-zA-Z0-9]+", "_", definition.category).strip("_")
     attributes: dict[str, Any] = {
@@ -65,13 +225,14 @@ def create_nodegraphqt_class(definition: NodeDefinition):
     return type(_safe_class_name(definition.type_id), (BaseNode,), attributes)
 
 
-def _add_parameter_widget(node, port: PortDefinition) -> None:
+def _add_parameter_widget(node, port: PortDefinition, *, label: str = "") -> None:
     value = port.default
     if port.data_type == "bool" or isinstance(value, bool):
-        node.add_checkbox(port.name, state=bool(value))
+        node.add_checkbox(port.name, label=label, state=bool(value))
     elif port.data_type == "int" or isinstance(value, int):
         node.add_spinbox(
             port.name,
+            label=label,
             value=int(value or 0),
             min_value=-1_000_000_000,
             max_value=1_000_000_000,
@@ -79,17 +240,23 @@ def _add_parameter_widget(node, port: PortDefinition) -> None:
     elif port.data_type == "float" or isinstance(value, float):
         node.add_spinbox(
             port.name,
+            label=label,
             value=float(value or 0),
             min_value=-1_000_000_000,
             max_value=1_000_000_000,
             double=True,
         )
     else:
-        node.add_text_input(port.name, text="" if value is None else str(value))
+        node.add_text_input(
+            port.name,
+            label=label,
+            text="" if value is None else str(value),
+        )
 
 
 class NodeGraphQtEditor(QWidget):
     graph_changed = Signal()
+    message = Signal(str)
 
     def __init__(self, registry: NodeRegistry, parent=None) -> None:
         super().__init__(parent)
@@ -98,6 +265,16 @@ class NodeGraphQtEditor(QWidget):
 
         self.registry = registry
         self._graph_name = "Новий сценарій"
+        self._loading = False
+        self._live_values: dict[str, dict[str, Any]] = {}
+        self._preview_generation = 0
+        self._pending_live_node: str | None = None
+        self._live_timer = QTimer(self)
+        self._live_timer.setSingleShot(True)
+        self._live_timer.setInterval(240)
+        self._live_timer.timeout.connect(self._start_live_preview)
+        self._thread_pool = QThreadPool.globalInstance()
+
         self.graph = NodeGraph()
         self.graph.set_acyclic(True)
         self.graph.set_background_color(11, 17, 32)
@@ -113,50 +290,337 @@ class NodeGraphQtEditor(QWidget):
         splitter.addWidget(self.properties)
         splitter.setSizes([260, 900, 300])
 
+        self.live_toggle = QCheckBox("Live-прев'ю")
+        self.live_toggle.setChecked(True)
+        self.live_toggle.setToolTip(
+            "Автоматично перераховувати безпечні ноди після зміни параметрів"
+        )
+        self.live_toggle.toggled.connect(self._on_live_toggled)
+        run_selected = QPushButton("Виконати вибрану")
+        run_selected.setIcon(
+            self.style().standardIcon(QStyle.StandardPixmap.SP_MediaPlay)
+        )
+        run_selected.clicked.connect(self.run_selected_node)
+        delete_selected = QPushButton("Видалити")
+        delete_selected.setIcon(
+            self.style().standardIcon(QStyle.StandardPixmap.SP_TrashIcon)
+        )
+        delete_selected.clicked.connect(self.delete_selected_nodes)
+        self.live_status = QLabel("LIVE · очікує змін")
+        self.live_status.setStyleSheet("color: #93c5fd; padding: 0 8px;")
+
+        controls = QHBoxLayout()
+        controls.setContentsMargins(8, 5, 8, 5)
+        controls.addWidget(self.live_toggle)
+        controls.addWidget(run_selected)
+        controls.addWidget(delete_selected)
+        controls.addWidget(self.live_status)
+        controls.addStretch(1)
+
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
+        layout.addLayout(controls)
         layout.addWidget(splitter)
 
-        self.graph.node_created.connect(lambda _node: self.graph_changed.emit())
-        self.graph.nodes_deleted.connect(lambda _ids: self.graph_changed.emit())
-        self.graph.port_connected.connect(lambda _a, _b: self.graph_changed.emit())
-        self.graph.port_disconnected.connect(lambda _a, _b: self.graph_changed.emit())
-        self.graph.property_changed.connect(
-            lambda _node, _name, _value: self.graph_changed.emit()
-        )
+        delete_action = QAction("Видалити вибране", self)
+        delete_action.setShortcut(QKeySequence(Qt.Key.Key_Delete))
+        delete_action.setShortcutContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        delete_action.triggered.connect(self._delete_from_shortcut)
+        self.addAction(delete_action)
+        run_action = QAction("Виконати вибрану ноду", self)
+        run_action.setShortcut(QKeySequence("F6"))
+        run_action.setShortcutContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        run_action.triggered.connect(self.run_selected_node)
+        self.addAction(run_action)
+
+        self.graph.node_created.connect(self._on_node_created)
+        self.graph.nodes_deleted.connect(self._on_nodes_deleted)
+        self.graph.port_connected.connect(self._on_connection_changed)
+        self.graph.port_disconnected.connect(self._on_connection_changed)
+        self.graph.property_changed.connect(self._on_property_changed)
 
     def _register_definitions(self) -> None:
+        node_menu = self.graph.get_context_menu("nodes")
         for definition in self.registry.all():
-            self.graph.register_node(
-                create_nodegraphqt_class(definition),
-                alias=definition.type_id,
+            node_class = create_nodegraphqt_class(
+                definition,
+                self._handle_node_action,
+            )
+            self.graph.register_node(node_class, alias=definition.type_id)
+            node_menu.add_command(
+                "Виконати цю ноду",
+                func=lambda _graph, node: self.run_node(node.id),
+                node_class=node_class,
+            )
+            node_menu.add_command(
+                "Видалити ноду",
+                func=lambda graph, node: graph.delete_node(node),
+                node_class=node_class,
             )
 
-    def set_graph_model(self, model: GraphModel) -> None:
-        self._graph_name = model.name
-        self.graph.clear_session()
-        created = {}
-        for item in model.nodes:
-            node = self.graph.create_node(
-                item.type_id,
-                pos=(item.x, item.y),
-                push_undo=False,
-            )
-            if node is None:
-                raise ValueError(f"Не вдалося створити ноду {item.type_id}")
-            for name, value in item.parameters.items():
-                if node.has_property(name):
-                    node.set_property(name, value, push_undo=False)
-            created[item.id] = node
-        for connection in model.connections:
-            source = created[connection.source_node]
-            target = created[connection.target_node]
-            source.get_output(connection.source_port).connect_to(
-                target.get_input(connection.target_port),
-                push_undo=False,
-            )
-        self.graph.clear_undo_stack()
+    def _handle_node_action(self, action: str, node) -> None:
+        if action == "pick_file":
+            self._pick_file(node)
+        elif action == "run":
+            self.run_node(node.id)
+
+    def _pick_file(self, node) -> None:
+        definition: NodeDefinition = node.NAT_DEFINITION
+        defaults = {port.name: port.default for port in definition.inputs}
+        title = node.get_property("title") if node.has_property("title") else None
+        file_filter = (
+            node.get_property("file_filter") if node.has_property("file_filter") else None
+        )
+        initial_folder = (
+            node.get_property("initial_folder")
+            if node.has_property("initial_folder")
+            else None
+        )
+        current_path = (
+            node.get_property("selected_path")
+            if node.has_property("selected_path")
+            else ""
+        )
+        if current_path:
+            initial_folder = current_path
+        path, _selected_filter = QFileDialog.getOpenFileName(
+            self,
+            title or defaults.get("title") or "Виберіть файл",
+            initial_folder or defaults.get("initial_folder") or "",
+            file_filter or defaults.get("file_filter") or "Усі файли (*.*)",
+        )
+        if not path:
+            return
+        node.set_property("selected_path", path)
+        self._invalidate_from(node.id)
+        self._schedule_live_preview(node.id)
         self.graph_changed.emit()
+        self.message.emit(f"Вибрано файл: {path}")
+
+    def delete_selected_nodes(self) -> None:
+        nodes = self.graph.selected_nodes()
+        if not nodes:
+            self.message.emit("Спочатку виберіть ноду")
+            return
+        count = len(nodes)
+        self.graph.delete_nodes(nodes)
+        self._live_values.clear()
+        self.message.emit(f"Видалено нод: {count}")
+
+    def _delete_from_shortcut(self) -> None:
+        focus = QApplication.focusWidget()
+        if isinstance(focus, (QLineEdit, QPlainTextEdit, QTextEdit)):
+            return
+        self.delete_selected_nodes()
+
+    def run_selected_node(self) -> None:
+        nodes = self.graph.selected_nodes()
+        if not nodes:
+            self.message.emit("Спочатку виберіть ноду")
+            return
+        self.run_node(nodes[0].id)
+
+    def run_graph(self) -> None:
+        graph = self.graph_model()
+        self._live_values.clear()
+        self._invalidate_from(None)
+        try:
+            result = GraphExecutor(self.registry).execute(
+                graph,
+                on_node_started=lambda current: self._set_node_state(
+                    current, "running", "ВИКОНУЄТЬСЯ"
+                ),
+                on_node_finished=lambda current, outputs: self._show_node_outputs(
+                    current, outputs
+                ),
+            )
+            self._live_values.update(result.values)
+            self.message.emit(f"Граф виконано. Нод: {len(result.order)}")
+        except Exception as error:  # noqa: BLE001 - graph run boundary
+            self.message.emit(f"ПОМИЛКА ГРАФА: {error}")
+            raise
+
+    def run_node(self, node_id: str) -> None:
+        graph = self.graph_model()
+        self._invalidate_from(node_id)
+        executor = GraphExecutor(self.registry)
+        try:
+            result = executor.execute_target(
+                graph,
+                node_id,
+                on_node_started=lambda current: self._set_node_state(
+                    current, "running", "ВИКОНУЄТЬСЯ"
+                ),
+                on_node_finished=lambda current, outputs: self._show_node_outputs(
+                    current, outputs
+                ),
+            )
+            self._live_values.update(result.values)
+            self.message.emit(f"Виконано нод: {len(result.order)}")
+            if self.live_toggle.isChecked():
+                self._schedule_live_preview(None)
+        except Exception as error:  # noqa: BLE001 - explicit node run boundary
+            self._set_node_state(node_id, "error", "ПОМИЛКА", str(error))
+            self.message.emit(f"ПОМИЛКА НОДИ: {error}")
+
+    def _on_node_created(self, node) -> None:
+        if self._loading:
+            return
+        self._set_node_state(node.id, "idle", "ОЧІКУЄ")
+        self.graph_changed.emit()
+
+    def _on_nodes_deleted(self, node_ids) -> None:
+        for node_id in node_ids:
+            self._live_values.pop(node_id, None)
+        if not self._loading:
+            self.graph_changed.emit()
+
+    def _on_connection_changed(self, _first, _second) -> None:
+        if self._loading:
+            return
+        self._live_values.clear()
+        self.graph_changed.emit()
+        self._schedule_live_preview(None)
+
+    def _on_property_changed(self, node, name: str, _value: Any) -> None:
+        if self._loading or name.startswith("_nat_"):
+            return
+        self.graph_changed.emit()
+        definition: NodeDefinition | None = getattr(node, "NAT_DEFINITION", None)
+        if definition is None:
+            return
+        if definition.preview_policy == "auto" or name.startswith("selected_"):
+            self._invalidate_from(node.id)
+            self._schedule_live_preview(node.id)
+
+    def _schedule_live_preview(self, node_id: str | None) -> None:
+        if not self.live_toggle.isChecked():
+            return
+        self._preview_generation += 1
+        self._pending_live_node = node_id
+        self._live_timer.start()
+
+    def _start_live_preview(self) -> None:
+        graph = self.graph_model()
+        generation = self._preview_generation
+        self.live_status.setText("LIVE · обчислення…")
+        self.live_status.setStyleSheet("color: #fbbf24; padding: 0 8px;")
+        worker = _PreviewWorker(
+            generation,
+            self.registry,
+            graph,
+            self._pending_live_node,
+            dict(self._live_values),
+        )
+        worker.signals.finished.connect(self._apply_live_result)
+        self._thread_pool.start(worker)
+
+    def _on_live_toggled(self, checked: bool) -> None:
+        if checked:
+            self._schedule_live_preview(None)
+        else:
+            self._preview_generation += 1
+            self._live_timer.stop()
+            self.live_status.setText("LIVE · вимкнено")
+            self.live_status.setStyleSheet("color: #94a3b8; padding: 0 8px;")
+
+    def _apply_live_result(self, generation: int, result: PreviewResult) -> None:
+        if generation != self._preview_generation:
+            return
+        self._live_values = result.values
+        for node_id in result.order:
+            self._show_node_outputs(node_id, result.values[node_id])
+        for node_id, error in result.errors.items():
+            self._set_node_state(node_id, "error", "ПОМИЛКА", error)
+        if result.errors:
+            self.live_status.setText(f"LIVE · помилок: {len(result.errors)}")
+            self.live_status.setStyleSheet("color: #f87171; padding: 0 8px;")
+        else:
+            self.live_status.setText("LIVE · актуально")
+            self.live_status.setStyleSheet("color: #4ade80; padding: 0 8px;")
+
+    def _show_node_outputs(self, node_id: str, outputs: dict[str, Any]) -> None:
+        self._set_node_state(
+            node_id,
+            "success",
+            "ГОТОВО",
+            format_live_preview(outputs),
+        )
+
+    def _set_node_state(
+        self,
+        node_id: str,
+        state: str,
+        label: str,
+        preview: str | None = None,
+    ) -> None:
+        node = self.graph.get_node_by_id(node_id)
+        if node is None:
+            return
+        node.set_color(*NODE_STATE_COLORS.get(state, NODE_STATE_COLORS["idle"]))
+        status_widget = node.get_widget("_nat_status")
+        if status_widget is not None:
+            status_widget.set_state(state, label)
+        if preview is not None:
+            preview_widget = node.get_widget("_nat_preview")
+            if preview_widget is not None:
+                preview_widget.set_value(preview)
+
+    def _invalidate_from(self, node_id: str | None) -> set[str]:
+        graph = self.graph_model()
+        if node_id is None:
+            invalidated = {node.id for node in graph.nodes}
+        else:
+            outgoing: dict[str, list[str]] = {}
+            for connection in graph.connections:
+                if connection.kind == "data":
+                    outgoing.setdefault(connection.source_node, []).append(
+                        connection.target_node
+                    )
+            invalidated = set()
+            queue = deque([node_id])
+            while queue:
+                current = queue.popleft()
+                if current in invalidated:
+                    continue
+                invalidated.add(current)
+                queue.extend(outgoing.get(current, []))
+        for current in invalidated:
+            self._live_values.pop(current, None)
+            self._set_node_state(current, "idle", "ОЧІКУЄ")
+        return invalidated
+
+    def set_graph_model(self, model: GraphModel) -> None:
+        self._loading = True
+        self._graph_name = model.name
+        self._live_values.clear()
+        try:
+            self.graph.clear_session()
+            created = {}
+            for item in model.nodes:
+                node = self.graph.create_node(
+                    item.type_id,
+                    pos=(item.x, item.y),
+                    push_undo=False,
+                )
+                if node is None:
+                    raise ValueError(f"Не вдалося створити ноду {item.type_id}")
+                for name, value in item.parameters.items():
+                    if node.has_property(name):
+                        node.set_property(name, value, push_undo=False)
+                created[item.id] = node
+            for connection in model.connections:
+                source = created[connection.source_node]
+                target = created[connection.target_node]
+                source.get_output(connection.source_port).connect_to(
+                    target.get_input(connection.target_port),
+                    push_undo=False,
+                )
+            self.graph.clear_undo_stack()
+        finally:
+            self._loading = False
+        self.graph_changed.emit()
+        self._schedule_live_preview(None)
 
     def graph_model(self) -> GraphModel:
         model = GraphModel(name=self._graph_name)

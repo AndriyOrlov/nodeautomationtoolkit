@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
 
 from nodeautomationtoolkit.core.executor import GraphExecutor
 from nodeautomationtoolkit.core.models import GraphModel
+from nodeautomationtoolkit.core.patching import install_patch
 from nodeautomationtoolkit.core.project import load_graph, save_graph
 from nodeautomationtoolkit.core.registry import NodeRegistry
 from nodeautomationtoolkit.core.templates import build_word_smoke_graph
@@ -98,6 +99,7 @@ class MainWindow(QMainWindow):
         self.scene.node_selected.connect(self.properties.show_node)
         self.scene.graph_changed.connect(self._mark_dirty)
         self.blueprint.graph_changed.connect(self._mark_dirty)
+        self.blueprint.message.connect(self._log)
         self.scene.message.connect(self._log)
         self.properties.changed.connect(self._mark_dirty)
         self._create_toolbar()
@@ -121,12 +123,35 @@ class MainWindow(QMainWindow):
             ("AI-сценарій", "Ctrl+Shift+A", self.open_automation_assistant),
             ("AI-нода", "Ctrl+Shift+N", self.open_node_assistant),
             ("Оновити плагіни", "Ctrl+R", self.reload_plugins),
+            ("Встановити патч", "Ctrl+Shift+P", self.install_offline_patch),
         ]
         for text, shortcut, callback in actions:
             action = QAction(text, self)
             action.setShortcut(shortcut)
             action.triggered.connect(callback)
             toolbar.addAction(action)
+
+    def install_offline_patch(self) -> None:
+        filename, _ = QFileDialog.getOpenFileName(
+            self,
+            "Встановити офлайн-патч",
+            "",
+            "Node Automation Toolkit patch (*.natpatch.zip);;ZIP (*.zip)",
+        )
+        if not filename:
+            return
+        try:
+            installed = install_patch(Path(filename), self.app_data_dir)
+        except Exception as error:  # noqa: BLE001 - local patch boundary
+            QMessageBox.critical(self, "Патч не встановлено", str(error))
+            return
+        self._log(f"Встановлено патч {installed.version}")
+        QMessageBox.information(
+            self,
+            "Патч встановлено",
+            f"Версію {installed.version} встановлено.\n\n"
+            "Збережіть граф і один раз перезапустіть програму.",
+        )
 
     def open_node_assistant(self) -> None:
         dialog = NodeAssistantDialog(self.plugin_dir, self)
@@ -220,6 +245,9 @@ class MainWindow(QMainWindow):
     def run_graph(self) -> None:
         self._log("Запуск сценарію…")
         try:
+            if self.editor_tabs.currentWidget() is self.blueprint:
+                self.blueprint.run_graph()
+                return
             graph = self._current_graph()
             names = {
                 node.id: self.registry.get(node.type_id).name for node in graph.nodes

@@ -16,6 +16,13 @@ class ExecutionResult:
     order: list[str] = field(default_factory=list)
 
 
+@dataclass(slots=True)
+class PreviewResult:
+    values: dict[str, dict[str, Any]] = field(default_factory=dict)
+    errors: dict[str, str] = field(default_factory=dict)
+    order: list[str] = field(default_factory=list)
+
+
 class GraphExecutor:
     def __init__(self, registry: NodeRegistry) -> None:
         self.registry = registry
@@ -70,6 +77,100 @@ class GraphExecutor:
                 on_node_finished(node_id, outputs)
 
         return ExecutionResult(values=results, order=order)
+
+    def execute_target(
+        self,
+        graph: GraphModel,
+        node_id: str,
+        on_node_started: Callable[[str], None] | None = None,
+        on_node_finished: Callable[[str, dict[str, Any]], None] | None = None,
+    ) -> ExecutionResult:
+        graph.node_by_id(node_id)
+        results: dict[str, dict[str, Any]] = {}
+        order: list[str] = []
+        incoming = defaultdict(list)
+        for connection in graph.connections:
+            if connection.kind == "data":
+                incoming[connection.target_node].append(connection)
+        self._execute_one_node(
+            graph,
+            node_id,
+            incoming,
+            results,
+            order,
+            on_node_started,
+            on_node_finished,
+            allow_flow_dependency=True,
+        )
+        return ExecutionResult(values=results, order=order)
+
+    def preview(
+        self,
+        graph: GraphModel,
+        *,
+        trigger_node_id: str | None = None,
+        initial_values: dict[str, dict[str, Any]] | None = None,
+        on_node_started: Callable[[str], None] | None = None,
+        on_node_finished: Callable[[str, dict[str, Any]], None] | None = None,
+        on_node_failed: Callable[[str, str], None] | None = None,
+    ) -> PreviewResult:
+        results = dict(initial_values or {})
+        errors: dict[str, str] = {}
+        executed_order: list[str] = []
+        incoming = defaultdict(list)
+        for connection in graph.connections:
+            if connection.kind == "data":
+                incoming[connection.target_node].append(connection)
+
+        for node_id in self._topological_order(graph):
+            if node_id in results:
+                continue
+            model = graph.node_by_id(node_id)
+            definition = self.registry.get(model.type_id)
+            if definition.execution_inputs or definition.preview_policy == "never":
+                continue
+            if definition.preview_policy == "manual" and node_id != trigger_node_id:
+                has_saved_selection = any(
+                    key.startswith("selected_") and bool(value)
+                    for key, value in model.parameters.items()
+                )
+                if not has_saved_selection:
+                    continue
+
+            kwargs = dict(model.parameters)
+            unresolved = False
+            for connection in incoming[node_id]:
+                source_values = results.get(connection.source_node)
+                if source_values is None or connection.source_port not in source_values:
+                    unresolved = True
+                    break
+                kwargs[connection.target_port] = source_values[connection.source_port]
+            if unresolved:
+                continue
+            if any(port.required and port.name not in kwargs for port in definition.inputs):
+                continue
+            for port in definition.inputs:
+                if port.name not in kwargs and not port.required:
+                    kwargs[port.name] = port.default
+
+            if on_node_started:
+                on_node_started(node_id)
+            try:
+                value = definition.function(**kwargs)
+                if inspect.isawaitable(value):
+                    raise RuntimeError("Async-ноди не підтримують live-прев'ю")
+                outputs = self._map_outputs(definition.outputs, value)
+                results[node_id] = outputs
+                executed_order.append(node_id)
+                if on_node_finished:
+                    on_node_finished(node_id, outputs)
+            except Exception as error:  # noqa: BLE001 - live preview boundary
+                message = str(error)
+                errors[node_id] = message
+                if on_node_failed:
+                    on_node_failed(node_id, message)
+
+        return PreviewResult(values=results, errors=errors, order=executed_order)
 
     def _execute_control_flow(
         self,
