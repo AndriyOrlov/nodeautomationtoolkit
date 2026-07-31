@@ -82,3 +82,39 @@ def test_execution_graph_follows_selected_branch():
 
     assert "true" in result.order
     assert "false" not in result.order
+
+
+def test_execute_target_runs_only_required_dependencies():
+    registry = build_registry()
+    first = NodeModel(id="first", type_id="test.value", parameters={"number": 4})
+    unused = NodeModel(id="unused", type_id="test.value", parameters={"number": 99})
+    addition = NodeModel(
+        id="addition",
+        type_id="test.add",
+        parameters={"second": 3},
+    )
+    graph = GraphModel(
+        nodes=[first, unused, addition],
+        connections=[ConnectionModel("first", "result", "addition", "first")],
+    )
+
+    result = GraphExecutor(registry).execute_target(graph, "addition")
+
+    assert result.order == ["first", "addition"]
+    assert result.values["addition"]["result"] == 7
+
+
+def test_preview_skips_manual_node_until_triggered():
+    @node(type_id="test.manual", preview_policy="manual")
+    def manual(value: str = "ready") -> str:
+        return value
+
+    registry = NodeRegistry()
+    registry.register(manual.__nat_node_definition__)
+    graph = GraphModel(nodes=[NodeModel(id="manual", type_id="test.manual")])
+
+    skipped = GraphExecutor(registry).preview(graph)
+    executed = GraphExecutor(registry).preview(graph, trigger_node_id="manual")
+
+    assert skipped.order == []
+    assert executed.values["manual"]["result"] == "ready"
