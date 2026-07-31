@@ -1,0 +1,30 @@
+{
+  "format": "nodeautomationtoolkit",
+  "version": 1,
+  "name": "Базова робота з текстом",
+  "nodes": [
+    {
+      "id": "input-text",
+      "type_id": "builtin.text.value",
+      "x": -280.0,
+      "y": -80.0,
+      "parameters": {"value": "  Приклад   тексту  "}
+    },
+    {
+      "id": "normalize-text",
+      "type_id": "builtin.text.normalize",
+      "x": 40.0,
+      "y": -80.0,
+      "parameters": {}
+    }
+  ],
+  "connections": [
+    {
+      "source_node": "input-text",
+      "source_port": "result",
+      "target_node": "normalize-text",
+      "target_port": "text"
+    }
+  ]
+}
+
