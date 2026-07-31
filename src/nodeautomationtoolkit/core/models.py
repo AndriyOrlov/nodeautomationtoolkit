@@ -39,6 +39,7 @@ class ConnectionModel:
     source_port: str
     target_node: str
     target_port: str
+    kind: str = "data"
 
     def to_dict(self) -> dict[str, str]:
         return {
@@ -46,6 +47,7 @@ class ConnectionModel:
             "source_port": self.source_port,
             "target_node": self.target_node,
             "target_port": self.target_port,
+            "kind": self.kind,
         }
 
     @classmethod
@@ -55,6 +57,7 @@ class ConnectionModel:
             source_port=str(data["source_port"]),
             target_node=str(data["target_node"]),
             target_port=str(data["target_port"]),
+            kind=str(data.get("kind", "data")),
         )
 
 

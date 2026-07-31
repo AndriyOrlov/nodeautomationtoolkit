@@ -3,6 +3,7 @@ from __future__ import annotations
 import inspect
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from enum import StrEnum
 from types import UnionType
 from typing import Any, Union, get_args, get_origin, get_type_hints
 
@@ -19,12 +20,18 @@ def type_name(annotation: Any) -> str:
     return getattr(annotation, "__name__", str(annotation).replace("typing.", ""))
 
 
+class PortKind(StrEnum):
+    DATA = "data"
+    EXECUTION = "execution"
+
+
 @dataclass(frozen=True, slots=True)
 class PortDefinition:
     name: str
     data_type: str = "Any"
     required: bool = True
     default: Any = None
+    kind: PortKind = PortKind.DATA
 
 
 @dataclass(slots=True)
@@ -36,6 +43,9 @@ class NodeDefinition:
     function: Callable[..., Any]
     inputs: list[PortDefinition] = field(default_factory=list)
     outputs: list[PortDefinition] = field(default_factory=list)
+    execution_inputs: list[PortDefinition] = field(default_factory=list)
+    execution_outputs: list[PortDefinition] = field(default_factory=list)
+    execution_router: str = "all"
 
 
 def _definition_from_function(
@@ -46,6 +56,9 @@ def _definition_from_function(
     description: str,
     type_id: str | None,
     outputs: dict[str, str] | None,
+    execution_inputs: tuple[str, ...],
+    execution_outputs: tuple[str, ...],
+    execution_router: str,
 ) -> NodeDefinition:
     signature = inspect.signature(function)
     try:
@@ -65,7 +78,7 @@ def _definition_from_function(
             )
         )
 
-    if outputs:
+    if outputs is not None:
         output_ports = [
             PortDefinition(name=output_name, data_type=output_type, required=False)
             for output_name, output_type in outputs.items()
@@ -88,6 +101,25 @@ def _definition_from_function(
         function=function,
         inputs=input_ports,
         outputs=output_ports,
+        execution_inputs=[
+            PortDefinition(
+                name=port_name,
+                data_type="Execution",
+                required=False,
+                kind=PortKind.EXECUTION,
+            )
+            for port_name in execution_inputs
+        ],
+        execution_outputs=[
+            PortDefinition(
+                name=port_name,
+                data_type="Execution",
+                required=False,
+                kind=PortKind.EXECUTION,
+            )
+            for port_name in execution_outputs
+        ],
+        execution_router=execution_router,
     )
 
 
@@ -98,6 +130,9 @@ def node(
     description: str = "",
     type_id: str | None = None,
     outputs: dict[str, str] | None = None,
+    execution_inputs: tuple[str, ...] = (),
+    execution_outputs: tuple[str, ...] = (),
+    execution_router: str = "all",
 ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
     """Expose a regular Python function as a visual node."""
 
@@ -109,6 +144,9 @@ def node(
             description=description,
             type_id=type_id,
             outputs=outputs,
+            execution_inputs=execution_inputs,
+            execution_outputs=execution_outputs,
+            execution_router=execution_router,
         )
         function.__nat_node_definition__ = definition
         return function

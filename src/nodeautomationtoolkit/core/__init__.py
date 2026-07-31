@@ -1,5 +1,5 @@
 from .automation_assistant import AutomationAssistant, AutomationPlan
-from .definition import NodeDefinition, PortDefinition, node
+from .definition import NodeDefinition, PortDefinition, PortKind, node
 from .executor import GraphExecutor
 from .local_llm import LocalLlmClient, LocalLlmConfig, LocalLlmProvider
 from .models import ConnectionModel, GraphModel, NodeModel
@@ -21,6 +21,7 @@ __all__ = [
     "NodeDraft",
     "NodeRegistry",
     "PortDefinition",
+    "PortKind",
     "install_node_draft",
     "node",
     "review_node_code",

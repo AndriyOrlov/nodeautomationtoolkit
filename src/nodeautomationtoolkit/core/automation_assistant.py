@@ -26,6 +26,7 @@ class ConnectAction(BaseModel):
     source_port: str
     target_alias: str
     target_port: str
+    kind: Literal["data", "execution"] = "data"
 
 
 class SetParameterAction(BaseModel):
@@ -153,6 +154,8 @@ class AutomationAssistant:
                     {"name": port.name, "type": port.data_type}
                     for port in definition.outputs
                 ],
+                "execution_inputs": [port.name for port in definition.execution_inputs],
+                "execution_outputs": [port.name for port in definition.execution_outputs],
             }
             for definition in self.registry.all()
         ]
@@ -192,8 +195,16 @@ class AutomationAssistant:
             raise ValueError("Ноду не можна з'єднати із самою собою")
         source_definition = self.registry.get(source.type_id)
         target_definition = self.registry.get(target.type_id)
-        source_ports = {port.name: port for port in source_definition.outputs}
-        target_ports = {port.name: port for port in target_definition.inputs}
+        if action.kind == "execution":
+            source_ports = {
+                port.name: port for port in source_definition.execution_outputs
+            }
+            target_ports = {
+                port.name: port for port in target_definition.execution_inputs
+            }
+        else:
+            source_ports = {port.name: port for port in source_definition.outputs}
+            target_ports = {port.name: port for port in target_definition.inputs}
         if action.source_port not in source_ports:
             raise ValueError(
                 f"Немає виходу {source_definition.name}.{action.source_port}"
@@ -204,8 +215,9 @@ class AutomationAssistant:
             )
         source_type = source_ports[action.source_port].data_type
         target_type = target_ports[action.target_port].data_type
-        if "Any" not in (source_type, target_type) and source_type != target_type:
-            raise ValueError(f"Несумісні типи: {source_type} → {target_type}")
+        if action.kind == "data":
+            if "Any" not in (source_type, target_type) and source_type != target_type:
+                raise ValueError(f"Несумісні типи: {source_type} → {target_type}")
         if any(
             item.target_node == target.id and item.target_port == action.target_port
             for item in graph.connections
@@ -219,6 +231,6 @@ class AutomationAssistant:
                 source_port=action.source_port,
                 target_node=target.id,
                 target_port=action.target_port,
+                kind=action.kind,
             )
         )
-

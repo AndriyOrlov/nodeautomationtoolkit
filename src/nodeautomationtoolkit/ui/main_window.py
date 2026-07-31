@@ -11,6 +11,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPlainTextEdit,
     QSplitter,
+    QTabWidget,
     QToolBar,
     QVBoxLayout,
     QWidget,
@@ -24,6 +25,7 @@ from nodeautomationtoolkit.core.registry import NodeRegistry
 from .automation_assistant_dialog import AutomationAssistantDialog
 from .graph_view import GraphScene, GraphView, NodePalette
 from .node_assistant_dialog import NodeAssistantDialog
+from .nodegraphqt_editor import NodeGraphQtEditor
 from .properties import PropertiesPanel
 
 
@@ -39,6 +41,7 @@ class MainWindow(QMainWindow):
 
         self.scene = GraphScene(registry)
         self.view = GraphView(self.scene)
+        self.blueprint = NodeGraphQtEditor(registry)
         self.palette = NodePalette()
         self.search = QLineEdit()
         self.search.setPlaceholderText("Пошук нод…")
@@ -62,14 +65,19 @@ class MainWindow(QMainWindow):
         horizontal.addWidget(self.properties)
         horizontal.setSizes([260, 950, 290])
 
+        self.editor_tabs = QTabWidget()
+        self.editor_tabs.addTab(self.blueprint, "Blueprint 2.0")
+        self.editor_tabs.addTab(horizontal, "Сумісність 1.0")
+
         vertical = QSplitter(Qt.Orientation.Vertical)
-        vertical.addWidget(horizontal)
+        vertical.addWidget(self.editor_tabs)
         vertical.addWidget(self.log)
         vertical.setSizes([750, 150])
         self.setCentralWidget(vertical)
 
         self.scene.node_selected.connect(self.properties.show_node)
         self.scene.graph_changed.connect(self._mark_dirty)
+        self.blueprint.graph_changed.connect(self._mark_dirty)
         self.scene.message.connect(self._log)
         self.properties.changed.connect(self._mark_dirty)
         self._create_toolbar()
@@ -104,14 +112,15 @@ class MainWindow(QMainWindow):
         dialog.exec()
 
     def open_automation_assistant(self) -> None:
-        dialog = AutomationAssistantDialog(self.registry, self.scene.graph, self)
-        dialog.graph_created.connect(self.scene.set_graph)
+        dialog = AutomationAssistantDialog(self.registry, self._current_graph(), self)
+        dialog.graph_created.connect(self._set_graph_everywhere)
         dialog.exec()
 
     def new_graph(self) -> None:
         if not self._confirm_discard():
             return
         self.scene.set_graph(GraphModel())
+        self.blueprint.set_graph_model(GraphModel())
         self.current_path = None
         self.dirty = False
         self._update_title()
@@ -134,6 +143,7 @@ class MainWindow(QMainWindow):
             if missing:
                 raise ValueError("Не встановлені ноди:\n" + "\n".join(sorted(set(missing))))
             self.scene.set_graph(graph)
+            self.blueprint.set_graph_model(graph)
             self.current_path = Path(filename)
             self.dirty = False
             self._update_title()
@@ -145,7 +155,7 @@ class MainWindow(QMainWindow):
         if self.current_path is None:
             return self.save_graph_as()
         try:
-            save_graph(self.scene.graph, self.current_path)
+            save_graph(self._current_graph(), self.current_path)
             self.dirty = False
             self._update_title()
             self._log(f"Збережено: {self.current_path}")
@@ -171,12 +181,18 @@ class MainWindow(QMainWindow):
     def run_graph(self) -> None:
         self._log("Запуск сценарію…")
         try:
+            graph = self._current_graph()
+            names = {
+                node.id: self.registry.get(node.type_id).name for node in graph.nodes
+            }
             executor = GraphExecutor(self.registry)
             result = executor.execute(
-                self.scene.graph,
-                on_node_started=lambda node_id: self._set_node_status(node_id, "виконується"),
-                on_node_finished=lambda node_id, values: self._set_node_status(
-                    node_id, f"готово: {self._short_result(values)}"
+                graph,
+                on_node_started=lambda node_id: self._log(
+                    f"{names[node_id]}: виконується"
+                ),
+                on_node_finished=lambda node_id, values: self._log(
+                    f"{names[node_id]}: готово: {self._short_result(values)}"
                 ),
             )
             self._log(f"Готово. Виконано нод: {len(result.order)}")
@@ -185,13 +201,22 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Помилка виконання", str(error))
 
     def reload_plugins(self) -> None:
-        if self.scene.graph.nodes:
+        if self._current_graph().nodes:
             self._log("Плагіни не оновлено: спочатку відкрийте порожній сценарій")
             return
         self.registry.reload(self.plugin_dir)
         self.palette.populate(self.registry, self.search.text())
         self._report_plugin_errors()
         self._log(f"Завантажено нод: {len(self.registry.all())}")
+
+    def _current_graph(self) -> GraphModel:
+        if self.editor_tabs.currentWidget() is self.blueprint:
+            return self.blueprint.graph_model()
+        return self.scene.graph
+
+    def _set_graph_everywhere(self, graph: GraphModel) -> None:
+        self.scene.set_graph(graph)
+        self.blueprint.set_graph_model(graph)
 
     def _has_node(self, type_id: str) -> bool:
         try:

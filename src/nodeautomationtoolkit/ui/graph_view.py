@@ -24,7 +24,7 @@ from PySide6.QtWidgets import (
     QListWidgetItem,
 )
 
-from nodeautomationtoolkit.core.definition import NodeDefinition, PortDefinition
+from nodeautomationtoolkit.core.definition import NodeDefinition, PortDefinition, PortKind
 from nodeautomationtoolkit.core.models import ConnectionModel, GraphModel, NodeModel
 from nodeautomationtoolkit.core.registry import NodeRegistry
 
@@ -75,7 +75,10 @@ class PortItem(QGraphicsEllipseItem):
         self.node_item = node_item
         self.definition = definition
         self.is_output = is_output
-        color = QColor("#5eead4") if is_output else QColor("#93c5fd")
+        if definition.kind == PortKind.EXECUTION:
+            color = QColor("#f8fafc")
+        else:
+            color = QColor("#5eead4") if is_output else QColor("#93c5fd")
         self.setBrush(QBrush(color))
         self.setPen(QPen(QColor("#111827"), 1.5))
         self.setZValue(3)
@@ -96,7 +99,9 @@ class NodeItem(QGraphicsRectItem):
         definition: NodeDefinition,
         moved_callback: Callable[[], None],
     ) -> None:
-        rows = max(len(definition.inputs), len(definition.outputs), 1)
+        all_inputs = definition.execution_inputs + definition.inputs
+        all_outputs = definition.execution_outputs + definition.outputs
+        rows = max(len(all_inputs), len(all_outputs), 1)
         super().__init__(0, 0, self.WIDTH, self.HEADER + rows * self.ROW + 12)
         self.model = model
         self.definition = definition
@@ -121,7 +126,7 @@ class NodeItem(QGraphicsRectItem):
         title.setBrush(QBrush(QColor("#f8fafc")))
         title.setPos(12, 8)
 
-        for index, port in enumerate(definition.inputs):
+        for index, port in enumerate(all_inputs):
             y = self.HEADER + self.ROW * index + self.ROW / 2 + 5
             port_item = PortItem(self, port, is_output=False)
             port_item.setPos(0, y)
@@ -130,7 +135,7 @@ class NodeItem(QGraphicsRectItem):
             label.setBrush(QBrush(QColor("#dbeafe")))
             label.setPos(10, y - 9)
 
-        for index, port in enumerate(definition.outputs):
+        for index, port in enumerate(all_outputs):
             y = self.HEADER + self.ROW * index + self.ROW / 2 + 5
             port_item = PortItem(self, port, is_output=True)
             port_item.setPos(self.WIDTH, y)
@@ -301,6 +306,7 @@ class GraphScene(QGraphicsScene):
             source_port=source.definition.name,
             target_node=target.node_item.model.id,
             target_port=target.definition.name,
+            kind=source.definition.kind.value,
         )
         self.graph.connections.append(model)
         self._create_connection_item(model)

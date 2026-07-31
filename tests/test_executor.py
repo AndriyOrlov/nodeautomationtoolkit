@@ -55,3 +55,30 @@ def test_rejects_cycle():
     with pytest.raises(ValueError, match="цикл"):
         GraphExecutor(registry).execute(graph)
 
+
+def test_execution_graph_follows_selected_branch():
+    node_registry = NodeRegistry()
+    node_registry.reload()
+    start = NodeModel(id="start", type_id="builtin.flow.start")
+    condition = NodeModel(
+        id="condition",
+        type_id="builtin.text.value",
+        parameters={"value": "yes"},
+    )
+    branch = NodeModel(id="branch", type_id="builtin.flow.branch")
+    true_sequence = NodeModel(id="true", type_id="builtin.flow.sequence")
+    false_sequence = NodeModel(id="false", type_id="builtin.flow.sequence")
+    graph = GraphModel(
+        nodes=[start, condition, branch, true_sequence, false_sequence],
+        connections=[
+            ConnectionModel("start", "then", "branch", "exec", kind="execution"),
+            ConnectionModel("condition", "result", "branch", "condition"),
+            ConnectionModel("branch", "true", "true", "exec", kind="execution"),
+            ConnectionModel("branch", "false", "false", "exec", kind="execution"),
+        ],
+    )
+
+    result = GraphExecutor(node_registry).execute(graph)
+
+    assert "true" in result.order
+    assert "false" not in result.order

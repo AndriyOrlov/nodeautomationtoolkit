@@ -5,6 +5,44 @@ from typing import Any
 from nodeautomationtoolkit.core.definition import node
 
 
+@node(
+    name="Start",
+    category="Потік",
+    description="Початок виконання сценарію.",
+    type_id="builtin.flow.start",
+    outputs={},
+    execution_outputs=("then",),
+)
+def start() -> None:
+    return None
+
+
+@node(
+    name="Branch",
+    category="Потік",
+    description="Спрямовує виконання у гілку True або False.",
+    type_id="builtin.flow.branch",
+    execution_inputs=("exec",),
+    execution_outputs=("true", "false"),
+    execution_router="boolean",
+)
+def branch(condition: bool) -> bool:
+    return condition
+
+
+@node(
+    name="Sequence",
+    category="Потік",
+    description="Запускає декілька гілок послідовно.",
+    type_id="builtin.flow.sequence",
+    outputs={},
+    execution_inputs=("exec",),
+    execution_outputs=("then_1", "then_2", "then_3"),
+)
+def sequence() -> None:
+    return None
+
+
 @node(name="І", category="Логіка", type_id="builtin.logic.and")
 def logical_and(first: bool, second: bool) -> bool:
     return first and second
