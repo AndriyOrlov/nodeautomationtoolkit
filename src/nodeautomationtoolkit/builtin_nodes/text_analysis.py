@@ -362,6 +362,8 @@ def group_items_by_markers(
     group_counts: dict[str, int] = dict.fromkeys(resolved_markers, 0)
     context_section = ""
     context_reason = ""
+    context_section_markers: set[str] = set()
+    context_reason_markers: set[str] = set()
     emitted_context: dict[str, tuple[str, str]] = {
         marker: ("", "") for marker in resolved_markers
     }
@@ -373,16 +375,34 @@ def group_items_by_markers(
         if block_type == "section":
             context_section = block_text
             context_reason = ""
+            candidate = block_text.casefold() if ignore_case else block_text
+            context_section_markers = {
+                marker
+                for marker in resolved_markers
+                if (marker.casefold() if ignore_case else marker) in candidate
+            }
+            context_reason_markers = set()
             continue
         if block_type == "reason":
             context_reason = block_text
+            candidate = block_text.casefold() if ignore_case else block_text
+            context_reason_markers = {
+                marker
+                for marker in resolved_markers
+                if (marker.casefold() if ignore_case else marker) in candidate
+            }
             continue
         if block_type != "item":
             continue
         candidate = block_text.casefold() if ignore_case else block_text
+        direct_markers = {
+            marker
+            for marker in resolved_markers
+            if (marker.casefold() if ignore_case else marker) in candidate
+        }
+        matched_markers = context_section_markers | context_reason_markers | direct_markers
         for marker in resolved_markers:
-            needle = marker.casefold() if ignore_case else marker
-            if needle not in candidate:
+            if marker not in matched_markers:
                 continue
             previous_section, previous_reason = emitted_context[marker]
             if context_section and context_section != previous_section:

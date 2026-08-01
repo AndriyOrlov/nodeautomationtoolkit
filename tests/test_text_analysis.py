@@ -53,3 +53,17 @@ def test_accepts_marker_list_from_mapping_table():
     grouped = group_items_by_markers(split["blocks"], markers=["БРАВО"])
 
     assert grouped["names"] == ["БРАВО"]
+
+
+def test_marker_in_reason_header_applies_to_following_items():
+    text = """Відповідно до рішення для АЛЬФА
+1. Направити матеріали до БРАВО.
+2. Другий пункт без мітки.
+Командир частини
+"""
+    split = split_order_blocks(text)
+    grouped = group_items_by_markers(split["blocks"], markers=["АЛЬФА", "БРАВО"])
+
+    assert grouped["counts"] == {"АЛЬФА": 2, "БРАВО": 1}
+    assert "2. Другий пункт" in grouped["groups"]["АЛЬФА"]
+    assert "1. Направити матеріали" in grouped["groups"]["БРАВО"]
