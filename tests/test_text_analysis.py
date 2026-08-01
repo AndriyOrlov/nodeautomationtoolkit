@@ -67,3 +67,29 @@ def test_marker_in_reason_header_applies_to_following_items():
     assert grouped["counts"] == {"АЛЬФА": 2, "БРАВО": 1}
     assert "2. Другий пункт" in grouped["groups"]["АЛЬФА"]
     assert "1. Направити матеріали" in grouped["groups"]["БРАВО"]
+
+
+def test_marker_in_action_header_applies_to_following_items():
+    text = """ПАРАГРАФ 2
+Відповідно до рішення кадрової комісії
+ЗВІЛЬНИТИ І ПРИЗНАЧИТИ до АЛЬФА
+1. Перший пункт без повторення відправника.
+2. Другий пункт без повторення відправника.
+ПРИЗНАЧИТИ до БРАВО
+3. Третій пункт.
+Командир частини
+"""
+    split = split_order_blocks(text)
+    grouped = group_items_by_markers(split["blocks"], markers=["АЛЬФА", "БРАВО"])
+
+    assert split["action_headers"] == [
+        "ЗВІЛЬНИТИ І ПРИЗНАЧИТИ до АЛЬФА",
+        "ПРИЗНАЧИТИ до БРАВО",
+    ]
+    assert grouped["counts"] == {"АЛЬФА": 2, "БРАВО": 1}
+    assert "ЗВІЛЬНИТИ І ПРИЗНАЧИТИ до АЛЬФА" in grouped["groups"]["АЛЬФА"]
+    assert "1. Перший пункт" in grouped["groups"]["АЛЬФА"]
+    assert "2. Другий пункт" in grouped["groups"]["АЛЬФА"]
+    assert "3. Третій пункт" not in grouped["groups"]["АЛЬФА"]
+    assert "ПРИЗНАЧИТИ до БРАВО" in grouped["groups"]["БРАВО"]
+    assert "3. Третій пункт" in grouped["groups"]["БРАВО"]

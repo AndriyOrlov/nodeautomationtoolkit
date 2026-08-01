@@ -247,6 +247,7 @@ def _compile_line_pattern(pattern: str) -> re.Pattern:
         "blocks": "List",
         "sections": "List",
         "reasons": "List",
+        "action_headers": "List",
         "items": "List",
         "header": "str",
         "body": "str",
@@ -261,6 +262,11 @@ def split_order_blocks(
         r"^\s*(?:відповідно|підстава|причина|у\s+зв'язку|на\s+підставі|"
         r"на\s+виконання)\b"
     ),
+    action_pattern: str = (
+        r"^\s*(?:звільнити(?:\s+(?:і|та)\s+призначити)?|"
+        r"призначити(?:\s+(?:і|та)\s+звільнити)?|перемістити|"
+        r"зарахувати|виключити)\b"
+    ),
     item_pattern: str = r"^\s*\d+(?:\.\d+)*[.)]\s*",
     signature_pattern: str = (
         r"^\s*(?:командир|начальник|заступник|керівник|голова|директор|"
@@ -270,6 +276,7 @@ def split_order_blocks(
     patterns = {
         "section": _compile_line_pattern(section_pattern),
         "reason": _compile_line_pattern(reason_pattern),
+        "action": _compile_line_pattern(action_pattern),
         "item": _compile_line_pattern(item_pattern),
     }
     signature_regex = _compile_line_pattern(signature_pattern)
@@ -315,6 +322,7 @@ def split_order_blocks(
 
     sections = [item["text"] for item in blocks if item["type"] == "section"]
     reasons = [item["text"] for item in blocks if item["type"] == "reason"]
+    action_headers = [item["text"] for item in blocks if item["type"] == "action"]
     items = [item["text"] for item in blocks if item["type"] == "item"]
     preview = "\n".join(
         f"{item['type']}: {' '.join(item['text'].split())[:120]}" for item in blocks[:8]
@@ -323,6 +331,7 @@ def split_order_blocks(
         "blocks": blocks,
         "sections": sections,
         "reasons": reasons,
+        "action_headers": action_headers,
         "items": items,
         "header": header,
         "body": body,
@@ -362,10 +371,12 @@ def group_items_by_markers(
     group_counts: dict[str, int] = dict.fromkeys(resolved_markers, 0)
     context_section = ""
     context_reason = ""
+    context_action = ""
     context_section_markers: set[str] = set()
     context_reason_markers: set[str] = set()
-    emitted_context: dict[str, tuple[str, str]] = {
-        marker: ("", "") for marker in resolved_markers
+    context_action_markers: set[str] = set()
+    emitted_context: dict[str, tuple[str, str, str]] = {
+        marker: ("", "", "") for marker in resolved_markers
     }
     for block in blocks or []:
         if not isinstance(block, dict):
@@ -375,6 +386,7 @@ def group_items_by_markers(
         if block_type == "section":
             context_section = block_text
             context_reason = ""
+            context_action = ""
             candidate = block_text.casefold() if ignore_case else block_text
             context_section_markers = {
                 marker
@@ -382,11 +394,23 @@ def group_items_by_markers(
                 if (marker.casefold() if ignore_case else marker) in candidate
             }
             context_reason_markers = set()
+            context_action_markers = set()
             continue
         if block_type == "reason":
             context_reason = block_text
+            context_action = ""
             candidate = block_text.casefold() if ignore_case else block_text
             context_reason_markers = {
+                marker
+                for marker in resolved_markers
+                if (marker.casefold() if ignore_case else marker) in candidate
+            }
+            context_action_markers = set()
+            continue
+        if block_type == "action":
+            context_action = block_text
+            candidate = block_text.casefold() if ignore_case else block_text
+            context_action_markers = {
                 marker
                 for marker in resolved_markers
                 if (marker.casefold() if ignore_case else marker) in candidate
@@ -400,21 +424,35 @@ def group_items_by_markers(
             for marker in resolved_markers
             if (marker.casefold() if ignore_case else marker) in candidate
         }
-        matched_markers = context_section_markers | context_reason_markers | direct_markers
+        matched_markers = (
+            context_section_markers
+            | context_reason_markers
+            | context_action_markers
+            | direct_markers
+        )
         for marker in resolved_markers:
             if marker not in matched_markers:
                 continue
-            previous_section, previous_reason = emitted_context[marker]
+            previous_section, previous_reason, previous_action = emitted_context[marker]
             if context_section and context_section != previous_section:
                 groups[marker].append(context_section)
                 previous_section = context_section
                 previous_reason = ""
+                previous_action = ""
             if context_reason and context_reason != previous_reason:
                 groups[marker].append(context_reason)
                 previous_reason = context_reason
+                previous_action = ""
+            if context_action and context_action != previous_action:
+                groups[marker].append(context_action)
+                previous_action = context_action
             groups[marker].append(block_text)
             group_counts[marker] += 1
-            emitted_context[marker] = (previous_section, previous_reason)
+            emitted_context[marker] = (
+                previous_section,
+                previous_reason,
+                previous_action,
+            )
     compact_groups = {
         marker: "\n".join(parts) for marker, parts in groups.items() if parts
     }

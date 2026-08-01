@@ -1,5 +1,5 @@
 {
   "format": "nodeautomationtoolkit-patch-v1",
-  "version": "0.3.3",
-  "description": "Delete or insert a first, last or numbered Word page"
+  "version": "0.3.4",
+  "description": "Recognize action headers and inherit their recipient for following items"
 }
