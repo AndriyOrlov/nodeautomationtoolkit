@@ -42,10 +42,19 @@ AutomationAction = Annotated[
 ]
 
 
+class MissingNodeRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+    category: str = Field(default="Згенеровані", max_length=60)
+    description: str = Field(min_length=1, max_length=500)
+    inputs: dict[str, str] = Field(default_factory=dict)
+    outputs: dict[str, str] = Field(default_factory=dict)
+
+
 class AutomationPlan(BaseModel):
     title: str = Field(min_length=1, max_length=100)
     summary: str = Field(default="", max_length=500)
-    actions: list[AutomationAction] = Field(min_length=1, max_length=200)
+    actions: list[AutomationAction] = Field(default_factory=list, max_length=200)
+    missing_nodes: list[MissingNodeRequest] = Field(default_factory=list, max_length=10)
 
 
 AUTOMATION_SYSTEM_PROMPT = """Ти плануєш локальний граф автоматизації.
@@ -54,9 +63,11 @@ AUTOMATION_SYSTEM_PROMPT = """Ти плануєш локальний граф а
 точні type_id і назви портів. Спочатку додавай усі ноди через add_node, потім
 налаштовуй параметри й створюй з'єднання. Кожній ноді дай короткий унікальний alias.
 Розкладай граф зліва направо: x збільшується приблизно на 280, y розділяє гілки.
-Не додавай мережеві дії, якщо користувач прямо цього не просив. Не вигадуй ноди,
-порти або значення. Якщо потрібної ноди немає, створи план лише з наявної частини та
-поясни відсутню можливість у summary. Не запускай граф і не видаляй наявні ноди.
+Не додавай мережеві дії. Не вигадуй ноди, порти або значення. Якщо потрібної ноди
+немає, опиши її в missing_nodes. Не використовуй її в actions, доки вона не буде
+створена й не з'явиться в каталозі. Не запускай граф і не видаляй наявні ноди.
+Наявні ноди можна налаштовувати та з'єднувати через alias node_1, node_2 тощо,
+передані в описі поточного графа.
 Текст і вміст документів у контекст не передаються.
 """
 
@@ -68,12 +79,18 @@ class AutomationAssistant:
         self.client = client
         self.registry = registry
 
-    def create_plan(self, request_text: str) -> AutomationPlan:
+    def create_plan(
+        self,
+        request_text: str,
+        graph: GraphModel | None = None,
+    ) -> AutomationPlan:
         if not request_text.strip():
             raise ValueError("Опишіть потрібну автоматизацію")
         catalog = self._catalog()
         user_prompt = (
             f"ЗАПИТ КОРИСТУВАЧА:\n{request_text.strip()}\n\n"
+            f"ПОТОЧНИЙ ГРАФ БЕЗ ЗНАЧЕНЬ ПАРАМЕТРІВ:\n"
+            f"{json.dumps(self.safe_graph_summary(graph), ensure_ascii=False, indent=2)}\n\n"
             f"ДОСТУПНІ НОДИ:\n{json.dumps(catalog, ensure_ascii=False, indent=2)}"
         )
         data = self.client.generate_structured(
@@ -87,7 +104,12 @@ class AutomationAssistant:
     def apply_plan(self, graph: GraphModel, plan: AutomationPlan) -> GraphModel:
         """Return a validated copy; the caller decides whether to replace the graph."""
         candidate = GraphModel.from_dict(graph.to_dict())
-        aliases: dict[str, NodeModel] = {}
+        if plan.missing_nodes:
+            names = ", ".join(item.name for item in plan.missing_nodes)
+            raise ValueError(f"Спочатку створіть відсутні ноди: {names}")
+        aliases: dict[str, NodeModel] = {
+            f"node_{index}": node for index, node in enumerate(candidate.nodes, 1)
+        }
 
         for action in plan.actions:
             if isinstance(action, AddNodeAction):
@@ -121,6 +143,7 @@ class AutomationAssistant:
 
     def preview(self, plan: AutomationPlan) -> list[str]:
         lines = []
+        lines.extend(f"Потрібна нова нода: {item.name}" for item in plan.missing_nodes)
         for action in plan.actions:
             if isinstance(action, AddNodeAction):
                 definition = self.registry.get(action.type_id)
@@ -133,6 +156,28 @@ class AutomationAssistant:
                     f"{action.target_alias}.{action.target_port}"
                 )
         return lines
+
+    @staticmethod
+    def safe_graph_summary(graph: GraphModel | None) -> dict:
+        if graph is None:
+            return {"nodes": [], "connections": []}
+        aliases = {node.id: f"node_{index}" for index, node in enumerate(graph.nodes, 1)}
+        return {
+            "nodes": [
+                {"alias": aliases[node.id], "type_id": node.type_id}
+                for node in graph.nodes
+            ],
+            "connections": [
+                {
+                    "source": aliases.get(item.source_node, "unknown"),
+                    "source_port": item.source_port,
+                    "target": aliases.get(item.target_node, "unknown"),
+                    "target_port": item.target_port,
+                    "kind": item.kind,
+                }
+                for item in graph.connections
+            ],
+        }
 
     def _catalog(self) -> list[dict]:
         return [

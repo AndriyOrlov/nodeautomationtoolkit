@@ -52,28 +52,49 @@ class GenerateWorker(QObject):
 class NodeAssistantDialog(QDialog):
     node_installed = Signal(str)
 
-    def __init__(self, plugin_dir: Path, parent=None) -> None:
+    def __init__(
+        self,
+        plugin_dir: Path,
+        parent=None,
+        *,
+        initial_prompt: str = "",
+        initial_config: LocalLlmConfig | None = None,
+        strict_no_filesystem: bool = True,
+    ) -> None:
         super().__init__(parent)
         self.plugin_dir = plugin_dir
+        self.strict_no_filesystem = strict_no_filesystem
         self.draft: NodeDraft | None = None
         self.thread: QThread | None = None
         self.worker: GenerateWorker | None = None
-        self.setWindowTitle("Створити ноду локальною LLM")
+        self.setWindowTitle("Створити Python-ноду за допомогою LLM")
         self.resize(1050, 720)
 
         self.provider = QComboBox()
         self.provider.addItems([item.value for item in LocalLlmProvider])
-        self.base_url = QLineEdit(DEFAULT_BASE_URLS[LocalLlmProvider.LM_STUDIO])
-        self.model = QLineEdit()
-        self.model.setPlaceholderText("Назва завантаженої локальної моделі")
+        selected = initial_config or LocalLlmConfig(
+            provider=LocalLlmProvider.OPENAI,
+            base_url=DEFAULT_BASE_URLS[LocalLlmProvider.OPENAI],
+            model="gpt-5.6",
+            api_key="",
+        )
+        self.provider.setCurrentText(selected.provider.value)
+        self.base_url = QLineEdit(selected.base_url)
+        self.model = QLineEdit(selected.model)
+        self.model.setPlaceholderText("Наприклад: gpt-5.6 або локальна модель")
+        self.api_key = QLineEdit(selected.api_key if selected.api_key != "local" else "")
+        self.api_key.setEchoMode(QLineEdit.EchoMode.Password)
+        self.api_key.setPlaceholderText("Не зберігається у сценарії")
         self.provider.currentTextChanged.connect(self._provider_changed)
 
         settings = QFormLayout()
-        settings.addRow("Сервер", self.provider)
-        settings.addRow("Локальна адреса", self.base_url)
+        settings.addRow("Провайдер", self.provider)
+        settings.addRow("Адреса API", self.base_url)
         settings.addRow("Модель", self.model)
+        settings.addRow("API-ключ", self.api_key)
 
         self.prompt = QPlainTextEdit()
+        self.prompt.setPlainText(initial_prompt)
         self.prompt.setPlaceholderText(
             "Наприклад: Створи ноду, яка приймає список рядків і залишає лише рядки "
             "з указаною фразою без урахування регістру."
@@ -119,8 +140,8 @@ class NodeAssistantDialog(QDialog):
         layout = QVBoxLayout(self)
         layout.addWidget(
             QLabel(
-                "Запит надсилається лише на вказаний localhost. Документи та результати "
-                "сценарію не додаються до запиту."
+                "Надсилається лише ваш опис ноди. Документи, шляхи та результати "
+                "сценарію не додаються. Згенерованій ноді заборонено доступ до файлів."
             )
         )
         layout.addWidget(splitter, 1)
@@ -135,6 +156,9 @@ class NodeAssistantDialog(QDialog):
             provider=LocalLlmProvider(self.provider.currentText()),
             base_url=self.base_url.text().strip(),
             model=self.model.text().strip(),
+            api_key=self.api_key.text().strip() or (
+                "local" if self.provider.currentText() != LocalLlmProvider.OPENAI.value else ""
+            ),
         )
 
     def generate(self) -> None:
@@ -183,7 +207,7 @@ class NodeAssistantDialog(QDialog):
             self.review_label.setText("Код відсутній")
             self.install_button.setEnabled(False)
             return
-        review = review_node_code(code)
+        review = review_node_code(code, allow_filesystem=not self.strict_no_filesystem)
         lines = []
         if review.errors:
             lines.extend(f"ПОМИЛКА: {item}" for item in review.errors)
@@ -198,7 +222,10 @@ class NodeAssistantDialog(QDialog):
         self._update_install_state()
 
     def _update_install_state(self) -> None:
-        review = review_node_code(self.code.toPlainText())
+        review = review_node_code(
+            self.code.toPlainText(),
+            allow_filesystem=not self.strict_no_filesystem,
+        )
         self.install_button.setEnabled(review.installable and self.approval.isChecked())
 
     def install(self) -> None:
@@ -206,7 +233,11 @@ class NodeAssistantDialog(QDialog):
             return
         updated = self.draft.model_copy(update={"code": self.code.toPlainText()})
         try:
-            target = install_node_draft(updated, self.plugin_dir)
+            target = install_node_draft(
+                updated,
+                self.plugin_dir,
+                allow_filesystem=not self.strict_no_filesystem,
+            )
         except Exception as error:  # noqa: BLE001 - UI boundary
             QMessageBox.critical(self, "Ноду не встановлено", str(error))
             return

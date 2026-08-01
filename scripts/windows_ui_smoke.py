@@ -26,6 +26,20 @@ def main() -> int:
     assert file_node.get_widget("_nat_pick_file") is not None
     assert file_node.get_widget("_nat_run") is not None
     assert file_node.get_widget("_nat_preview") is not None
+    assert file_node.get_widget("_nat_help") is not None
+    assert not editor.properties.isVisible()
+
+    words_node = editor.graph.create_node("builtin.text.split_words_dynamic")
+    editor._sync_dynamic_outputs(
+        words_node.id,
+        {"слова": ["Альфа"], "1. Альфа": "Альфа"},
+    )
+    assert "1. Альфа" in words_node.outputs()
+
+    placeholder_node = editor.graph.create_node("builtin.word_batch.fill_placeholder")
+    replacement_widget = placeholder_node.get_widget("replacement_text")
+    assert replacement_widget is not None
+    assert replacement_widget.get_custom_widget().minimumHeight() >= 80
     application.processEvents()
     editor.close()
     return 0

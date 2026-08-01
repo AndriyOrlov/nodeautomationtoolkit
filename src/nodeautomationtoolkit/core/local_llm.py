@@ -12,12 +12,14 @@ from .node_draft import NodeDraft
 
 
 class LocalLlmProvider(StrEnum):
+    OPENAI = "OpenAI API"
     LM_STUDIO = "LM Studio"
     OLLAMA = "Ollama"
     CUSTOM = "OpenAI-сумісний"
 
 
 DEFAULT_BASE_URLS = {
+    LocalLlmProvider.OPENAI: "https://api.openai.com/v1/",
     LocalLlmProvider.LM_STUDIO: "http://127.0.0.1:1234/v1/",
     LocalLlmProvider.OLLAMA: "http://127.0.0.1:11434/v1/",
     LocalLlmProvider.CUSTOM: "http://127.0.0.1:1234/v1/",
@@ -46,7 +48,9 @@ from nodeautomationtoolkit import node
 і містить рівно одну функцію з @node(...). Використовуй type hints. Нода має бути
 детермінованою, невеликою та зрозумілою. Не використовуй мережу, subprocess, shell,
 eval, exec, compile, ctypes, приховані імпорти або автоматичне встановлення пакетів.
-Не читай документи чи інші файли, якщо користувач прямо не описав це як вхід ноди.
+Не читай і не записуй файли. Не використовуй open, pathlib, os або shutil. Файлові
+операції виконують лише перевірені вбудовані ноди; твоя нода перетворює лише значення,
+передані через її входи.
 Не додавай реальних службових даних. Для прикладів використовуй синтетичні значення.
 
 Якщо задачу безпечно реалізувати неможливо, все одно поверни валідну чернетку з
@@ -72,7 +76,7 @@ class LocalLlmClient:
         if not request_text.strip():
             raise ValueError("Опишіть, яку ноду потрібно створити")
         if not self.config.model.strip():
-            raise ValueError("Оберіть локальну модель")
+            raise ValueError("Оберіть модель")
 
         data = self.generate_structured(
             system_prompt=SYSTEM_PROMPT,
@@ -83,7 +87,7 @@ class LocalLlmClient:
         try:
             return NodeDraft.model_validate(data)
         except (TypeError, ValueError) as error:
-            raise LocalLlmError("Локальна модель повернула некоректну відповідь") from error
+            raise LocalLlmError("Модель повернула некоректну відповідь") from error
 
     def generate_structured(
         self,
@@ -94,7 +98,14 @@ class LocalLlmClient:
         schema: dict[str, Any],
     ) -> dict[str, Any]:
         if not self.config.model.strip():
-            raise ValueError("Оберіть локальну модель")
+            raise ValueError("Оберіть модель")
+        if self.config.provider == LocalLlmProvider.OPENAI:
+            return self._generate_responses(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                schema_name=schema_name,
+                schema=schema,
+            )
         body = {
             "model": self.config.model,
             "messages": [
@@ -122,6 +133,47 @@ class LocalLlmClient:
             raise LocalLlmError("Очікувався JSON-об'єкт")
         return data
 
+    def _generate_responses(
+        self,
+        *,
+        system_prompt: str,
+        user_prompt: str,
+        schema_name: str,
+        schema: dict[str, Any],
+    ) -> dict[str, Any]:
+        body = {
+            "model": self.config.model,
+            "instructions": system_prompt,
+            "input": user_prompt,
+            "store": False,
+            "text": {
+                "format": {
+                    "type": "json_schema",
+                    "name": schema_name,
+                    "strict": True,
+                    "schema": schema,
+                }
+            },
+        }
+        payload = self._request("responses", body)
+        text = payload.get("output_text")
+        if not isinstance(text, str):
+            parts = []
+            for output in payload.get("output", []):
+                for content in output.get("content", []):
+                    if content.get("type") == "output_text" and isinstance(
+                        content.get("text"), str
+                    ):
+                        parts.append(content["text"])
+            text = "".join(parts)
+        try:
+            data = json.loads(text)
+        except (TypeError, json.JSONDecodeError) as error:
+            raise LocalLlmError("OpenAI API повернув некоректний JSON") from error
+        if not isinstance(data, dict):
+            raise LocalLlmError("Очікувався JSON-об'єкт")
+        return data
+
     def _request(
         self,
         endpoint: str,
@@ -144,16 +196,16 @@ class LocalLlmClient:
         except HTTPError as error:
             details = error.read().decode("utf-8", errors="replace")
             raise LocalLlmError(
-                f"Помилка локального LLM-сервера ({error.code}): {details}"
+                f"Помилка LLM API ({error.code}): {details}"
             ) from error
         except URLError as error:
             raise LocalLlmError(
-                "Локальний LLM-сервер недоступний. Запустіть сервер у LM Studio або Ollama."
+                "LLM-сервер недоступний. Перевірте адресу, інтернет або локальний сервер."
             ) from error
         try:
             payload = json.loads(raw)
         except json.JSONDecodeError as error:
-            raise LocalLlmError("LLM-сервер повернув не JSON") from error
+            raise LocalLlmError("LLM API повернув не JSON") from error
         if not isinstance(payload, dict):
             raise LocalLlmError("Некоректний формат відповіді LLM-сервера")
         return payload

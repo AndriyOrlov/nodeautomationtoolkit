@@ -28,6 +28,24 @@ def _validated_docx_path(path: str, *, must_exist: bool) -> Path:
     return resolved
 
 
+def _iter_all_paragraphs(document):
+    seen_cells: set[int] = set()
+
+    def from_tables(tables):
+        for table in tables:
+            for row in table.rows:
+                for cell in row.cells:
+                    cell_id = id(cell._tc)
+                    if cell_id in seen_cells:
+                        continue
+                    seen_cells.add(cell_id)
+                    yield from cell.paragraphs
+                    yield from from_tables(cell.tables)
+
+    yield from document.paragraphs
+    yield from from_tables(document.tables)
+
+
 @node(
     name="Прочитати DOCX",
     category="Word",
@@ -43,6 +61,7 @@ def _validated_docx_path(path: str, *, must_exist: bool) -> Path:
 def read_docx(path: str) -> dict:
     source_path = _validated_docx_path(path, must_exist=True)
     document = _document_class()(source_path)
+    raw_paragraphs = list(_iter_all_paragraphs(document))
     paragraph_items = tuple(
         WordParagraph(
             index=index,
@@ -50,7 +69,7 @@ def read_docx(path: str) -> dict:
             style=paragraph.style.name if paragraph.style is not None else "",
             is_empty=not paragraph.text.strip(),
         )
-        for index, paragraph in enumerate(document.paragraphs)
+        for index, paragraph in enumerate(raw_paragraphs)
     )
     paragraphs = WordParagraphs(paragraph_items, str(source_path))
     text = paragraphs.text()

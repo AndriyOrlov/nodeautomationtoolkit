@@ -78,7 +78,7 @@ BLOCKED_ATTRIBUTE_CALLS = {
 }
 
 
-def review_node_code(code: str) -> NodeCodeReview:
+def review_node_code(code: str, *, allow_filesystem: bool = True) -> NodeCodeReview:
     review = NodeCodeReview()
     try:
         tree = ast.parse(code)
@@ -109,6 +109,8 @@ def review_node_code(code: str) -> NodeCodeReview:
                 review.errors.append(f"Заборонена системна операція: {'.'.join(attribute)}")
             if isinstance(node.func, ast.Name) and node.func.id == "open":
                 review.permissions.add("filesystem")
+                if not allow_filesystem:
+                    review.errors.append("AI-нода не може відкривати або записувати файли")
 
     if len(decorated_functions) != 1:
         review.errors.append("Модуль має містити рівно одну функцію з декоратором @node")
@@ -117,8 +119,13 @@ def review_node_code(code: str) -> NodeCodeReview:
     return review
 
 
-def install_node_draft(draft: NodeDraft, plugin_dir: Path) -> Path:
-    review = review_node_code(draft.code)
+def install_node_draft(
+    draft: NodeDraft,
+    plugin_dir: Path,
+    *,
+    allow_filesystem: bool = True,
+) -> Path:
+    review = review_node_code(draft.code, allow_filesystem=allow_filesystem)
     if not review.installable:
         raise ValueError("Ноду не встановлено:\n" + "\n".join(review.errors))
     plugin_dir.mkdir(parents=True, exist_ok=True)

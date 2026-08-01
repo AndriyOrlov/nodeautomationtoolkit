@@ -5,8 +5,9 @@ from nodeautomationtoolkit.core.automation_assistant import (
     AutomationAssistant,
     AutomationPlan,
     ConnectAction,
+    SetParameterAction,
 )
-from nodeautomationtoolkit.core.models import GraphModel
+from nodeautomationtoolkit.core.models import GraphModel, NodeModel
 from nodeautomationtoolkit.core.registry import NodeRegistry
 
 
@@ -74,3 +75,34 @@ def test_rejects_unknown_node_without_changing_graph():
         assistant.apply_plan(graph, plan)
 
     assert graph.nodes == []
+
+
+def test_can_edit_existing_node_by_safe_alias():
+    assistant = AutomationAssistant(UnusedClient(), registry())
+    graph = GraphModel(
+        nodes=[
+            NodeModel(
+                id="real-secret-id",
+                type_id="builtin.text.value",
+                parameters={"value": "C:/secret/order.docx"},
+            )
+        ]
+    )
+    plan = AutomationPlan(
+        title="Змінити текст",
+        actions=[
+            SetParameterAction(
+                action="set_parameter",
+                alias="node_1",
+                parameter="value",
+                value="Готово",
+            )
+        ],
+    )
+
+    updated = assistant.apply_plan(graph, plan)
+
+    assert updated.nodes[0].parameters["value"] == "Готово"
+    summary = assistant.safe_graph_summary(graph)
+    assert "secret" not in str(summary)
+    assert summary["nodes"] == [{"alias": "node_1", "type_id": "builtin.text.value"}]
