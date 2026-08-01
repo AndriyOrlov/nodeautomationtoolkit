@@ -48,6 +48,7 @@ class NodeRegistry:
             "nodeautomationtoolkit.builtin_nodes.text",
             "nodeautomationtoolkit.builtin_nodes.text_analysis",
             "nodeautomationtoolkit.builtin_nodes.recipient_mapping",
+            "nodeautomationtoolkit.builtin_nodes.order_ai",
             "nodeautomationtoolkit.builtin_nodes.logic",
             "nodeautomationtoolkit.builtin_nodes.windows_dialogs",
             "nodeautomationtoolkit.builtin_nodes.word",

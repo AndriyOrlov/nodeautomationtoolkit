@@ -103,16 +103,29 @@ def read_recipient_mapping(
     rows = _read_rows(source, sheet_name)
     if not rows:
         raise ValueError("Таблиця порожня")
-    headers = [cell.strip() for cell in rows[0]]
-    normalized = {name.casefold(): index for index, name in enumerate(headers)}
     requested = [open_name_column, cipher_column, destination_column]
+    header_index = -1
+    normalized: dict[str, int] = {}
+    for index, row in enumerate(rows[:20]):
+        candidate = {
+            name.strip().casefold(): column
+            for column, name in enumerate(row)
+            if name.strip()
+        }
+        if all(name.casefold() in candidate for name in requested):
+            header_index = index
+            normalized = candidate
+            break
+    if header_index < 0:
+        headers = [cell.strip() for cell in rows[0]]
+        normalized = {name.casefold(): index for index, name in enumerate(headers)}
     missing = [name for name in requested if name.casefold() not in normalized]
     if missing:
         raise ValueError("У таблиці немає колонок: " + ", ".join(missing))
     indexes = [normalized[name.casefold()] for name in requested]
     mapping: dict[str, dict[str, str]] = {}
     table_rows = []
-    for row in rows[1:]:
+    for row in rows[header_index + 1 :]:
         values = [row[index].strip() if index < len(row) else "" for index in indexes]
         open_name, cipher, destination = values
         if not open_name:

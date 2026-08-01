@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from nodeautomationtoolkit.core.embedded_llm import MODEL_ALIAS, SERVER_API_KEY
 from nodeautomationtoolkit.core.local_llm import (
     DEFAULT_BASE_URLS,
     LocalLlmClient,
@@ -73,10 +74,10 @@ class NodeAssistantDialog(QDialog):
         self.provider = QComboBox()
         self.provider.addItems([item.value for item in LocalLlmProvider])
         selected = initial_config or LocalLlmConfig(
-            provider=LocalLlmProvider.OPENAI,
-            base_url=DEFAULT_BASE_URLS[LocalLlmProvider.OPENAI],
-            model="gpt-5.6",
-            api_key="",
+            provider=LocalLlmProvider.EMBEDDED,
+            base_url=DEFAULT_BASE_URLS[LocalLlmProvider.EMBEDDED],
+            model=MODEL_ALIAS,
+            api_key=SERVER_API_KEY,
         )
         self.provider.setCurrentText(selected.provider.value)
         self.base_url = QLineEdit(selected.base_url)
@@ -86,6 +87,7 @@ class NodeAssistantDialog(QDialog):
         self.api_key.setEchoMode(QLineEdit.EchoMode.Password)
         self.api_key.setPlaceholderText("Не зберігається у сценарії")
         self.provider.currentTextChanged.connect(self._provider_changed)
+        self._provider_changed(selected.provider.value)
 
         settings = QFormLayout()
         settings.addRow("Провайдер", self.provider)
@@ -150,6 +152,13 @@ class NodeAssistantDialog(QDialog):
     def _provider_changed(self, value: str) -> None:
         provider = LocalLlmProvider(value)
         self.base_url.setText(DEFAULT_BASE_URLS[provider])
+        embedded = provider == LocalLlmProvider.EMBEDDED
+        self.base_url.setEnabled(not embedded)
+        self.model.setEnabled(not embedded)
+        self.api_key.setEnabled(not embedded)
+        if embedded:
+            self.model.setText(MODEL_ALIAS)
+            self.api_key.setText(SERVER_API_KEY)
 
     def _config(self) -> LocalLlmConfig:
         return LocalLlmConfig(

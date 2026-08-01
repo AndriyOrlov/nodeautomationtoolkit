@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -19,6 +20,7 @@ def main() -> int:
     app_data = Path(
         QStandardPaths.writableLocation(QStandardPaths.StandardLocation.AppDataLocation)
     )
+    os.environ["NAT_APP_DATA_DIR"] = str(app_data)
     plugin_dir = app_data / "plugins" / "nodes"
     registry.reload(plugin_dir)
 

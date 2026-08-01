@@ -1,5 +1,5 @@
 {
   "format": "nodeautomationtoolkit-patch-v1",
-  "version": "0.3.4",
-  "description": "Recognize action headers and inherit their recipient for following items"
+  "version": "0.4.0",
+  "description": "Embedded offline Qwen3 4B for understanding Ukrainian order structure"
 }

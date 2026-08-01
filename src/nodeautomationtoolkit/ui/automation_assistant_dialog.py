@@ -20,6 +20,7 @@ from nodeautomationtoolkit.core.automation_assistant import (
     AutomationAssistant,
     AutomationPlan,
 )
+from nodeautomationtoolkit.core.embedded_llm import MODEL_ALIAS, SERVER_API_KEY
 from nodeautomationtoolkit.core.local_llm import (
     DEFAULT_BASE_URLS,
     LocalLlmClient,
@@ -80,14 +81,15 @@ class AutomationAssistantDialog(QDialog):
 
         self.provider = QComboBox()
         self.provider.addItems([item.value for item in LocalLlmProvider])
-        self.provider.setCurrentText(LocalLlmProvider.OPENAI.value)
-        self.base_url = QLineEdit(DEFAULT_BASE_URLS[LocalLlmProvider.OPENAI])
-        self.model = QLineEdit("gpt-5.6")
+        self.provider.setCurrentText(LocalLlmProvider.EMBEDDED.value)
+        self.base_url = QLineEdit(DEFAULT_BASE_URLS[LocalLlmProvider.EMBEDDED])
+        self.model = QLineEdit(MODEL_ALIAS)
         self.model.setPlaceholderText("Наприклад: gpt-5.6 або локальна модель")
         self.api_key = QLineEdit()
         self.api_key.setEchoMode(QLineEdit.EchoMode.Password)
         self.api_key.setPlaceholderText("Не зберігається у графі")
         self.provider.currentTextChanged.connect(self._provider_changed)
+        self._provider_changed(LocalLlmProvider.EMBEDDED.value)
 
         form = QFormLayout()
         form.addRow("Провайдер", self.provider)
@@ -134,16 +136,23 @@ class AutomationAssistantDialog(QDialog):
         layout.addWidget(self.buttons)
 
     def _provider_changed(self, value: str) -> None:
-        self.base_url.setText(DEFAULT_BASE_URLS[LocalLlmProvider(value)])
+        provider = LocalLlmProvider(value)
+        self.base_url.setText(DEFAULT_BASE_URLS[provider])
+        embedded = provider == LocalLlmProvider.EMBEDDED
+        self.base_url.setEnabled(not embedded)
+        self.model.setEnabled(not embedded)
+        self.api_key.setEnabled(not embedded)
+        if embedded:
+            self.model.setText(MODEL_ALIAS)
+            self.api_key.setText(SERVER_API_KEY)
 
     def _config(self) -> LocalLlmConfig:
         return LocalLlmConfig(
             provider=LocalLlmProvider(self.provider.currentText()),
             base_url=self.base_url.text().strip(),
             model=self.model.text().strip(),
-            api_key=self.api_key.text().strip() or (
-                "local" if self.provider.currentText() != LocalLlmProvider.OPENAI.value else ""
-            ),
+            api_key=self.api_key.text().strip()
+            or ("local" if self.provider.currentText() != LocalLlmProvider.OPENAI.value else ""),
         )
 
     def create_plan(self) -> None:
@@ -230,9 +239,9 @@ class AutomationAssistantDialog(QDialog):
         if self.plan is None:
             return
         try:
-            result = AutomationAssistant(
-                LocalLlmClient(self._config()), self.registry
-            ).apply_plan(self.graph, self.plan)
+            result = AutomationAssistant(LocalLlmClient(self._config()), self.registry).apply_plan(
+                self.graph, self.plan
+            )
         except Exception as error:  # noqa: BLE001 - UI boundary
             QMessageBox.critical(self, "План не застосовано", str(error))
             return
