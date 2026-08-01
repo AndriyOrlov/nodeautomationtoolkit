@@ -25,6 +25,7 @@ from nodeautomationtoolkit.core.registry import NodeRegistry
 from nodeautomationtoolkit.core.templates import build_word_smoke_graph
 
 from .automation_assistant_dialog import AutomationAssistantDialog
+from .embedded_model_dialog import EmbeddedModelDialog
 from .graph_view import GraphScene, GraphView, NodePalette
 from .node_assistant_dialog import NodeAssistantDialog
 from .nodegraphqt_editor import NodeGraphQtEditor
@@ -40,14 +41,10 @@ class MainWindow(QMainWindow):
         self.dirty = False
         self._suppress_graph_changes = False
         self.app_data_dir = Path(
-            QStandardPaths.writableLocation(
-                QStandardPaths.StandardLocation.AppDataLocation
-            )
+            QStandardPaths.writableLocation(QStandardPaths.StandardLocation.AppDataLocation)
         )
         documents_dir = Path(
-            QStandardPaths.writableLocation(
-                QStandardPaths.StandardLocation.DocumentsLocation
-            )
+            QStandardPaths.writableLocation(QStandardPaths.StandardLocation.DocumentsLocation)
         )
         self.graphs_dir = documents_dir / "Node Automation Toolkit" / "Graphs"
         self.autosave_path = self.app_data_dir / "autosave.nat.json"
@@ -122,6 +119,7 @@ class MainWindow(QMainWindow):
             ("Запустити", "F5", self.run_graph),
             ("AI-сценарій", "Ctrl+Shift+A", self.open_automation_assistant),
             ("AI-нода", "Ctrl+Shift+N", self.open_node_assistant),
+            ("Локальна модель", "Ctrl+Shift+L", self.open_embedded_model),
             ("Оновити плагіни", "Ctrl+R", self.reload_plugins),
             ("Встановити патч", "Ctrl+Shift+P", self.install_offline_patch),
         ]
@@ -183,6 +181,9 @@ class MainWindow(QMainWindow):
         )
         dialog.graph_created.connect(self._apply_assistant_graph)
         dialog.exec()
+
+    def open_embedded_model(self) -> None:
+        EmbeddedModelDialog(self).exec()
 
     def _apply_assistant_graph(self, graph: GraphModel) -> None:
         self.blueprint.reload_definitions()
@@ -274,15 +275,11 @@ class MainWindow(QMainWindow):
                 self.blueprint.run_graph()
                 return
             graph = self._current_graph()
-            names = {
-                node.id: self.registry.get(node.type_id).name for node in graph.nodes
-            }
+            names = {node.id: self.registry.get(node.type_id).name for node in graph.nodes}
             executor = GraphExecutor(self.registry)
             result = executor.execute(
                 graph,
-                on_node_started=lambda node_id: self._log(
-                    f"{names[node_id]}: виконується"
-                ),
+                on_node_started=lambda node_id: self._log(f"{names[node_id]}: виконується"),
                 on_node_finished=lambda node_id, values: self._log(
                     f"{names[node_id]}: готово: {self._short_result(values)}"
                 ),

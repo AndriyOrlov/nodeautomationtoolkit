@@ -10,7 +10,7 @@ permissions:
   contents: write
 
 env:
-  RELEASE_VERSION: "0.3.4"
+  RELEASE_VERSION: "0.4.0"
 
 jobs:
   windows-release:
@@ -51,6 +51,7 @@ jobs:
             --hidden-import nodeautomationtoolkit.builtin_nodes.text `
             --hidden-import nodeautomationtoolkit.builtin_nodes.text_analysis `
             --hidden-import nodeautomationtoolkit.builtin_nodes.recipient_mapping `
+            --hidden-import nodeautomationtoolkit.builtin_nodes.order_ai `
             --hidden-import nodeautomationtoolkit.builtin_nodes.logic `
             --hidden-import nodeautomationtoolkit.builtin_nodes.windows_dialogs `
             --hidden-import nodeautomationtoolkit.builtin_nodes.word `
@@ -89,12 +90,14 @@ jobs:
           $tag = "v$env:RELEASE_VERSION"
           $archive = "dist/NodeAutomationToolkit-$tag-windows-x64.zip"
           $patch = "dist/NodeAutomationToolkit-$tag.natpatch.zip"
+          $example = "examples/fake_recipient_mapping.xlsx"
           if (gh release view $tag 2>$null) {
-            gh release upload $tag $archive $patch --clobber
+            gh release upload $tag $archive $patch $example --clobber
           } else {
             gh release create $tag `
               $archive `
               $patch `
+              $example `
               --target "${{ github.sha }}" `
               --title "Node Automation Toolkit $env:RELEASE_VERSION" `
               --notes-file RELEASE_NOTES.md `

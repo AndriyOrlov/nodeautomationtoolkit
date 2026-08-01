@@ -12,6 +12,7 @@ from .node_draft import NodeDraft
 
 
 class LocalLlmProvider(StrEnum):
+    EMBEDDED = "Вбудована Qwen3 4B"
     OPENAI = "OpenAI API"
     LM_STUDIO = "LM Studio"
     OLLAMA = "Ollama"
@@ -19,6 +20,7 @@ class LocalLlmProvider(StrEnum):
 
 
 DEFAULT_BASE_URLS = {
+    LocalLlmProvider.EMBEDDED: "http://127.0.0.1:11439/v1/",
     LocalLlmProvider.OPENAI: "https://api.openai.com/v1/",
     LocalLlmProvider.LM_STUDIO: "http://127.0.0.1:1234/v1/",
     LocalLlmProvider.OLLAMA: "http://127.0.0.1:11434/v1/",
@@ -181,7 +183,12 @@ class LocalLlmClient:
         *,
         method: str = "POST",
     ) -> dict[str, Any]:
-        url = urljoin(self.config.normalized_base_url(), endpoint)
+        base_url = self.config.normalized_base_url()
+        if self.config.provider == LocalLlmProvider.EMBEDDED:
+            from .embedded_llm import ensure_embedded_server
+
+            base_url = ensure_embedded_server()
+        url = urljoin(base_url, endpoint)
         headers = {"Accept": "application/json"}
         data = None
         if body is not None:
@@ -195,10 +202,12 @@ class LocalLlmClient:
                 raw = response.read().decode("utf-8")
         except HTTPError as error:
             details = error.read().decode("utf-8", errors="replace")
-            raise LocalLlmError(
-                f"Помилка LLM API ({error.code}): {details}"
-            ) from error
+            raise LocalLlmError(f"Помилка LLM API ({error.code}): {details}") from error
         except URLError as error:
+            if self.config.provider == LocalLlmProvider.EMBEDDED:
+                raise LocalLlmError(
+                    "Вбудована модель недоступна. Перевірте її через кнопку 'Локальна модель'."
+                ) from error
             raise LocalLlmError(
                 "LLM-сервер недоступний. Перевірте адресу, інтернет або локальний сервер."
             ) from error

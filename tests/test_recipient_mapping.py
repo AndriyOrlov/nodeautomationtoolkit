@@ -20,6 +20,21 @@ def test_reads_csv_mapping_and_builds_markers(tmp_path):
     assert isinstance(result["table"], DataTable)
 
 
+def test_finds_headers_below_a_title_row(tmp_path):
+    source = tmp_path / "mapping_with_title.csv"
+    source.write_text(
+        "ТЕСТОВА ТАБЛИЦЯ;;;\n"
+        "Відкрите найменування;Шифр;Куди направляється;Примітка\n"
+        "99 тестова бригада;ТЕСТ-А9001;Тестове управління;Вигадано\n",
+        encoding="utf-8",
+    )
+
+    result = read_recipient_mapping(str(source))
+
+    assert result["count"] == 1
+    assert result["mapping"]["99 тестова бригада"]["cipher"] == "ТЕСТ-А9001"
+
+
 def test_converts_and_merges_groups_with_same_cipher():
     result = groups_to_ciphers(
         groups={"АЛЬФА": "1. Перший", "БРАВО": "2. Другий", "НЕМАЄ": "3. Третій"},

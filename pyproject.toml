@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "nodeautomationtoolkit"
-version = "0.3.4"
+version = "0.4.0"
 description = "Local visual automation toolkit with Python-powered nodes"
 readme = "README.md"
 requires-python = ">=3.12"
