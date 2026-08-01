@@ -1,4 +1,5 @@
 from .automation_assistant import AutomationAssistant, AutomationPlan
+from .batch_types import DocumentOperation, DocumentVariant, WordDocumentBatch
 from .definition import NodeDefinition, PortDefinition, PortKind, node
 from .executor import GraphExecutor, PreviewResult
 from .local_llm import LocalLlmClient, LocalLlmConfig, LocalLlmProvider
@@ -7,12 +8,15 @@ from .node_draft import NodeCodeReview, NodeDraft, install_node_draft, review_no
 from .patching import InstalledPatch, install_patch
 from .preview import format_live_preview
 from .registry import NodeRegistry
+from .table_types import DataTable
 from .word_types import WordDocument, WordParagraph, WordParagraphs, WordSaveResult
 
 __all__ = [
     "AutomationAssistant",
     "AutomationPlan",
     "ConnectionModel",
+    "DocumentOperation",
+    "DocumentVariant",
     "GraphExecutor",
     "GraphModel",
     "LocalLlmClient",
@@ -33,6 +37,8 @@ __all__ = [
     "node",
     "review_node_code",
     "WordDocument",
+    "WordDocumentBatch",
+    "DataTable",
     "WordParagraph",
     "WordParagraphs",
     "WordSaveResult",

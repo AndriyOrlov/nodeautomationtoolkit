@@ -1,5 +1,5 @@
 {
   "format": "nodeautomationtoolkit-patch-v1",
-  "version": "0.3.0",
-  "description": "Live Blueprint debugging, embedded previews and reliable node deletion"
+  "version": "0.3.2",
+  "description": "Recipient mapping, AI graph builder, dynamic ports and exact Word preview"
 }

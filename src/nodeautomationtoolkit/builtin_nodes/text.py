@@ -30,3 +30,26 @@ def regex_find(text: str, pattern: str, ignore_case: bool = True) -> list[str]:
 def replace(text: str, old: str, new: str) -> str:
     return text.replace(old, new)
 
+
+@node(
+    name="Розбити текст на слова",
+    category="Текст",
+    description=(
+        "Розбиває текст і після виконання додає окремий підписаний вихід для "
+        "кожного слова. Порти зберігаються разом зі сценарієм."
+    ),
+    type_id="builtin.text.split_words_dynamic",
+    outputs={"слова": "List"},
+    dynamic_outputs=True,
+)
+def split_words_dynamic(text: str = "", maximum_outputs: int = 30) -> dict:
+    words = re.findall(r"[^\W_]+(?:[-'’][^\W_]+)*", text, re.UNICODE)
+    limit = max(1, min(int(maximum_outputs), 200))
+    result: dict[str, object] = {"слова": words}
+    duplicates: dict[str, int] = {}
+    for index, word in enumerate(words[:limit], start=1):
+        base = word[:42]
+        duplicates[base] = duplicates.get(base, 0) + 1
+        suffix = f" #{duplicates[base]}" if duplicates[base] > 1 else ""
+        result[f"{index}. {base}{suffix}"] = word
+    return result

@@ -10,7 +10,7 @@ permissions:
   contents: write
 
 env:
-  RELEASE_VERSION: "0.3.0"
+  RELEASE_VERSION: "0.3.2"
 
 jobs:
   windows-release:
@@ -49,9 +49,12 @@ jobs:
             --collect-all docx `
             --hidden-import nodeautomationtoolkit.builtin_nodes.files `
             --hidden-import nodeautomationtoolkit.builtin_nodes.text `
+            --hidden-import nodeautomationtoolkit.builtin_nodes.text_analysis `
+            --hidden-import nodeautomationtoolkit.builtin_nodes.recipient_mapping `
             --hidden-import nodeautomationtoolkit.builtin_nodes.logic `
             --hidden-import nodeautomationtoolkit.builtin_nodes.windows_dialogs `
             --hidden-import nodeautomationtoolkit.builtin_nodes.word `
+            --hidden-import nodeautomationtoolkit.builtin_nodes.word_batch `
             --hidden-import nodeautomationtoolkit.builtin_nodes.output `
             --add-data "plugins;plugins" `
             --add-data "examples;examples" `

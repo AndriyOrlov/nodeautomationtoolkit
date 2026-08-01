@@ -71,7 +71,7 @@ class GraphExecutor:
             if inspect.isawaitable(value):
                 raise RuntimeError("Async-ноди будуть додані в наступній версії")
 
-            outputs = self._map_outputs(definition.outputs, value)
+            outputs = self._map_outputs(definition.outputs, value, definition.dynamic_outputs)
             results[node_id] = outputs
             if on_node_finished:
                 on_node_finished(node_id, outputs)
@@ -159,7 +159,7 @@ class GraphExecutor:
                 value = definition.function(**kwargs)
                 if inspect.isawaitable(value):
                     raise RuntimeError("Async-ноди не підтримують live-прев'ю")
-                outputs = self._map_outputs(definition.outputs, value)
+                outputs = self._map_outputs(definition.outputs, value, definition.dynamic_outputs)
                 results[node_id] = outputs
                 executed_order.append(node_id)
                 if on_node_finished:
@@ -279,7 +279,7 @@ class GraphExecutor:
         value = definition.function(**kwargs)
         if inspect.isawaitable(value):
             raise RuntimeError("Async-ноди будуть додані в наступній версії")
-        outputs = self._map_outputs(definition.outputs, value)
+        outputs = self._map_outputs(definition.outputs, value, definition.dynamic_outputs)
         results[node_id] = outputs
         order.append(node_id)
         if on_node_finished:
@@ -287,7 +287,15 @@ class GraphExecutor:
         return value
 
     @staticmethod
-    def _map_outputs(output_ports: list, value: Any) -> dict[str, Any]:
+    def _map_outputs(
+        output_ports: list,
+        value: Any,
+        allow_dynamic: bool = False,
+    ) -> dict[str, Any]:
+        if allow_dynamic:
+            if not isinstance(value, dict):
+                raise ValueError("Нода з динамічними виходами має повернути Dictionary")
+            return dict(value)
         if len(output_ports) == 1:
             return {output_ports[0].name: value}
         if isinstance(value, dict):

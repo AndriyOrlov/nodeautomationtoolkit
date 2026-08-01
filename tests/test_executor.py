@@ -118,3 +118,23 @@ def test_preview_skips_manual_node_until_triggered():
 
     assert skipped.order == []
     assert executed.values["manual"]["result"] == "ready"
+
+
+def test_dynamic_node_returns_named_word_outputs():
+    registry = NodeRegistry()
+    registry.reload()
+    graph = GraphModel(
+        nodes=[
+            NodeModel(
+                id="words",
+                type_id="builtin.text.split_words_dynamic",
+                parameters={"text": "Альфа Браво Альфа", "maximum_outputs": 10},
+            )
+        ]
+    )
+
+    result = GraphExecutor(registry).execute(graph)
+
+    assert result.values["words"]["слова"] == ["Альфа", "Браво", "Альфа"]
+    assert result.values["words"]["1. Альфа"] == "Альфа"
+    assert result.values["words"]["3. Альфа #2"] == "Альфа"

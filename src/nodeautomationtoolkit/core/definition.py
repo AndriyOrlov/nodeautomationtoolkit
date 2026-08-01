@@ -47,6 +47,7 @@ class NodeDefinition:
     execution_outputs: list[PortDefinition] = field(default_factory=list)
     execution_router: str = "all"
     preview_policy: str = "auto"
+    dynamic_outputs: bool = False
 
 
 def _definition_from_function(
@@ -61,6 +62,7 @@ def _definition_from_function(
     execution_outputs: tuple[str, ...],
     execution_router: str,
     preview_policy: str,
+    dynamic_outputs: bool,
 ) -> NodeDefinition:
     signature = inspect.signature(function)
     try:
@@ -123,6 +125,7 @@ def _definition_from_function(
         ],
         execution_router=execution_router,
         preview_policy=preview_policy,
+        dynamic_outputs=dynamic_outputs,
     )
 
 
@@ -137,6 +140,7 @@ def node(
     execution_outputs: tuple[str, ...] = (),
     execution_router: str = "all",
     preview_policy: str = "auto",
+    dynamic_outputs: bool = False,
 ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
     """Expose a regular Python function as a visual node."""
 
@@ -152,6 +156,7 @@ def node(
             execution_outputs=execution_outputs,
             execution_router=execution_router,
             preview_policy=preview_policy,
+            dynamic_outputs=dynamic_outputs,
         )
         function.__nat_node_definition__ = definition
         return function

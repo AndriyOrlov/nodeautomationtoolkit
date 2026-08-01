@@ -12,6 +12,7 @@ class NodeModel:
     x: float = 0.0
     y: float = 0.0
     parameters: dict[str, Any] = field(default_factory=dict)
+    dynamic_outputs: dict[str, str] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -20,6 +21,7 @@ class NodeModel:
             "x": self.x,
             "y": self.y,
             "parameters": self.parameters,
+            "dynamic_outputs": self.dynamic_outputs,
         }
 
     @classmethod
@@ -30,6 +32,10 @@ class NodeModel:
             x=float(data.get("x", 0.0)),
             y=float(data.get("y", 0.0)),
             parameters=dict(data.get("parameters", {})),
+            dynamic_outputs={
+                str(name): str(data_type)
+                for name, data_type in dict(data.get("dynamic_outputs", {})).items()
+            },
         )
 
 

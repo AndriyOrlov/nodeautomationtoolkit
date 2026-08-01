@@ -46,3 +46,11 @@ def test_installs_valid_draft(tmp_path: Path):
     target = install_node_draft(draft, tmp_path)
     assert target.name == "generated_double.py"
     assert target.read_text(encoding="utf-8") == SAFE_NODE
+
+
+def test_strict_ai_node_cannot_open_files():
+    code = SAFE_NODE + "\nwith open('secret.txt') as stream:\n    stream.read()\n"
+    review = review_node_code(code, allow_filesystem=False)
+
+    assert not review.installable
+    assert "не може відкривати" in "\n".join(review.errors)

@@ -88,7 +88,7 @@ class MainWindow(QMainWindow):
 
         self.editor_tabs = QTabWidget()
         self.editor_tabs.addTab(self.blueprint, "Blueprint 2.0")
-        self.editor_tabs.addTab(horizontal, "Сумісність 1.0")
+        self.compatibility_widget = horizontal
 
         vertical = QSplitter(Qt.Orientation.Vertical)
         vertical.addWidget(self.editor_tabs)
@@ -130,6 +130,22 @@ class MainWindow(QMainWindow):
             action.setShortcut(shortcut)
             action.triggered.connect(callback)
             toolbar.addAction(action)
+        toolbar.addSeparator()
+        self.compatibility_action = QAction("Форма 1.0", self)
+        self.compatibility_action.setCheckable(True)
+        self.compatibility_action.setChecked(False)
+        self.compatibility_action.setToolTip("Показати старий редактор лише за потреби")
+        self.compatibility_action.toggled.connect(self._toggle_compatibility_tab)
+        toolbar.addAction(self.compatibility_action)
+
+    def _toggle_compatibility_tab(self, visible: bool) -> None:
+        index = self.editor_tabs.indexOf(self.compatibility_widget)
+        if visible and index < 0:
+            self.editor_tabs.addTab(self.compatibility_widget, "Сумісність 1.0")
+            self.editor_tabs.setCurrentWidget(self.compatibility_widget)
+        elif not visible and index >= 0:
+            self.editor_tabs.setCurrentWidget(self.blueprint)
+            self.editor_tabs.removeTab(index)
 
     def install_offline_patch(self) -> None:
         filename, _ = QFileDialog.getOpenFileName(
@@ -159,9 +175,18 @@ class MainWindow(QMainWindow):
         dialog.exec()
 
     def open_automation_assistant(self) -> None:
-        dialog = AutomationAssistantDialog(self.registry, self._current_graph(), self)
-        dialog.graph_created.connect(self._set_graph_everywhere)
+        dialog = AutomationAssistantDialog(
+            self.registry,
+            self._current_graph(),
+            self.plugin_dir,
+            self,
+        )
+        dialog.graph_created.connect(self._apply_assistant_graph)
         dialog.exec()
+
+    def _apply_assistant_graph(self, graph: GraphModel) -> None:
+        self.blueprint.reload_definitions()
+        self._set_graph_everywhere(graph)
 
     def new_graph(self) -> None:
         if not self._confirm_discard():
@@ -272,6 +297,7 @@ class MainWindow(QMainWindow):
             self._log("Плагіни не оновлено: спочатку відкрийте порожній сценарій")
             return
         self.registry.reload(self.plugin_dir)
+        self.blueprint.reload_definitions()
         self.palette.populate(self.registry, self.search.text())
         self._report_plugin_errors()
         self._log(f"Завантажено нод: {len(self.registry.all())}")

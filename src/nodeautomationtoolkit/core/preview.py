@@ -3,6 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from .batch_types import WordDocumentBatch
+from .table_types import DataTable
 from .word_types import WordDocument, WordParagraphs, WordSaveResult
 
 
@@ -15,6 +17,15 @@ def format_live_preview(outputs: dict[str, Any], limit: int = 420) -> str:
 
 
 def _format_value(value: Any) -> str:
+    if isinstance(value, DataTable):
+        sample = " | ".join(str(item) for item in value.rows[0]) if value.rows else "порожньо"
+        return f"{value.title} · {len(value.rows)} рядків\n{sample}"
+    if isinstance(value, WordDocumentBatch):
+        names = ", ".join(item.name for item in value.variants[:4])
+        return (
+            f"{len(value.variants)} документів · {len(value.operations)} операцій\n"
+            f"{names}"
+        )
     if isinstance(value, WordDocument):
         preview = _compact_text(value.text)
         return f"{value.file_name} · {value.paragraph_count} абзаців\n{preview}"

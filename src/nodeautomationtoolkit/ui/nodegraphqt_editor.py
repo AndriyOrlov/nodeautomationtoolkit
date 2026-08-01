@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
 import re
 from collections import deque
 from typing import Any
@@ -14,6 +15,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QMessageBox,
     QPlainTextEdit,
     QPushButton,
     QSplitter,
@@ -34,11 +36,13 @@ TYPE_COLORS = {
     "bool": (220, 70, 90),
     "dict": (245, 158, 11),
     "Dictionary": (245, 158, 11),
+    "DataTable": (14, 165, 233),
     "float": (74, 222, 128),
     "int": (34, 197, 94),
     "List": (168, 85, 247),
     "str": (236, 72, 153),
     "WordDocument": (37, 99, 235),
+    "WordDocumentBatch": (124, 58, 237),
     "WordParagraphs": (6, 182, 212),
     "WordSaveResult": (22, 163, 74),
 }
@@ -67,6 +71,7 @@ class _PreviewWorker(QRunnable):
         super().__init__()
         self.generation = generation
         self.registry = registry
+        self._registered_type_ids: set[str] = set()
         self.graph = graph
         self.trigger_node_id = trigger_node_id
         self.initial_values = initial_values
@@ -154,7 +159,48 @@ def _node_widget_classes():
             self._label_widget.setText(text)
             self._label_widget.setToolTip(text)
 
-    return NodeStatusWidget, NodePreviewWidget
+    class NodeMultilineWidget(NodeBaseWidget):
+        def __init__(self, parent=None, name="", label="") -> None:
+            super().__init__(parent, name, label)
+            self._editor = QPlainTextEdit()
+            self._editor.setMinimumWidth(270)
+            self._editor.setMaximumWidth(330)
+            self._editor.setMinimumHeight(82)
+            self._editor.setMaximumHeight(125)
+            self._editor.setPlaceholderText("Вставте або введіть текст…")
+            self._editor.setStyleSheet(
+                "QPlainTextEdit { background: rgba(15, 23, 42, 210);"
+                "border: 1px solid rgba(148, 163, 184, 110);"
+                "border-radius: 4px; color: #f8fafc; padding: 5px; }"
+            )
+            self.set_custom_widget(self._editor)
+            self._editor.textChanged.connect(self.on_value_changed)
+
+        def get_value(self):
+            return self._editor.toPlainText()
+
+        def set_value(self, value):
+            text = "" if value is None else str(value)
+            if self._editor.toPlainText() != text:
+                self._editor.setPlainText(text)
+
+    class NodeCodeWidget(NodeBaseWidget):
+        def __init__(self, parent=None, code="") -> None:
+            super().__init__(parent, "_nat_source_code", "Python-код")
+            self._editor = QPlainTextEdit(code)
+            self._editor.setReadOnly(True)
+            self._editor.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
+            self._editor.setMinimumSize(340, 180)
+            self._editor.setMaximumWidth(520)
+            self.set_custom_widget(self._editor)
+
+        def get_value(self):
+            return self._editor.toPlainText()
+
+        def set_value(self, value):
+            self._editor.setPlainText(str(value))
+
+    return NodeStatusWidget, NodePreviewWidget, NodeMultilineWidget, NodeCodeWidget
 
 
 def create_nodegraphqt_class(
@@ -164,7 +210,9 @@ def create_nodegraphqt_class(
     """Build a NodeGraphQt class lazily so core tests need no display server."""
     from NodeGraphQt import BaseNode
 
-    NodeStatusWidget, NodePreviewWidget = _node_widget_classes()
+    NodeStatusWidget, NodePreviewWidget, NodeMultilineWidget, NodeCodeWidget = (
+        _node_widget_classes()
+    )
 
     def init(self) -> None:
         BaseNode.__init__(self)
@@ -180,9 +228,22 @@ def create_nodegraphqt_class(
         for port in definition.inputs:
             if not port.required and port.name not in hidden_inputs:
                 label = "Файл" if port.name == "selected_path" else ""
-                _add_parameter_widget(self, port, label=label)
+                _add_parameter_widget(
+                    self,
+                    port,
+                    label=label,
+                    multiline_widget_class=NodeMultilineWidget,
+                )
 
         self.add_custom_widget(NodeStatusWidget(self.view))
+        self.add_button(
+            "_nat_help",
+            text="Що робить ця нода?",
+            tooltip="Показати пояснення входів і виходів",
+        )
+        self.get_widget("_nat_help").value_changed.connect(
+            lambda *_args: action_handler("help", self)
+        )
         self.add_button(
             "_nat_run",
             text="Виконати ноду",
@@ -212,6 +273,15 @@ def create_nodegraphqt_class(
                 lambda *_args: action_handler("pick_file", self)
             )
 
+        if definition.category == "Згенеровані" or definition.function.__module__.startswith(
+            "nat_user_plugin_"
+        ):
+            try:
+                source_code = inspect.getsource(definition.function)
+            except (OSError, TypeError):
+                source_code = "Код цієї ноди недоступний для перегляду"
+            self.add_custom_widget(NodeCodeWidget(self.view, source_code))
+
         self.add_custom_widget(NodePreviewWidget(self.view))
 
     category = re.sub(r"[^a-zA-Z0-9]+", "_", definition.category).strip("_")
@@ -225,7 +295,13 @@ def create_nodegraphqt_class(
     return type(_safe_class_name(definition.type_id), (BaseNode,), attributes)
 
 
-def _add_parameter_widget(node, port: PortDefinition, *, label: str = "") -> None:
+def _add_parameter_widget(
+    node,
+    port: PortDefinition,
+    *,
+    label: str = "",
+    multiline_widget_class=None,
+) -> None:
     value = port.default
     if port.data_type == "bool" or isinstance(value, bool):
         node.add_checkbox(port.name, label=label, state=bool(value))
@@ -246,6 +322,16 @@ def _add_parameter_widget(node, port: PortDefinition, *, label: str = "") -> Non
             max_value=1_000_000_000,
             double=True,
         )
+    elif multiline_widget_class is not None and port.name in {
+        "fields_json",
+        "markers_text",
+        "names_text",
+        "replacement_text",
+        "text",
+    }:
+        widget = multiline_widget_class(node.view, port.name, label)
+        widget.set_value(value)
+        node.add_custom_widget(widget)
     else:
         node.add_text_input(
             port.name,
@@ -284,6 +370,7 @@ class NodeGraphQtEditor(QWidget):
 
         self.palette = NodesPaletteWidget(node_graph=self.graph)
         self.properties = PropertiesBinWidget(node_graph=self.graph)
+        self.properties.setVisible(False)
         splitter = QSplitter()
         splitter.addWidget(self.palette)
         splitter.addWidget(self.graph.widget)
@@ -308,12 +395,17 @@ class NodeGraphQtEditor(QWidget):
         delete_selected.clicked.connect(self.delete_selected_nodes)
         self.live_status = QLabel("LIVE · очікує змін")
         self.live_status.setStyleSheet("color: #93c5fd; padding: 0 8px;")
+        self.properties_toggle = QPushButton("Права панель")
+        self.properties_toggle.setCheckable(True)
+        self.properties_toggle.setChecked(False)
+        self.properties_toggle.toggled.connect(self.properties.setVisible)
 
         controls = QHBoxLayout()
         controls.setContentsMargins(8, 5, 8, 5)
         controls.addWidget(self.live_toggle)
         controls.addWidget(run_selected)
         controls.addWidget(delete_selected)
+        controls.addWidget(self.properties_toggle)
         controls.addWidget(self.live_status)
         controls.addStretch(1)
 
@@ -342,6 +434,8 @@ class NodeGraphQtEditor(QWidget):
     def _register_definitions(self) -> None:
         node_menu = self.graph.get_context_menu("nodes")
         for definition in self.registry.all():
+            if definition.type_id in self._registered_type_ids:
+                continue
             node_class = create_nodegraphqt_class(
                 definition,
                 self._handle_node_action,
@@ -357,12 +451,35 @@ class NodeGraphQtEditor(QWidget):
                 func=lambda graph, node: graph.delete_node(node),
                 node_class=node_class,
             )
+            self._registered_type_ids.add(definition.type_id)
+
+    def reload_definitions(self) -> None:
+        self._register_definitions()
 
     def _handle_node_action(self, action: str, node) -> None:
         if action == "pick_file":
             self._pick_file(node)
         elif action == "run":
             self.run_node(node.id)
+        elif action == "help":
+            self._show_node_help(node)
+
+    def _show_node_help(self, node) -> None:
+        definition: NodeDefinition = node.NAT_DEFINITION
+        inputs = "\n".join(
+            f"• {port.name} ({port.data_type}){' — обов’язковий' if port.required else ''}"
+            for port in definition.inputs
+        ) or "• немає"
+        outputs = "\n".join(
+            f"• {port.name} ({port.data_type})" for port in definition.outputs
+        ) or "• немає"
+        if definition.dynamic_outputs:
+            outputs += "\n• додаткові виходи створюються після виконання"
+        QMessageBox.information(
+            self,
+            definition.name,
+            f"{definition.description or 'Опис відсутній'}\n\nВХОДИ\n{inputs}\n\nВИХОДИ\n{outputs}",
+        )
 
     def _pick_file(self, node) -> None:
         definition: NodeDefinition = node.NAT_DEFINITION
@@ -540,12 +657,32 @@ class NodeGraphQtEditor(QWidget):
             self.live_status.setStyleSheet("color: #4ade80; padding: 0 8px;")
 
     def _show_node_outputs(self, node_id: str, outputs: dict[str, Any]) -> None:
+        self._sync_dynamic_outputs(node_id, outputs)
         self._set_node_state(
             node_id,
             "success",
             "ГОТОВО",
             format_live_preview(outputs),
         )
+
+    def _sync_dynamic_outputs(self, node_id: str, outputs: dict[str, Any]) -> None:
+        node = self.graph.get_node_by_id(node_id)
+        if node is None:
+            return
+        definition: NodeDefinition | None = getattr(node, "NAT_DEFINITION", None)
+        if definition is None or not definition.dynamic_outputs:
+            return
+        existing = set(node.outputs())
+        changed = False
+        for name, value in outputs.items():
+            if name in existing:
+                continue
+            data_type = "str" if isinstance(value, str) else "Any"
+            color = TYPE_COLORS.get(data_type, (45, 212, 191))
+            node.add_output(name, multi_output=True, color=color)
+            changed = True
+        if changed and not self._loading:
+            self.graph_changed.emit()
 
     def _set_node_state(
         self,
@@ -605,6 +742,13 @@ class NodeGraphQtEditor(QWidget):
                 )
                 if node is None:
                     raise ValueError(f"Не вдалося створити ноду {item.type_id}")
+                for name, data_type in item.dynamic_outputs.items():
+                    if name not in node.outputs():
+                        node.add_output(
+                            name,
+                            multi_output=True,
+                            color=TYPE_COLORS.get(data_type, (45, 212, 191)),
+                        )
                 for name, value in item.parameters.items():
                     if node.has_property(name):
                         node.set_property(name, value, push_undo=False)
@@ -640,6 +784,11 @@ class NodeGraphQtEditor(QWidget):
                 x=x,
                 y=y,
                 parameters=parameters,
+                dynamic_outputs={
+                    name: "str"
+                    for name in node.outputs()
+                    if name not in {port.name for port in definition.outputs}
+                },
             )
             model.nodes.append(item)
             node_ids[node.id] = item
