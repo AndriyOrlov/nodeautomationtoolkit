@@ -71,7 +71,6 @@ class _PreviewWorker(QRunnable):
         super().__init__()
         self.generation = generation
         self.registry = registry
-        self._registered_type_ids: set[str] = set()
         self.graph = graph
         self.trigger_node_id = trigger_node_id
         self.initial_values = initial_values
@@ -350,6 +349,7 @@ class NodeGraphQtEditor(QWidget):
         from NodeGraphQt.constants import ViewerEnum
 
         self.registry = registry
+        self._registered_type_ids: set[str] = set()
         self._graph_name = "Новий сценарій"
         self._loading = False
         self._live_values: dict[str, dict[str, Any]] = {}
