@@ -60,9 +60,7 @@ def _parse_variants(
         variants = [DocumentVariant(str(item)) for item in names if str(item).strip()]
     else:
         variants = [
-            DocumentVariant(line.strip())
-            for line in names_text.splitlines()
-            if line.strip()
+            DocumentVariant(line.strip()) for line in names_text.splitlines() if line.strip()
         ]
     if not variants:
         variants = [DocumentVariant("Витяг")]
@@ -100,8 +98,7 @@ def create_document_batch(
     name="Замінити текст у пакеті",
     category="Word · Пакет",
     description=(
-        "Додає заміну для кожного документа. У новому тексті працюють поля "
-        "{{name}} та поля з JSON."
+        "Додає заміну для кожного документа. У новому тексті працюють поля {{name}} та поля з JSON."
     ),
     type_id="builtin.word_batch.replace_text",
 )
@@ -195,6 +192,69 @@ def batch_replace_last_page(
 ) -> WordDocumentBatch:
     example = _required_docx(example_page_path, "Приклад останньої сторінки")
     return batch.with_operation("replace_last_page", example_page_path=str(example))
+
+
+def _normalize_page_selector(page: str | int) -> str | int:
+    if isinstance(page, int):
+        if page < 1:
+            raise ValueError("Номер сторінки має бути більшим за нуль")
+        return page
+    value = str(page).strip().casefold()
+    first_aliases = {"перша", "першу", "першої", "first", "початок", "на початку"}
+    last_aliases = {"остання", "останню", "останньої", "last", "кінець", "в кінці"}
+    if value in first_aliases:
+        return "first"
+    if value in last_aliases:
+        return "last"
+    try:
+        page_number = int(value)
+    except ValueError as error:
+        raise ValueError("Сторінка має бути числом, словом 'перша' або словом 'остання'") from error
+    if page_number < 1:
+        raise ValueError("Номер сторінки має бути більшим за нуль")
+    return page_number
+
+
+@node(
+    name="Видалити сторінку",
+    category="Word · Пакет",
+    description=(
+        "Видаляє одну сторінку в кожному документі пакета. У полі page вкажіть "
+        "номер, 'перша' або 'остання'. Точні межі сторінок визначає Microsoft Word."
+    ),
+    type_id="builtin.word_batch.delete_page",
+)
+def batch_delete_page(
+    batch: WordDocumentBatch,
+    page: str = "остання",
+) -> WordDocumentBatch:
+    return batch.with_operation("delete_page", page=_normalize_page_selector(page))
+
+
+@node(
+    name="Вставити сторінку",
+    category="Word · Пакет",
+    description=(
+        "Вставляє нову сторінку в кожен документ пакета. 'перша' додає її на "
+        "початок, 'остання' — у кінець, а номер — перед сторінкою з цим номером. "
+        "Поле page_docx можна лишити порожнім для чистої сторінки або вказати "
+        "DOCX-заготовку з готовим оформленням. Потребує Microsoft Word."
+    ),
+    type_id="builtin.word_batch.insert_page",
+)
+def batch_insert_page(
+    batch: WordDocumentBatch,
+    page: str = "остання",
+    page_docx: str = "",
+) -> WordDocumentBatch:
+    template = ""
+    if page_docx.strip():
+        template = str(_required_docx(page_docx, "DOCX-заготовка сторінки"))
+    return batch.with_operation(
+        "insert_page",
+        page=_normalize_page_selector(page),
+        page_docx=template,
+    )
 
 
 @node(
@@ -400,6 +460,58 @@ def _page_range(document, first_page: int, last_page: int):
     return document.Range(Start=start, End=end)
 
 
+def _resolve_page_number(document, selector: str | int, *, allow_append: bool = False) -> int:
+    page_count = int(document.ComputeStatistics(2))
+    normalized = _normalize_page_selector(selector)
+    if normalized == "first":
+        return 1
+    if normalized == "last":
+        return page_count + 1 if allow_append else page_count
+    maximum = page_count + 1 if allow_append else page_count
+    if normalized > maximum:
+        if allow_append:
+            raise ValueError(
+                f"У документі {page_count} сторінок; вставити можна не далі сторінки "
+                f"{page_count + 1}"
+            )
+        raise ValueError(f"У документі лише {page_count} сторінок")
+    return normalized
+
+
+def _insert_page(document, selector: str | int, page_docx: str = "") -> None:
+    document.Repaginate()
+    page_number = _resolve_page_number(document, selector, allow_append=True)
+    page_count = int(document.ComputeStatistics(2))
+    if page_number == page_count + 1:
+        insertion_position = document.Content.End - 1
+        document.Range(
+            Start=insertion_position,
+            End=insertion_position,
+        ).InsertBreak(7)
+        if page_docx:
+            insertion_position = document.Content.End - 1
+            document.Range(
+                Start=insertion_position,
+                End=insertion_position,
+            ).InsertFile(page_docx)
+    else:
+        insertion_position = document.GoTo(
+            What=1,
+            Which=1,
+            Count=page_number,
+        ).Start
+        document.Range(
+            Start=insertion_position,
+            End=insertion_position,
+        ).InsertBreak(7)
+        if page_docx:
+            document.Range(
+                Start=insertion_position,
+                End=insertion_position,
+            ).InsertFile(page_docx)
+    document.Repaginate()
+
+
 def _apply_word_operation(application, document, operation, variant: DocumentVariant) -> None:
     options = operation.options()
     if operation.kind == "replace_text":
@@ -418,6 +530,15 @@ def _apply_word_operation(application, document, operation, variant: DocumentVar
         target = _page_range(document, page_count, page_count)
         target.Delete()
         target.InsertFile(options["example_page_path"])
+        return
+    if operation.kind == "delete_page":
+        document.Repaginate()
+        page_number = _resolve_page_number(document, options["page"])
+        _page_range(document, page_number, page_number).Delete()
+        document.Repaginate()
+        return
+    if operation.kind == "insert_page":
+        _insert_page(document, options["page"], options["page_docx"])
         return
     if operation.kind == "replace_block":
         start_range = _find_word_range(document, options["start_marker"])
@@ -440,15 +561,11 @@ def _apply_word_operation(application, document, operation, variant: DocumentVar
         if options["replacement_docx"]:
             target.InsertFile(options["replacement_docx"])
         else:
-            target.Text = _expand_fields(options["replacement_text"], variant).replace(
-                "\n", "\r"
-            )
+            target.Text = _expand_fields(options["replacement_text"], variant).replace("\n", "\r")
         return
     if operation.kind == "replace_regex_block":
         content = str(document.Content.Text)
-        start_match = _compile_block_pattern(
-            options["start_pattern"], "початку"
-        ).search(content)
+        start_match = _compile_block_pattern(options["start_pattern"], "початку").search(content)
         if start_match is None:
             raise ValueError("Не знайдено початок основної частини документа")
         end_match = _compile_block_pattern(options["end_pattern"], "кінця").search(
@@ -648,9 +765,7 @@ def _save_batch_portable(batch: WordDocumentBatch, targets: list[Path]) -> list[
             for operation in batch.operations:
                 if operation.kind == "keep_items_together":
                     pattern = _compile_item_pattern(operation.options()["item_pattern"])
-                    signature = _compile_item_pattern(
-                        operation.options()["signature_pattern"]
-                    )
+                    signature = _compile_item_pattern(operation.options()["signature_pattern"])
                     paragraphs = list(_iter_document_paragraphs(document))
                     starts = [
                         index
@@ -659,9 +774,7 @@ def _save_batch_portable(batch: WordDocumentBatch, targets: list[Path]) -> list[
                     ]
                     for position, start in enumerate(starts):
                         stop = (
-                            starts[position + 1]
-                            if position + 1 < len(starts)
-                            else len(paragraphs)
+                            starts[position + 1] if position + 1 < len(starts) else len(paragraphs)
                         )
                         for index in range(start + 1, stop):
                             if signature.search(paragraphs[index].text):
@@ -669,14 +782,10 @@ def _save_batch_portable(batch: WordDocumentBatch, targets: list[Path]) -> list[
                                 break
                         for index in range(start, stop):
                             paragraphs[index].paragraph_format.keep_together = True
-                            paragraphs[index].paragraph_format.keep_with_next = (
-                                index < stop - 1
-                            )
+                            paragraphs[index].paragraph_format.keep_with_next = index < stop - 1
                     continue
                 if operation.kind != "replace_text":
-                    raise RuntimeError(
-                        "Ця операція потребує встановленого Microsoft Word"
-                    )
+                    raise RuntimeError("Ця операція потребує встановленого Microsoft Word")
                 options = operation.options()
                 replacement = _expand_fields(options["replacement_text"], variant)
                 remaining_one = not options["replace_all"]
@@ -739,8 +848,7 @@ def preview_document_batch(batch: WordDocumentBatch) -> dict:
     name="Зберегти пакет DOCX",
     category="Word · Пакет",
     description=(
-        "Фінальна нода: за один запуск застосовує всі правила й створює всі DOCX "
-        "у вибраній папці."
+        "Фінальна нода: за один запуск застосовує всі правила й створює всі DOCX у вибраній папці."
     ),
     type_id="builtin.word_batch.save",
     outputs={"paths": "List", "count": "int", "message": "str"},
@@ -760,13 +868,12 @@ def save_document_batch(
     destination.mkdir(parents=True, exist_ok=True)
     targets = _output_paths(batch, destination, filename_template, overwrite)
     portable_operations = {"replace_text", "keep_items_together"}
-    requires_word = any(
-        operation.kind not in portable_operations for operation in batch.operations
-    )
+    requires_word = any(operation.kind not in portable_operations for operation in batch.operations)
     requires_word = requires_word or any(
         operation.kind == "replace_text"
         and any(
-            "\n" in _expand_fields(
+            "\n"
+            in _expand_fields(
                 operation.options()["replacement_text"],
                 variant,
             )

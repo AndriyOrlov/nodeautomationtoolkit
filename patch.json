@@ -1,5 +1,5 @@
 {
   "format": "nodeautomationtoolkit-patch-v1",
-  "version": "0.3.2",
-  "description": "Recipient mapping, AI graph builder, dynamic ports and exact Word preview"
+  "version": "0.3.3",
+  "description": "Delete or insert a first, last or numbered Word page"
 }
