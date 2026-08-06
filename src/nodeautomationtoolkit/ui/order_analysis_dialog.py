@@ -1,21 +1,22 @@
 """
-Діалог «Аналіз наказу AI» — режим «до / після».
+Діалог «Навчання за прикладом» — режим ДО / ПІСЛЯ.
 
-Ліворуч  — оригінальний текст наказу (завантажений файл).
-Праворуч — результат AI-обробки (структурований аналіз / витяги).
-Знизу    — автоматично побудоване дерево нод (сценарій автоматизації).
+Користувач завантажує:
+  - Ліворуч (ДО)    — оригінальний наказ (вхідний файл)
+  - Праворуч (ПІСЛЯ) — результат ручної обробки (очікуваний вихід)
+
+AI аналізує РІЗНИЦЮ між двома документами та будує граф нод,
+який автоматично відтворить ту саму трансформацію для будь-якого
+нового наказу тієї ж структури.
 """
 from __future__ import annotations
 
 import json
 import uuid
 from pathlib import Path
-from typing import Any
 
 from PySide6.QtCore import (
     QObject,
-    QRectF,
-    QSizeF,
     Qt,
     QThread,
     Signal,
@@ -28,15 +29,11 @@ from PySide6.QtGui import (
     QLinearGradient,
     QPainter,
     QPen,
-    QSyntaxHighlighter,
-    QTextCharFormat,
 )
 from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
     QFileDialog,
-    QFrame,
-    QGraphicsEllipseItem,
     QGraphicsItem,
     QGraphicsLineItem,
     QGraphicsRectItem,
@@ -52,7 +49,6 @@ from PySide6.QtWidgets import (
     QPushButton,
     QSizePolicy,
     QSplitter,
-    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -71,179 +67,160 @@ from nodeautomationtoolkit.core.registry import NodeRegistry
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Системні промпти
+# Системний промпт — аналіз різниці та побудова графа
 # ─────────────────────────────────────────────────────────────────────────────
-_SYS_ANALYZE = """Ти — спеціалізований AI-аналітик військових наказів та документів ЗСУ.
-Проаналізуй наказ і поверни структурований Markdown-звіт ВИКЛЮЧНО за шаблоном:
+_SYS_DIFF_TO_GRAPH = """Ти — AI-аналітик трансформацій документів для Node Automation Toolkit.
 
-### 📋 Метадані наказу
-- Номер: …
-- Дата: …
-- Місце: …
-- Вид: …
+Тобі дають ДВА документи:
+1. ВХІДНИЙ (ДО)  — оригінальний наказ
+2. ОЧІКУВАНИЙ (ПІСЛЯ) — результат ручної обробки цього наказу
 
-### 🏛 Виявлені військові частини
-| Відкрита назва | Шифр (якщо відомий) | Кількість згадок |
-|---|---|---|
+## Твоє завдання:
+1. Знайти ВСІ відмінності між документами (що додано, що видалено, що замінено, що перегруповано)
+2. Сформулювати кроки трансформації зрозумілою мовою (Markdown-звіт)
+3. Побудувати JSON-граф нод, який автоматично відтворить ці самі трансформації
 
-### 📑 Структура пунктів
-1. Пункт 1 — короткий зміст
-2. …
+## Формат відповіді — СТРОГО:
 
-### 👤 Особовий склад
-| ПІБ | Звання | Дія | Підстава |
-|---|---|---|---|
+===АНАЛІЗ===
+### Виявлені трансформації
+1. [крок 1] — наприклад: "Замінено відкрите найменування '167 окрема механізована бригада' → 'в/ч А0000'"
+2. [крок 2] — наприклад: "Витягнуто тільки пункти де згадується конкретна ВЧ"
+3. ...
 
-### ⚙️ Рекомендований сценарій
-Коротко: які ноди потрібні для автоматизації цього наказу.
+### Що залишилось незмінним
+- ...
 
-Відповідай ВИКЛЮЧНО українською мовою. Будь точним і лаконічним."""
+### Шаблон трансформації
+Короткий опис: цей граф можна застосувати до будь-якого наказу такої ж структури.
 
-_SYS_GRAPH = """Ти — AI-планувальник сценаріїв Node Automation Toolkit.
-Отримуєш аналіз наказу і будуєш граф автоматизації.
-Відповідай ВИКЛЮЧНО валідним JSON (без markdown, без коментарів):
-
+===ГРАФ===
 {
-  "title": "Назва",
-  "summary": "Опис",
+  "title": "...",
+  "summary": "...",
   "nodes": [
     {"id": "n1", "type_id": "builtin.flow.start", "label": "Старт", "x": 0, "y": 0, "params": {}},
-    {"id": "n2", "type_id": "builtin.word.read_docx", "label": "Читати DOCX", "x": 220, "y": 0, "params": {"path": ""}},
-    {"id": "n3", "type_id": "builtin.order.map_military_units", "label": "Знайти ВЧ", "x": 440, "y": 0, "params": {}},
-    {"id": "n4", "type_id": "builtin.output.show_result", "label": "Результат", "x": 660, "y": 0, "params": {}}
+    {"id": "n2", "type_id": "builtin.word.read_docx", "label": "Читати наказ", "x": 220, "y": 0, "params": {"path": ""}},
+    ...
   ],
   "edges": [
     {"from": "n1", "from_port": "then", "to": "n2", "to_port": "exec", "kind": "execution"},
-    {"from": "n2", "from_port": "document", "to": "n3", "to_port": "text", "kind": "data"}
+    ...
   ]
 }
 
-Доступні type_id (використовуй лише їх):
-- builtin.flow.start · builtin.flow.sub_start · builtin.flow.branch · builtin.flow.sequence
-- builtin.word.read_docx · builtin.word.replace_in_docx · builtin.word.merge_docx · builtin.word.word_count
-- builtin.order.read_recipient_mapping · builtin.order.map_military_units · builtin.order.groups_to_ciphers
-- builtin.order_batch.create_unit_extracts
-- builtin.excel.read_sheet · builtin.excel.save_table · builtin.excel.write_cell
-- builtin.files.list_files · builtin.files.move_file · builtin.files.create_folder
-- builtin.text.replace · builtin.text.fill_template · builtin.text.today_date · builtin.text.clean
-- builtin.output.show_result · builtin.output.show_table
+## Доступні type_id нод:
+Потік: builtin.flow.start · builtin.flow.sub_start · builtin.flow.branch · builtin.flow.sequence
+Word: builtin.word.read_docx · builtin.word.replace_in_docx · builtin.word.merge_docx · builtin.word.word_count · builtin.word.create_docx · builtin.word.save_selected_paragraphs
+Наказ: builtin.order.read_recipient_mapping · builtin.order.map_military_units · builtin.order.groups_to_ciphers · builtin.order_batch.create_unit_extracts
+Excel: builtin.excel.read_sheet · builtin.excel.save_table · builtin.excel.write_cell
+Файли: builtin.files.list_files · builtin.files.move_file · builtin.files.create_folder · builtin.files.create
+Текст: builtin.text.replace · builtin.text.fill_template · builtin.text.today_date · builtin.text.clean · builtin.text.regex_replace · builtin.text.split_lines
+Вивід: builtin.output.show_result · builtin.output.show_table
 
-ВАЖЛИВО: x координати — кратні 220, y — кратні 120 (для кожного паралельного потоку +120)."""
+## Правила JSON-графа:
+- x координати кратні 220, y кратні 120 (паралельні потоки — різні y)
+- Вузли виконання (exec/then): kind="execution"
+- Дані: kind="data"
+- Завжди починай з builtin.flow.start
+
+## ВАЖЛИВО:
+- Відповідай ВИКЛЮЧНО у форматі ===АНАЛІЗ=== ... ===ГРАФ=== { ... }
+- Граф має відтворювати ТІЛЬКИ виявлені трансформації — не вигадуй зайвого
+- Відповідай українською мовою"""
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Кольорова схема типів нод
+# Кольори нод
 # ─────────────────────────────────────────────────────────────────────────────
-NODE_COLORS: dict[str, str] = {
-    "builtin.flow": "#6366f1",       # Потік — фіолетовий
-    "builtin.word": "#0284c7",       # Word — синій
-    "builtin.order": "#d97706",      # Наказ — помаранчевий
+_NODE_COLORS = {
+    "builtin.flow": "#6366f1",
+    "builtin.word": "#0284c7",
+    "builtin.order": "#d97706",
     "builtin.order_batch": "#b45309",
-    "builtin.excel": "#15803d",      # Excel — зелений
-    "builtin.files": "#64748b",      # Файли — сірий
-    "builtin.text": "#7c3aed",       # Текст — пурпурний
-    "builtin.output": "#dc2626",     # Вивід — червоний
+    "builtin.excel": "#15803d",
+    "builtin.files": "#64748b",
+    "builtin.text": "#7c3aed",
+    "builtin.output": "#dc2626",
 }
 
+NODE_W, NODE_H = 200, 60
 
-def _node_color(type_id: str) -> str:
-    for prefix, color in NODE_COLORS.items():
+
+def _color(type_id: str) -> QColor:
+    for prefix, hex_c in _NODE_COLORS.items():
         if type_id.startswith(prefix):
-            return color
-    return "#334155"
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Графічна нода для дерева нод
-# ─────────────────────────────────────────────────────────────────────────────
-NODE_W = 190
-NODE_H = 56
+            return QColor(hex_c)
+    return QColor("#334155")
 
 
 class GraphNodeItem(QGraphicsRectItem):
-    """Візуальна нода у дереві нод."""
-
-    def __init__(self, node_data: dict) -> None:
+    def __init__(self, nd: dict) -> None:
         super().__init__(0, 0, NODE_W, NODE_H)
-        self.node_data = node_data
-        color = QColor(_node_color(node_data.get("type_id", "")))
-
-        # Градієнт
+        color = _color(nd.get("type_id", ""))
         grad = QLinearGradient(0, 0, 0, NODE_H)
-        grad.setColorAt(0, color.lighter(130))
+        grad.setColorAt(0, color.lighter(140))
         grad.setColorAt(1, color)
         self.setBrush(QBrush(grad))
-        self.setPen(QPen(color.darker(140), 1.5))
-        self.setPos(node_data.get("x", 0), node_data.get("y", 0))
+        self.setPen(QPen(color.darker(150), 1.5))
+        self.setPos(nd.get("x", 0), nd.get("y", 0))
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, True)
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, True)
+        self._type_id = nd.get("type_id", "")
 
-        # Підпис
-        label = node_data.get("label", node_data.get("type_id", "").split(".")[-1])
-        text = QGraphicsTextItem(label, self)
-        text.setDefaultTextColor(QColor("white"))
-        font = QFont("Segoe UI", 9, QFont.Weight.Bold)
-        text.setFont(font)
-        text.setTextWidth(NODE_W - 12)
-        text.setPos(6, 6)
+        label = nd.get("label", self._type_id.split(".")[-1])
+        t = QGraphicsTextItem(label, self)
+        t.setDefaultTextColor(QColor("white"))
+        t.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
+        t.setTextWidth(NODE_W - 12)
+        t.setPos(6, 6)
 
-        # type_id рядок
-        tid = QGraphicsTextItem(node_data.get("type_id", ""), self)
-        tid.setDefaultTextColor(QColor(255, 255, 255, 140))
-        small = QFont("Segoe UI", 7)
-        tid.setFont(small)
-        tid.setTextWidth(NODE_W - 12)
-        tid.setPos(6, 30)
+        sub = QGraphicsTextItem(self._type_id, self)
+        sub.setDefaultTextColor(QColor(255, 255, 255, 130))
+        sub.setFont(QFont("Segoe UI", 7))
+        sub.setTextWidth(NODE_W - 12)
+        sub.setPos(6, 32)
 
-    def port_pos(self, side: str) -> tuple[float, float]:
-        """Позиція входу або виходу ноди у координатах сцени."""
-        sx, sy = self.x(), self.y()
-        if side == "out":
-            return sx + NODE_W, sy + NODE_H / 2
-        return sx, sy + NODE_H / 2
+    def out_pos(self) -> tuple[float, float]:
+        return self.x() + NODE_W, self.y() + NODE_H / 2
+
+    def in_pos(self) -> tuple[float, float]:
+        return self.x(), self.y() + NODE_H / 2
 
 
 class EdgeItem(QGraphicsLineItem):
-    """З'єднання між двома нодами."""
-
     def __init__(self, src: GraphNodeItem, dst: GraphNodeItem, kind: str = "data") -> None:
-        sx, sy = src.port_pos("out")
-        dx, dy = dst.port_pos("in")
+        sx, sy = src.out_pos()
+        dx, dy = dst.in_pos()
         super().__init__(sx, sy, dx, dy)
-        color = QColor("#6366f1") if kind == "execution" else QColor("#94a3b8")
-        pen = QPen(color, 2 if kind == "execution" else 1.5, Qt.PenStyle.SolidLine)
-        self.setPen(pen)
+        color = QColor("#818cf8") if kind == "execution" else QColor("#64748b")
+        self.setPen(QPen(color, 2 if kind == "execution" else 1.5))
         self.setZValue(-1)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Панель дерева нод
-# ─────────────────────────────────────────────────────────────────────────────
 class NodeTreePanel(QWidget):
-    """Панель для відображення дерева нод з прокруткою та zoom."""
-
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(2)
 
-        # Toolbar
         bar = QHBoxLayout()
-        self._title = QLabel("⚙️ Дерево нод")
-        self._title.setStyleSheet("font-weight: bold; font-size: 13px; padding: 2px 6px;")
-        zoom_in = QPushButton("+")
-        zoom_in.setFixedWidth(30)
-        zoom_in.clicked.connect(lambda: self._view.scale(1.2, 1.2))
-        zoom_out = QPushButton("−")
-        zoom_out.setFixedWidth(30)
-        zoom_out.clicked.connect(lambda: self._view.scale(1 / 1.2, 1 / 1.2))
-        fit_btn = QPushButton("⊡ Вмістити")
-        fit_btn.clicked.connect(self._fit)
-        bar.addWidget(self._title)
+        self._lbl = QLabel("⚙️  Автоматично побудований граф")
+        self._lbl.setStyleSheet("font-weight: bold; font-size: 13px; color: #a78bfa; padding: 2px 6px;")
+        zi = QPushButton("+")
+        zi.setFixedWidth(28)
+        zi.clicked.connect(lambda: self._view.scale(1.2, 1.2))
+        zo = QPushButton("−")
+        zo.setFixedWidth(28)
+        zo.clicked.connect(lambda: self._view.scale(1 / 1.2, 1 / 1.2))
+        fit = QPushButton("⊡ Вмістити")
+        fit.clicked.connect(self._fit)
+        bar.addWidget(self._lbl)
         bar.addStretch()
-        bar.addWidget(zoom_out)
-        bar.addWidget(zoom_in)
-        bar.addWidget(fit_btn)
+        bar.addWidget(zo)
+        bar.addWidget(zi)
+        bar.addWidget(fit)
         layout.addLayout(bar)
 
         self._scene = QGraphicsScene(self)
@@ -253,34 +230,27 @@ class NodeTreePanel(QWidget):
         self._view.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
         layout.addWidget(self._view)
 
-    def load_graph(self, graph_json: dict) -> None:
+    def load_graph(self, gj: dict) -> None:
         self._scene.clear()
-        nodes_data: list[dict] = graph_json.get("nodes", [])
-        edges_data: list[dict] = graph_json.get("edges", [])
-
-        id_to_item: dict[str, GraphNodeItem] = {}
-        for nd in nodes_data:
+        id_map: dict[str, GraphNodeItem] = {}
+        for nd in gj.get("nodes", []):
             item = GraphNodeItem(nd)
             self._scene.addItem(item)
-            id_to_item[nd["id"]] = item
-
-        for ed in edges_data:
-            src = id_to_item.get(ed.get("from", ""))
-            dst = id_to_item.get(ed.get("to", ""))
-            if src and dst:
-                edge = EdgeItem(src, dst, ed.get("kind", "data"))
-                self._scene.addItem(edge)
-
-        title = graph_json.get("title", "")
+            id_map[nd["id"]] = item
+        for ed in gj.get("edges", []):
+            s = id_map.get(ed.get("from", ""))
+            d = id_map.get(ed.get("to", ""))
+            if s and d:
+                self._scene.addItem(EdgeItem(s, d, ed.get("kind", "data")))
+        title = gj.get("title", "")
         if title:
-            self._title.setText(f"⚙️ {title}")
-
+            self._lbl.setText(f"⚙️  {title}")
         self._draw_grid()
         self._fit()
 
     def clear(self) -> None:
         self._scene.clear()
-        self._title.setText("⚙️ Дерево нод")
+        self._lbl.setText("⚙️  Автоматично побудований граф")
 
     def _fit(self) -> None:
         r = self._scene.itemsBoundingRect()
@@ -288,7 +258,6 @@ class NodeTreePanel(QWidget):
             self._view.fitInView(r.adjusted(-40, -40, 40, 40), Qt.AspectRatioMode.KeepAspectRatio)
 
     def _draw_grid(self) -> None:
-        """Малює сітку на фоні."""
         r = self._scene.itemsBoundingRect().adjusted(-200, -200, 200, 200)
         pen = QPen(QColor("#1e293b"), 1)
         step = 40
@@ -303,9 +272,9 @@ class NodeTreePanel(QWidget):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Worker-потік
+# Worker
 # ─────────────────────────────────────────────────────────────────────────────
-class AiWorker(QObject):
+class DiffWorker(QObject):
     finished = Signal(str)
     failed = Signal(str)
 
@@ -316,8 +285,7 @@ class AiWorker(QObject):
     @Slot()
     def run(self) -> None:
         try:
-            client = LocalLlmClient(self.config)
-            result = client.chat(
+            result = LocalLlmClient(self.config).chat(
                 messages=[
                     {"role": "system", "content": self.system},
                     {"role": "user", "content": self.user},
@@ -329,19 +297,107 @@ class AiWorker(QObject):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Панель завантаження одного файлу
+# ─────────────────────────────────────────────────────────────────────────────
+class FileDropPanel(QWidget):
+    """Панель «завантажити файл + показати його текст»."""
+
+    def __init__(self, title: str, color: str, placeholder: str, parent=None) -> None:
+        super().__init__(parent)
+        self._path: Path | None = None
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(4)
+
+        header = QHBoxLayout()
+        self._title_lbl = QLabel(title)
+        self._title_lbl.setStyleSheet(
+            f"font-weight: bold; font-size: 14px; color: {color}; padding: 2px 4px;"
+        )
+        self._open_btn = QPushButton("📂 Відкрити")
+        self._open_btn.setStyleSheet(
+            f"QPushButton {{ background: {color}; color: white; padding: 5px 14px; "
+            f"border-radius: 4px; font-weight: bold; }}"
+            f"QPushButton:hover {{ opacity: 0.8; }}"
+        )
+        self._open_btn.clicked.connect(self._open_file)
+        self._clear_btn = QPushButton("✕")
+        self._clear_btn.setFixedWidth(28)
+        self._clear_btn.clicked.connect(self._clear)
+        header.addWidget(self._title_lbl)
+        header.addStretch()
+        header.addWidget(self._open_btn)
+        header.addWidget(self._clear_btn)
+        layout.addLayout(header)
+
+        self._file_lbl = QLabel("Файл не завантажений")
+        self._file_lbl.setStyleSheet("color: #475569; font-size: 11px; padding: 2px 4px;")
+        layout.addWidget(self._file_lbl)
+
+        self._text = QPlainTextEdit()
+        self._text.setReadOnly(True)
+        self._text.setPlaceholderText(placeholder)
+        self._text.setStyleSheet(
+            f"QPlainTextEdit {{ background: #0f172a; color: #cbd5e1; "
+            f"border: 1px solid {color}44; border-radius: 4px; "
+            f"font-family: 'Consolas'; font-size: 11px; }}"
+        )
+        layout.addWidget(self._text)
+
+    def _open_file(self) -> None:
+        fn, _ = QFileDialog.getOpenFileName(
+            self, "Відкрити файл", "",
+            "Документи (*.docx *.txt);;Word (*.docx);;Текст (*.txt);;Всі (*)",
+        )
+        if fn:
+            self._load(Path(fn))
+
+    def _load(self, path: Path) -> None:
+        self._path = path
+        try:
+            if path.suffix.casefold() == ".docx":
+                from docx import Document
+                doc = Document(str(path))
+                text = "\n".join(p.text for p in doc.paragraphs if p.text.strip())
+            else:
+                text = path.read_text(encoding="utf-8", errors="replace")
+            self._text.setPlainText(text)
+            self._file_lbl.setText(f"✅ {path.name}  ({len(text):,} символів)")
+            self._file_lbl.setStyleSheet("color: #34d399; font-size: 11px; padding: 2px 4px;")
+        except Exception as err:
+            self._text.setPlainText(f"Помилка читання: {err}")
+
+    def _clear(self) -> None:
+        self._path = None
+        self._text.setPlainText("")
+        self._file_lbl.setText("Файл не завантажений")
+        self._file_lbl.setStyleSheet("color: #475569; font-size: 11px; padding: 2px 4px;")
+
+    def get_text(self, max_chars: int = 8000) -> str:
+        return self._text.toPlainText()[:max_chars]
+
+    def has_file(self) -> bool:
+        return bool(self._text.toPlainText().strip())
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Головний діалог
 # ─────────────────────────────────────────────────────────────────────────────
 class OrderAnalysisDialog(QDialog):
     """
-    Вікно аналізу наказу:
-    ┌─────────────────────────────────────────────────────────────────┐
-    │ [Налаштування моделі — компактна панель]                        │
-    ├──────────────────────┬──────────────────────────────────────────┤
-    │ ДО (оригінал)  >>>>  │ ПІСЛЯ (результат AI)                    │
-    │                      │                                          │
-    ├──────────────────────┴──────────────────────────────────────────┤
-    │ [Дерево нод — побудоване автоматично або за кнопкою]            │
-    └─────────────────────────────────────────────────────────────────┘
+    Вікно «Навчання за прикладом»:
+
+    ┌──────────────────────────────────────────────────────────────────┐
+    │ [Модель AI — 1 рядок]                                            │
+    ├──────────────────────┬──────────┬───────────────────────────────┤
+    │  📄 ДО               │  >>>>   │  ✅ ПІСЛЯ                     │
+    │  Оригінальний наказ  │         │  Результат ручної обробки     │
+    │  (завантажити файл)  │         │  (завантажити файл)           │
+    ├──────────────────────┴──────────┴───────────────────────────────┤
+    │  🔬 Аналіз відмінностей (що змінилось — Markdown)              │
+    ├──────────────────────────────────────────────────────────────────┤
+    │  ⚙️ Граф нод (автоматично повторює виявлену трансформацію)      │
+    └──────────────────────────────────────────────────────────────────┘
     """
 
     graph_created = Signal(object)
@@ -350,30 +406,30 @@ class OrderAnalysisDialog(QDialog):
         super().__init__(parent)
         self.registry = registry
         self.plugin_dir = plugin_dir
-        self._files: list[Path] = []
         self._last_analysis = ""
         self._last_graph_json: dict | None = None
         self._thread: QThread | None = None
-        self._worker: AiWorker | None = None
+        self._worker: DiffWorker | None = None
         self._settings = load_llm_settings()
 
         self._build_ui()
         self._apply_settings()
-        self.resize(1400, 850)
-        self.setWindowTitle("🔍 Аналіз наказу — ДО  >>>>  ПІСЛЯ  +  Дерево нод")
+        self.resize(1400, 900)
+        self.setWindowTitle("🔬 Навчання за прикладом — ДО  >>>>  ПІСЛЯ  →  Граф автоматизації")
         self.setStyleSheet("""
-            QDialog { background: #0f172a; color: #e2e8f0; }
+            QDialog  { background: #0f172a; color: #e2e8f0; }
             QGroupBox { border: 1px solid #334155; border-radius: 6px;
                         margin-top: 8px; color: #94a3b8; font-size: 11px; }
             QGroupBox::title { subcontrol-origin: margin; left: 8px; padding: 0 4px; }
             QPlainTextEdit, QLineEdit { background: #1e293b; color: #e2e8f0;
                                         border: 1px solid #334155; border-radius: 4px; }
-            QComboBox { background: #1e293b; color: #e2e8f0; border: 1px solid #334155; border-radius: 4px; }
-            QPushButton { background: #334155; color: #e2e8f0; border: none;
-                          border-radius: 4px; padding: 5px 12px; }
-            QPushButton:hover { background: #475569; }
-            QLabel { color: #e2e8f0; }
-            QSplitter::handle { background: #334155; }
+            QComboBox { background: #1e293b; color: #e2e8f0; border: 1px solid #334155;
+                        border-radius: 4px; min-height: 24px; }
+            QPushButton { background: #1e293b; color: #e2e8f0; border: 1px solid #334155;
+                          border-radius: 4px; padding: 4px 10px; }
+            QPushButton:hover { background: #334155; }
+            QLabel  { color: #e2e8f0; }
+            QSplitter::handle { background: #1e293b; width: 4px; height: 4px; }
         """)
 
     # ── Побудова UI ────────────────────────────────────────────────────────────
@@ -382,336 +438,329 @@ class OrderAnalysisDialog(QDialog):
         root.setContentsMargins(8, 8, 8, 8)
         root.setSpacing(6)
 
-        # ── Панель налаштувань (1 рядок) ──────────────────────────────────────
-        cfg_box = QGroupBox("Модель AI")
-        cfg_row = QHBoxLayout(cfg_box)
-        cfg_row.setSpacing(8)
+        # ── Рядок налаштувань моделі ───────────────────────────────────────────
+        cfg = QGroupBox("AI-модель")
+        cfg_row = QHBoxLayout(cfg)
+        cfg_row.setSpacing(6)
 
-        self._provider_cb = QComboBox()
+        self._prov = QComboBox()
         for p in LocalLlmProvider:
-            self._provider_cb.addItem(str(p), p)
-        self._provider_cb.currentIndexChanged.connect(self._on_provider)
+            self._prov.addItem(str(p), p)
+        self._prov.currentIndexChanged.connect(self._on_provider)
         cfg_row.addWidget(QLabel("Провайдер:"))
-        cfg_row.addWidget(self._provider_cb)
+        cfg_row.addWidget(self._prov)
 
-        self._model_cb = QComboBox()
-        self._model_cb.setEditable(True)
-        self._model_cb.setMinimumWidth(220)
-        cfg_row.addWidget(QLabel("Модель:"))
-        cfg_row.addWidget(self._model_cb)
-
-        self._apikey_ed = QLineEdit()
-        self._apikey_ed.setEchoMode(QLineEdit.EchoMode.Password)
-        self._apikey_ed.setPlaceholderText("API-ключ (не потрібен для Ollama)")
-        self._apikey_ed.setMaximumWidth(220)
-        cfg_row.addWidget(QLabel("Ключ:"))
-        cfg_row.addWidget(self._apikey_ed)
-
+        self._model = QComboBox()
+        self._model.setEditable(True)
+        self._model.setMinimumWidth(200)
         refresh_btn = QPushButton("🔄")
-        refresh_btn.setFixedWidth(30)
-        refresh_btn.setToolTip("Отримати список моделей")
+        refresh_btn.setFixedWidth(28)
+        refresh_btn.setToolTip("Отримати список моделей із сервера")
         refresh_btn.clicked.connect(self._refresh_models)
+        cfg_row.addWidget(QLabel("Модель:"))
+        cfg_row.addWidget(self._model)
         cfg_row.addWidget(refresh_btn)
+
+        self._apikey = QLineEdit()
+        self._apikey.setEchoMode(QLineEdit.EchoMode.Password)
+        self._apikey.setPlaceholderText("API-ключ (не потрібен для Ollama / Embedded)")
+        self._apikey.setMaximumWidth(230)
+        cfg_row.addWidget(QLabel("Ключ:"))
+        cfg_row.addWidget(self._apikey)
         cfg_row.addStretch()
-        root.addWidget(cfg_box)
+        root.addWidget(cfg)
 
-        # ── Головний сплітер: (ДО + ПІСЛЯ) | Дерево нод ─────────────────────
-        main_split = QSplitter(Qt.Orientation.Vertical)
+        # ── Головний вертикальний сплітер ──────────────────────────────────────
+        vsplit = QSplitter(Qt.Orientation.Vertical)
 
-        # ── Верхня частина: ДО >>>> ПІСЛЯ ─────────────────────────────────────
+        # ── Верхня частина: ДО >>>> ПІСЛЯ (горизонтальний сплітер) ────────────
         top_split = QSplitter(Qt.Orientation.Horizontal)
 
-        # ─── ДО: панель завантаження та оригінальний текст ────────────────────
-        before_panel = QWidget()
-        bv = QVBoxLayout(before_panel)
-        bv.setContentsMargins(0, 0, 0, 0)
-        bv.setSpacing(4)
-
-        before_header = QHBoxLayout()
-        before_lbl = QLabel("📄  ДО  — оригінальний текст")
-        before_lbl.setStyleSheet("font-weight: bold; font-size: 13px; color: #60a5fa;")
-        add_btn = QPushButton("📂 Відкрити файл(и)")
-        add_btn.setStyleSheet("background: #1d4ed8; color: white; padding: 5px 12px; border-radius: 4px;")
-        add_btn.clicked.connect(self._add_files)
-        before_header.addWidget(before_lbl)
-        before_header.addStretch()
-        before_header.addWidget(add_btn)
-        bv.addLayout(before_header)
-
-        self._files_lbl = QLabel("Файли не завантажені")
-        self._files_lbl.setStyleSheet("color: #64748b; font-size: 11px;")
-        bv.addWidget(self._files_lbl)
-
-        self._before_text = QPlainTextEdit()
-        self._before_text.setReadOnly(True)
-        self._before_text.setPlaceholderText("Тут з'явиться оригінальний текст наказу після відкриття файлу…")
-        self._before_text.setStyleSheet(
-            "QPlainTextEdit { background: #0f172a; color: #cbd5e1; "
-            "border: 1px solid #1d4ed8; font-family: 'Consolas'; font-size: 12px; }"
+        # Ліва панель — ДО
+        self._before = FileDropPanel(
+            title="📄  ДО — оригінальний наказ",
+            color="#3b82f6",
+            placeholder="Завантажте вхідний файл наказу (.docx або .txt)…\n\n"
+                        "Це те, з чого починається обробка.",
         )
-        bv.addWidget(self._before_text)
-        top_split.addWidget(before_panel)
+        top_split.addWidget(self._before)
 
-        # ─── Стрілка ──────────────────────────────────────────────────────────
-        arrow_lbl = QLabel(">>>>")
-        arrow_lbl.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignHCenter)
-        arrow_lbl.setStyleSheet(
-            "color: #f59e0b; font-size: 22px; font-weight: bold; "
-            "min-width: 50px; max-width: 50px; background: transparent;"
+        # Стрілка посередині
+        arrow = QLabel(">>>>")
+        arrow.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignHCenter)
+        arrow.setStyleSheet(
+            "color: #f59e0b; font-size: 24px; font-weight: 900; "
+            "min-width: 54px; max-width: 54px; background: transparent; letter-spacing: 2px;"
         )
-        arrow_lbl.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
-        top_split.addWidget(arrow_lbl)
+        arrow.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
+        top_split.addWidget(arrow)
 
-        # ─── ПІСЛЯ: результат аналізу ──────────────────────────────────────────
-        after_panel = QWidget()
-        av = QVBoxLayout(after_panel)
-        av.setContentsMargins(0, 0, 0, 0)
-        av.setSpacing(4)
+        # Права панель — ПІСЛЯ
+        self._after = FileDropPanel(
+            title="✅  ПІСЛЯ — очікуваний результат",
+            color="#22c55e",
+            placeholder="Завантажте файл результату ручної обробки (.docx або .txt)…\n\n"
+                        "Це те, що має виходити на виході автоматизації.",
+        )
+        top_split.addWidget(self._after)
+        top_split.setSizes([540, 54, 540])
+        vsplit.addWidget(top_split)
 
-        after_header = QHBoxLayout()
-        after_lbl = QLabel("✅  ПІСЛЯ  — результат AI-аналізу")
-        after_lbl.setStyleSheet("font-weight: bold; font-size: 13px; color: #34d399;")
+        # ── Середня частина: аналіз відмінностей ──────────────────────────────
+        diff_panel = QWidget()
+        dv = QVBoxLayout(diff_panel)
+        dv.setContentsMargins(0, 0, 0, 0)
+        dv.setSpacing(4)
 
-        self._extra_prompt = QLineEdit()
-        self._extra_prompt.setPlaceholderText("Додатковий запит (необов'язково)")
-        self._extra_prompt.setMaximumWidth(300)
+        diff_header = QHBoxLayout()
+        diff_lbl = QLabel("🔬  Аналіз відмінностей — що змінилось і чому")
+        diff_lbl.setStyleSheet("font-weight: bold; font-size: 13px; color: #f59e0b;")
 
-        self._analyze_btn = QPushButton("🔍 Аналізувати")
-        self._analyze_btn.setStyleSheet(
-            "QPushButton { background: #059669; color: white; padding: 5px 16px; border-radius: 4px; font-weight: bold; }"
+        self._extra = QLineEdit()
+        self._extra.setPlaceholderText("Додаткові пояснення (необов'язково)")
+        self._extra.setMaximumWidth(340)
+
+        self._run_btn = QPushButton("🔬 Порівняти та побудувати граф")
+        self._run_btn.setStyleSheet(
+            "QPushButton { background: #d97706; color: white; padding: 6px 20px; "
+            "border-radius: 5px; font-weight: bold; font-size: 13px; }"
             "QPushButton:disabled { background: #374151; color: #6b7280; }"
         )
-        self._analyze_btn.clicked.connect(self._run_analyze)
+        self._run_btn.clicked.connect(self._run)
 
         save_btn = QPushButton("💾")
-        save_btn.setToolTip("Зберегти результат")
+        save_btn.setToolTip("Зберегти аналіз")
         save_btn.setFixedWidth(30)
-        save_btn.clicked.connect(self._save_result)
+        save_btn.clicked.connect(self._save_analysis)
 
-        after_header.addWidget(after_lbl)
-        after_header.addStretch()
-        after_header.addWidget(self._extra_prompt)
-        after_header.addWidget(self._analyze_btn)
-        after_header.addWidget(save_btn)
-        av.addLayout(after_header)
+        diff_header.addWidget(diff_lbl)
+        diff_header.addStretch()
+        diff_header.addWidget(self._extra)
+        diff_header.addWidget(self._run_btn)
+        diff_header.addWidget(save_btn)
+        dv.addLayout(diff_header)
 
-        self._after_text = QPlainTextEdit()
-        self._after_text.setReadOnly(True)
-        self._after_text.setPlaceholderText("Тут з'явиться структурований аналіз наказу…")
-        self._after_text.setStyleSheet(
-            "QPlainTextEdit { background: #0f172a; color: #d1fae5; "
-            "border: 1px solid #059669; font-family: 'Segoe UI'; font-size: 12px; }"
+        self._diff_text = QPlainTextEdit()
+        self._diff_text.setReadOnly(True)
+        self._diff_text.setPlaceholderText(
+            "Тут з'явиться аналіз відмінностей між ДО та ПІСЛЯ:\n"
+            "— що саме змінилось\n"
+            "— які трансформації були виконані вручну\n"
+            "— шаблон для автоматизації"
         )
-        av.addWidget(self._after_text)
-        top_split.addWidget(after_panel)
-        top_split.setSizes([520, 50, 520])
-
-        main_split.addWidget(top_split)
+        self._diff_text.setStyleSheet(
+            "QPlainTextEdit { background: #0f172a; color: #fde68a; "
+            "border: 1px solid #d9780644; border-radius: 4px; "
+            "font-family: 'Segoe UI'; font-size: 12px; }"
+        )
+        self._diff_text.setMaximumHeight(180)
+        dv.addWidget(self._diff_text)
+        vsplit.addWidget(diff_panel)
 
         # ── Нижня частина: дерево нод ──────────────────────────────────────────
-        node_panel = QWidget()
-        nv = QVBoxLayout(node_panel)
-        nv.setContentsMargins(0, 0, 0, 0)
-        nv.setSpacing(4)
+        tree_panel = QWidget()
+        tv = QVBoxLayout(tree_panel)
+        tv.setContentsMargins(0, 0, 0, 0)
+        tv.setSpacing(4)
 
-        node_header = QHBoxLayout()
-        self._build_graph_btn = QPushButton("⚙️ Побудувати дерево нод з аналізу")
-        self._build_graph_btn.setStyleSheet(
-            "QPushButton { background: #7c3aed; color: white; padding: 6px 18px; border-radius: 4px; font-weight: bold; }"
-            "QPushButton:disabled { background: #374151; color: #6b7280; }"
+        tree_header = QHBoxLayout()
+
+        apply_btn = QPushButton("▶  Відкрити граф в редакторі")
+        apply_btn.setStyleSheet(
+            "QPushButton { background: #7c3aed; color: white; padding: 6px 18px; "
+            "border-radius: 5px; font-weight: bold; }"
+            "QPushButton:hover { background: #6d28d9; }"
         )
-        self._build_graph_btn.clicked.connect(self._run_graph)
-
-        apply_btn = QPushButton("▶ Відкрити в редакторі")
-        apply_btn.setStyleSheet("background: #d97706; color: white; padding: 6px 16px; border-radius: 4px; font-weight: bold;")
         apply_btn.clicked.connect(self._apply_graph)
 
-        self._graph_prompt_ed = QLineEdit()
-        self._graph_prompt_ed.setPlaceholderText("Опис сценарію (необов'язково)")
-        self._graph_prompt_ed.setMaximumWidth(350)
-
-        node_header.addWidget(self._build_graph_btn)
-        node_header.addWidget(self._graph_prompt_ed)
-        node_header.addStretch()
-        node_header.addWidget(apply_btn)
-        nv.addLayout(node_header)
+        tree_header.addStretch()
+        tree_header.addWidget(apply_btn)
+        tv.addLayout(tree_header)
 
         self._node_tree = NodeTreePanel()
-        nv.addWidget(self._node_tree)
-        main_split.addWidget(node_panel)
+        tv.addWidget(self._node_tree)
+        vsplit.addWidget(tree_panel)
 
-        main_split.setSizes([480, 300])
-        root.addWidget(main_split)
+        vsplit.setSizes([400, 180, 280])
+        root.addWidget(vsplit)
 
-        # ── Статус-рядок ───────────────────────────────────────────────────────
-        self._status = QLabel("Готово. Відкрийте файл наказу та натисніть «Аналізувати».")
-        self._status.setStyleSheet("color: #64748b; font-size: 11px; padding: 2px 4px;")
+        # ── Статус ────────────────────────────────────────────────────────────
+        self._status = QLabel(
+            "1. Завантажте файл ДО (оригінал)  "
+            "2. Завантажте файл ПІСЛЯ (ручний результат)  "
+            "3. Натисніть «Порівняти та побудувати граф»"
+        )
+        self._status.setStyleSheet("color: #64748b; font-size: 11px; padding: 2px 6px;")
         root.addWidget(self._status)
 
-    # ── Налаштування провайдера ────────────────────────────────────────────────
+    # ── Налаштування ────────────────────────────────────────────────────────────
     def _apply_settings(self) -> None:
         provider = self._settings.get("provider", LocalLlmProvider.OLLAMA)
-        idx = self._provider_cb.findData(provider)
+        idx = self._prov.findData(provider)
         if idx >= 0:
-            self._provider_cb.setCurrentIndex(idx)
+            self._prov.setCurrentIndex(idx)
         self._on_provider()
         saved = self._settings.get(f"model_{provider}", "")
         if saved:
-            self._model_cb.setCurrentText(saved)
-        self._apikey_ed.setText(self._settings.get(f"api_key_{provider}", ""))
+            self._model.setCurrentText(saved)
+        self._apikey.setText(self._settings.get(f"api_key_{provider}", ""))
 
     def _on_provider(self) -> None:
-        provider: LocalLlmProvider = self._provider_cb.currentData()
+        provider: LocalLlmProvider = self._prov.currentData()
         models = PROVIDER_PRESET_MODELS.get(provider, [])
-        self._model_cb.clear()
+        self._model.clear()
         for m in models:
-            clean = m.split("#")[0].strip() if "#" in m else m
-            self._model_cb.addItem(clean)
+            self._model.addItem(m.split("#")[0].strip() if "#" in m else m)
 
     def _refresh_models(self) -> None:
         try:
             models = LocalLlmClient(self._build_config()).fetch_available_models()
             if models:
-                self._model_cb.clear()
+                self._model.clear()
                 for m in models:
-                    self._model_cb.addItem(m)
+                    self._model.addItem(m)
                 self._set_status(f"🔄 Знайдено {len(models)} моделей")
         except Exception as err:
             self._set_status(f"❌ {err}")
 
     def _save_settings(self) -> None:
-        provider: LocalLlmProvider = self._provider_cb.currentData()
+        provider: LocalLlmProvider = self._prov.currentData()
         s = dict(self._settings)
         s["provider"] = provider
-        s[f"model_{provider}"] = self._model_cb.currentText().strip()
-        s[f"api_key_{provider}"] = self._apikey_ed.text().strip()
+        s[f"model_{provider}"] = self._model.currentText().strip()
+        s[f"api_key_{provider}"] = self._apikey.text().strip()
         save_llm_settings(s)
         self._settings = s
 
     def _build_config(self) -> LocalLlmConfig:
-        provider: LocalLlmProvider = self._provider_cb.currentData()
+        provider: LocalLlmProvider = self._prov.currentData()
         return LocalLlmConfig(
             provider=provider,
-            model=self._model_cb.currentText().strip(),
-            api_key=self._apikey_ed.text().strip(),
+            model=self._model.currentText().strip(),
+            api_key=self._apikey.text().strip(),
             base_url=DEFAULT_BASE_URLS.get(provider, ""),
         )
 
-    # ── Файли ────────────────────────────────────────────────────────────────
-    def _add_files(self) -> None:
-        names, _ = QFileDialog.getOpenFileNames(
-            self, "Відкрити файли наказів", "",
-            "Документи (*.docx *.txt);;Word (*.docx);;Текст (*.txt);;Всі (*)",
-        )
-        for f in names:
-            p = Path(f)
-            if p not in self._files:
-                self._files.append(p)
-        self._refresh_before_panel()
-
-    def _refresh_before_panel(self) -> None:
-        if not self._files:
-            self._files_lbl.setText("Файли не завантажені")
-            self._before_text.setPlainText("")
+    # ── Запуск аналізу ─────────────────────────────────────────────────────────
+    def _run(self) -> None:
+        if not self._before.has_file():
+            QMessageBox.warning(self, "ДО відсутній", "Завантажте файл ДО (оригінальний наказ).")
             return
-        names = "  |  ".join(p.name for p in self._files)
-        self._files_lbl.setText(f"📂 {names}")
-        combined = []
-        for p in self._files:
-            try:
-                if p.suffix.casefold() == ".docx":
-                    from docx import Document
-                    doc = Document(str(p))
-                    text = "\n".join(par.text for par in doc.paragraphs if par.text.strip())
-                else:
-                    text = p.read_text(encoding="utf-8", errors="replace")
-                combined.append(f"══════════ {p.name} ══════════\n{text}")
-            except Exception as err:
-                combined.append(f"[Помилка читання {p.name}: {err}]")
-        self._before_text.setPlainText("\n\n".join(combined))
-
-    def _file_text(self, max_chars: int = 12000) -> str:
-        return self._before_text.toPlainText()[:max_chars]
-
-    # ── Аналіз ───────────────────────────────────────────────────────────────
-    def _run_analyze(self) -> None:
-        if not self._files:
-            QMessageBox.warning(self, "Файли відсутні", "Спочатку відкрийте файл наказу.")
+        if not self._after.has_file():
+            QMessageBox.warning(self, "ПІСЛЯ відсутній", "Завантажте файл ПІСЛЯ (результат обробки).")
             return
+
         self._save_settings()
-        extra = self._extra_prompt.text().strip()
-        user_msg = f"Проаналізуй наказ:\n\n{self._file_text()}"
+
+        before_text = self._before.get_text()
+        after_text = self._after.get_text()
+        extra = self._extra.text().strip()
+
+        # Перелік доступних нод для контексту
+        node_list = "\n".join(
+            f"- {d.type_id}: {d.name} ({d.category})"
+            for d in self.registry.all()[:70]
+        )
+
+        user_msg = (
+            f"## ВХІДНИЙ ДОКУМЕНТ (ДО):\n\n{before_text}\n\n"
+            f"{'=' * 60}\n\n"
+            f"## ОЧІКУВАНИЙ РЕЗУЛЬТАТ (ПІСЛЯ):\n\n{after_text}\n\n"
+            f"{'=' * 60}\n\n"
+            f"## Доступні ноди для побудови графа:\n{node_list}"
+        )
         if extra:
-            user_msg += f"\n\nДодаткове завдання: {extra}"
+            user_msg += f"\n\n## Додаткові пояснення від користувача:\n{extra}"
+
         self._set_busy(True)
-        self._after_text.setPlainText("⏳ Виконується аналіз…")
-        self._start_worker(_SYS_ANALYZE, user_msg, self._on_analyze_done)
+        self._diff_text.setPlainText("⏳ AI аналізує відмінності між ДО та ПІСЛЯ…")
+        self._node_tree.clear()
+        self._set_status("⏳ Виконується аналіз та генерація графа…")
 
-    def _on_analyze_done(self, result: str) -> None:
-        self._last_analysis = result
-        self._after_text.setPlainText(result)
+        self._thread = QThread(self)
+        self._worker = DiffWorker(self._build_config(), _SYS_DIFF_TO_GRAPH, user_msg)
+        self._worker.moveToThread(self._thread)
+        self._thread.started.connect(self._worker.run)
+        self._worker.finished.connect(self._on_done)
+        self._worker.finished.connect(self._thread.quit)
+        self._worker.failed.connect(self._on_fail)
+        self._worker.failed.connect(self._thread.quit)
+        self._thread.start()
+
+    def _on_done(self, raw: str) -> None:
         self._set_busy(False)
-        self._set_status("✅ Аналіз завершено. Натисніть «Побудувати дерево нод» або задайте сценарій.")
-        # Автоматично запускаємо побудову графа
-        self._run_graph()
 
-    def _save_result(self) -> None:
-        text = self._after_text.toPlainText()
+        # ── Розбираємо відповідь: ===АНАЛІЗ=== ... ===ГРАФ=== { ... } ─────────
+        analysis_text = ""
+        graph_json: dict | None = None
+
+        if "===АНАЛІЗ===" in raw and "===ГРАФ===" in raw:
+            parts = raw.split("===ГРАФ===", 1)
+            analysis_text = parts[0].replace("===АНАЛІЗ===", "").strip()
+            graph_raw = parts[1].strip()
+        elif "===ГРАФ===" in raw:
+            analysis_text = ""
+            graph_raw = raw.split("===ГРАФ===", 1)[1].strip()
+        else:
+            # Спроба знайти JSON напряму
+            analysis_text = raw
+            graph_raw = raw
+
+        # Витягуємо JSON
+        if "```json" in graph_raw:
+            graph_raw = graph_raw.split("```json")[1].split("```")[0].strip()
+        elif "```" in graph_raw:
+            graph_raw = graph_raw.split("```")[1].split("```")[0].strip()
+
+        # Шукаємо перший { у рядку
+        brace_idx = graph_raw.find("{")
+        if brace_idx >= 0:
+            graph_raw = graph_raw[brace_idx:]
+
+        try:
+            graph_json = json.loads(graph_raw)
+        except json.JSONDecodeError:
+            pass
+
+        self._last_analysis = analysis_text
+        self._diff_text.setPlainText(analysis_text if analysis_text else raw)
+
+        if graph_json:
+            self._last_graph_json = graph_json
+            self._node_tree.load_graph(graph_json)
+            n_nodes = len(graph_json.get("nodes", []))
+            n_edges = len(graph_json.get("edges", []))
+            self._set_status(
+                f"✅ Готово! Граф побудовано: {n_nodes} нод, {n_edges} з'єднань. "
+                f"Натисніть «Відкрити граф в редакторі»."
+            )
+        else:
+            self._set_status("⚠️ AI не зміг сформувати JSON-граф. Перевірте аналіз і спробуйте ще раз.")
+
+    def _on_fail(self, err: str) -> None:
+        self._set_busy(False)
+        self._set_status(f"❌ Помилка: {err}")
+        QMessageBox.critical(self, "Помилка AI", err)
+
+    def _save_analysis(self) -> None:
+        text = self._diff_text.toPlainText()
         if not text:
             return
-        fn, _ = QFileDialog.getSaveFileName(self, "Зберегти аналіз", "", "Markdown (*.md);;Текст (*.txt)")
+        fn, _ = QFileDialog.getSaveFileName(
+            self, "Зберегти аналіз", "", "Markdown (*.md);;Текст (*.txt)"
+        )
         if fn:
             Path(fn).write_text(text, encoding="utf-8")
             self._set_status(f"💾 Збережено: {Path(fn).name}")
 
-    # ── Побудова графа ────────────────────────────────────────────────────────
-    def _run_graph(self) -> None:
-        if not self._last_analysis and not self._file_text():
-            QMessageBox.warning(self, "Немає даних", "Спочатку виконайте аналіз наказу.")
-            return
-        self._save_settings()
-
-        node_list = "\n".join(
-            f"- {d.type_id}: {d.name}" for d in self.registry.all()[:60]
-        )
-        user_task = self._graph_prompt_ed.text().strip() or "Автоматизувати обробку цього наказу"
-        context = (
-            f"Завдання: {user_task}\n\n"
-            f"Аналіз наказу:\n{self._last_analysis[:3000]}\n\n"
-            f"Доступні ноди:\n{node_list}"
-        )
-        self._set_busy(True)
-        self._node_tree.clear()
-        self._set_status("⏳ Генерація дерева нод…")
-        self._start_worker(_SYS_GRAPH, context, self._on_graph_done)
-
-    def _on_graph_done(self, result: str) -> None:
-        self._set_busy(False)
-        raw = result.strip()
-        # Витягуємо JSON з markdown-огорток якщо є
-        if "```json" in raw:
-            raw = raw.split("```json")[1].split("```")[0].strip()
-        elif "```" in raw:
-            raw = raw.split("```")[1].split("```")[0].strip()
-        try:
-            graph_json = json.loads(raw)
-            self._last_graph_json = graph_json
-            self._node_tree.load_graph(graph_json)
-            self._set_status(
-                f"✅ Дерево нод побудовано: {len(graph_json.get('nodes', []))} нод, "
-                f"{len(graph_json.get('edges', []))} з'єднань. Натисніть «Відкрити в редакторі»."
-            )
-        except json.JSONDecodeError as err:
-            self._set_status(f"⚠️ AI повернув не-JSON: {err}. Спробуйте ще раз.")
-
     # ── Застосування графа ────────────────────────────────────────────────────
     def _apply_graph(self) -> None:
         if not self._last_graph_json:
-            QMessageBox.information(self, "Граф відсутній", "Спочатку побудуйте дерево нод.")
+            QMessageBox.information(self, "Граф відсутній", "Спочатку виконайте порівняння.")
             return
         try:
             gj = self._last_graph_json
-            graph = GraphModel(name=gj.get("title", "Наказ — автоматизація"))
+            graph = GraphModel(name=gj.get("title", "Автоматизація за прикладом"))
             id_map: dict[str, str] = {}
             for nd in gj.get("nodes", []):
                 new_id = str(uuid.uuid4())[:8]
@@ -739,28 +788,9 @@ class OrderAnalysisDialog(QDialog):
         except Exception as err:
             QMessageBox.critical(self, "Помилка", str(err))
 
-    # ── Worker-інфраструктура ─────────────────────────────────────────────────
-    def _start_worker(self, system: str, user: str, on_done) -> None:
-        if self._thread and self._thread.isRunning():
-            return
-        self._thread = QThread(self)
-        self._worker = AiWorker(self._build_config(), system, user)
-        self._worker.moveToThread(self._thread)
-        self._thread.started.connect(self._worker.run)
-        self._worker.finished.connect(on_done)
-        self._worker.finished.connect(self._thread.quit)
-        self._worker.failed.connect(self._on_fail)
-        self._worker.failed.connect(self._thread.quit)
-        self._thread.start()
-
-    def _on_fail(self, err: str) -> None:
-        self._set_busy(False)
-        self._set_status(f"❌ Помилка: {err}")
-        QMessageBox.critical(self, "Помилка AI", err)
-
+    # ── Утиліти ────────────────────────────────────────────────────────────────
     def _set_busy(self, busy: bool) -> None:
-        self._analyze_btn.setEnabled(not busy)
-        self._build_graph_btn.setEnabled(not busy)
+        self._run_btn.setEnabled(not busy)
 
     def _set_status(self, text: str) -> None:
         self._status.setText(text)
