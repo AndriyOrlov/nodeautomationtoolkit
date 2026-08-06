@@ -94,7 +94,20 @@ class LocalLlmConfig:
     timeout_seconds: int = 120
 
     def normalized_base_url(self) -> str:
-        return self.base_url.rstrip("/") + "/"
+        url = self.base_url.strip().rstrip("/")
+        if not url:
+            url = DEFAULT_BASE_URLS.get(self.provider, "http://127.0.0.1:1234/v1/").rstrip("/")
+
+        # Для OpenAI-сумісних провайдерів (LM Studio, Ollama, OpenAI, Custom) перевіряємо наявність /v1
+        if self.provider in (
+            LocalLlmProvider.LM_STUDIO,
+            LocalLlmProvider.OLLAMA,
+            LocalLlmProvider.OPENAI,
+            LocalLlmProvider.CUSTOM,
+        ):
+            if not url.endswith("/v1") and "/v1/" not in url and not url.endswith("/v1beta"):
+                url += "/v1"
+        return url + "/"
 
 
 def load_llm_settings(provider: LocalLlmProvider | str | None = None) -> dict[str, str]:
@@ -399,4 +412,6 @@ class LocalLlmClient:
             else:
                 msg = str(err)
             raise LocalLlmError(f"Помилка LLM-сервера: {msg}")
+        if "message" in payload and "choices" not in payload and "data" not in payload:
+            raise LocalLlmError(f"Помилка LLM-сервера: {payload['message']}")
         return payload
