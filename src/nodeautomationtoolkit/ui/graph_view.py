@@ -235,13 +235,19 @@ class GraphScene(QGraphicsScene):
         self.node_items[model.id] = item
         return item
 
-    def _create_connection_item(self, model: ConnectionModel) -> ConnectionItem:
-        source_node = self.node_items[model.source_node]
-        target_node = self.node_items[model.target_node]
+    def _create_connection_item(self, model: ConnectionModel) -> ConnectionItem | None:
+        source_node = self.node_items.get(model.source_node)
+        target_node = self.node_items.get(model.target_node)
+        if source_node is None or target_node is None:
+            return None
+        source_port = source_node.outputs.get(model.source_port)
+        target_port = target_node.inputs.get(model.target_port)
+        if source_port is None or target_port is None:
+            return None
         item = ConnectionItem(
             model,
-            source_node.outputs[model.source_port],
-            target_node.inputs[model.target_port],
+            source_port,
+            target_port,
         )
         self.addItem(item)
         self.connection_items.append(item)

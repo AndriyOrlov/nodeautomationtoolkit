@@ -990,12 +990,14 @@ class NodeGraphQtEditor(QWidget):
                         node.set_property(name, value, push_undo=False)
                 created[item.id] = node
             for connection in model.connections:
-                source = created[connection.source_node]
-                target = created[connection.target_node]
-                source.get_output(connection.source_port).connect_to(
-                    target.get_input(connection.target_port),
-                    push_undo=False,
-                )
+                source = created.get(connection.source_node)
+                target = created.get(connection.target_node)
+                if source is None or target is None:
+                    continue
+                out_port = source.get_output(connection.source_port)
+                in_port = target.get_input(connection.target_port)
+                if out_port is not None and in_port is not None:
+                    out_port.connect_to(in_port, push_undo=False)
             self.graph.clear_undo_stack()
         finally:
             self._loading = False
