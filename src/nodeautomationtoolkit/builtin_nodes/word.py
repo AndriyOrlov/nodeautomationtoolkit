@@ -346,3 +346,222 @@ def clear_headers_footers(
         "summary": summary,
     }
 
+
+@node(
+    name="Замінити текст у DOCX",
+    category="Word",
+    description="Знаходить та замінює всі входження тексту у DOCX документі, зберігаючи форматування.",
+    type_id="builtin.word.replace_in_docx",
+    execution_inputs=("exec",),
+    execution_outputs=("then",),
+    preview_policy="never",
+    outputs={
+        "path": "str",
+        "replaced_count": "int",
+        "summary": "str",
+    },
+)
+def replace_in_docx(
+    path: str = "",
+    old_text: str = "",
+    new_text: str = "",
+    output_path: str = "",
+    ignore_case: bool = False,
+) -> dict:
+    from docx import Document
+    source_path = _validated_docx_path(path, must_exist=True)
+    target_path = _validated_docx_path(output_path or str(source_path), must_exist=False)
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    
+    doc = Document(source_path)
+    replaced_count = 0
+    
+    for p in doc.paragraphs:
+        for run in p.runs:
+            if ignore_case:
+                if old_text.lower() in run.text.lower():
+                    # For simplicity, if ignore case, only replace if match, but simple replace might be tricky
+                    # Let's just do simple replace with ignore_case logic
+                    import re
+                    matches = len(re.findall(re.escape(old_text), run.text, flags=re.IGNORECASE))
+                    if matches > 0:
+                        replaced_count += matches
+                        run.text = re.sub(re.escape(old_text), new_text, run.text, flags=re.IGNORECASE)
+            else:
+                if old_text in run.text:
+                    replaced_count += run.text.count(old_text)
+                    run.text = run.text.replace(old_text, new_text)
+                
+    for table in doc.tables:
+        for row in table.rows:
+            for cell in row.cells:
+                for p in cell.paragraphs:
+                    for run in p.runs:
+                        if ignore_case:
+                            import re
+                            matches = len(re.findall(re.escape(old_text), run.text, flags=re.IGNORECASE))
+                            if matches > 0:
+                                replaced_count += matches
+                                run.text = re.sub(re.escape(old_text), new_text, run.text, flags=re.IGNORECASE)
+                        else:
+                            if old_text in run.text:
+                                replaced_count += run.text.count(old_text)
+                                run.text = run.text.replace(old_text, new_text)
+                            
+    doc.save(target_path)
+    summary = f"Замінено {replaced_count} входжень -> {target_path.name}"
+    return {
+        "path": str(target_path),
+        "replaced_count": replaced_count,
+        "summary": summary,
+    }
+
+
+@node(
+    name="Злити DOCX файли",
+    category="Word",
+    description="Об'єднує декілька файлів .docx в один.",
+    type_id="builtin.word.merge_docx",
+    execution_inputs=("exec",),
+    execution_outputs=("then",),
+    preview_policy="never",
+    outputs={
+        "path": "str",
+        "merged_count": "int",
+        "summary": "str",
+    },
+)
+def merge_docx(
+    files: list = None,
+    output_path: str = "",
+    add_page_break: bool = True,
+) -> dict:
+    from docx import Document
+    if not files:
+        return {"path": "", "merged_count": 0, "summary": "Немає файлів для об'єднання."}
+        
+    target_path = _validated_docx_path(output_path, must_exist=False)
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    
+    merged_count = 0
+    merged_doc = None
+    
+    for file_path in files:
+        path_obj = _validated_docx_path(file_path, must_exist=True)
+        if merged_doc is None:
+            merged_doc = Document(path_obj)
+            merged_count += 1
+        else:
+            if add_page_break:
+                merged_doc.add_page_break()
+            sub_doc = Document(path_obj)
+            for p in sub_doc.paragraphs:
+                # Copying just text for simplicity, python-docx doesn't easily support full element copying
+                merged_doc.add_paragraph(p.text)
+            merged_count += 1
+            
+    if merged_doc:
+        merged_doc.save(target_path)
+        
+    summary = f"Об'єднано {merged_count} файлів -> {target_path.name}"
+    return {
+        "path": str(target_path),
+        "merged_count": merged_count,
+        "summary": summary,
+    }
+
+
+@node(
+    name="Підрахунок слів у DOCX",
+    category="Word",
+    description="Підраховує кількість слів, символів, абзаців та сторінок (приблизно) у DOCX документі.",
+    type_id="builtin.word.word_count",
+    outputs={
+        "words": "int",
+        "characters": "int",
+        "paragraphs": "int",
+        "pages_estimate": "int",
+        "summary": "str",
+    },
+)
+def word_count(
+    path: str = "",
+) -> dict:
+    from docx import Document
+    source_path = _validated_docx_path(path, must_exist=True)
+    doc = Document(source_path)
+    
+    words = 0
+    characters = 0
+    paragraphs = 0
+    
+    for p in doc.paragraphs:
+        text = p.text.strip()
+        if text:
+            paragraphs += 1
+            words += len(text.split())
+            characters += len(text.replace(" ", ""))
+            
+    for table in doc.tables:
+        for row in table.rows:
+            for cell in row.cells:
+                for p in cell.paragraphs:
+                    text = p.text.strip()
+                    if text:
+                        paragraphs += 1
+                        words += len(text.split())
+                        characters += len(text.replace(" ", ""))
+                        
+    pages_estimate = max(1, words // 300)
+    
+    summary = f"Слів: {words}, Символів: {characters}, Абзаців: {paragraphs}, Сторінок: ~{pages_estimate}"
+    return {
+        "words": words,
+        "characters": characters,
+        "paragraphs": paragraphs,
+        "pages_estimate": pages_estimate,
+        "summary": summary,
+    }
+
+
+@node(
+    name="Метадані документа",
+    category="Word",
+    description="Зчитує або встановлює метадані (заголовок, автор, тема) DOCX документа.",
+    type_id="builtin.word.set_metadata",
+    execution_inputs=("exec",),
+    execution_outputs=("then",),
+    preview_policy="never",
+    outputs={
+        "path": "str",
+        "summary": "str",
+    },
+)
+def set_metadata(
+    path: str = "",
+    title: str = "",
+    author: str = "",
+    subject: str = "",
+    output_path: str = "",
+) -> dict:
+    from docx import Document
+    source_path = _validated_docx_path(path, must_exist=True)
+    target_path = _validated_docx_path(output_path or str(source_path), must_exist=False)
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    
+    doc = Document(source_path)
+    core_properties = doc.core_properties
+    
+    if title:
+        core_properties.title = title
+    if author:
+        core_properties.author = author
+    if subject:
+        core_properties.subject = subject
+        
+    doc.save(target_path)
+    summary = f"Метадані оновлено -> {target_path.name}"
+    return {
+        "path": str(target_path),
+        "summary": summary,
+    }
