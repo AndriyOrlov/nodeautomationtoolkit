@@ -840,3 +840,275 @@ def generate_decision_order(
         "replaced_count": replaced_count,
         "summary": summary,
     }
+
+
+# ── БЛОЧНИЙ КОНСТРУКТОР НАКАЗУ ───────────────────────────────────────────────
+
+@node(
+    name="Розібрати наказ на блоки (Конструктор)",
+    category="Наказ",
+    description=(
+        "Розбирає текст наказу на структуровані блоки-конструктори: шапка (header), "
+        "розділи (§ / section), пронумеровані пункти (item), підстави (basis) та підписи (footer)."
+    ),
+    type_id="builtin.order.parse_to_blocks",
+    outputs={
+        "blocks": "List",
+        "table": "DataTable",
+        "count": "int",
+        "summary": "str",
+    },
+)
+def parse_to_blocks(text: str = "") -> dict:
+    if not text.strip():
+        return {
+            "blocks": [],
+            "table": DataTable(("ID", "Тип", "Мітка", "Вміст"), ()),
+            "count": 0,
+            "summary": "Порожній текст наказу",
+        }
+
+    lines = [line.rstrip() for line in text.splitlines()]
+    blocks = []
+
+    # 1. Знаходимо шапку наказу (до першого § або пункту або "НАКАЗУЮ")
+    content_start_idx = len(lines)
+    header_lines = []
+    for idx, line in enumerate(lines):
+        clean = line.strip()
+        if clean.startswith("§") or re.match(r"^\d+[\.\)]", clean) or "НАКАЗУЮ" in clean.upper() or "ПРИЗНАЧИТИ" in clean.upper():
+            content_start_idx = idx
+            break
+        if clean:
+            header_lines.append(line)
+
+    if header_lines:
+        blocks.append({
+            "id": "block_0",
+            "type": "header",
+            "label": "Шапка наказу",
+            "text": "\n".join(header_lines),
+            "lines": header_lines,
+        })
+
+    # 2. Розбираємо тіло наказу
+    current_parent_heading = ""
+    current_block = None
+    block_counter = len(blocks)
+
+    for line in lines[content_start_idx:]:
+        clean = line.strip()
+        if not clean:
+            if current_block:
+                current_block["lines"].append("")
+            continue
+
+        is_section = clean.startswith("§") or (
+            ("Відповідно до" in clean or "Згідно з" in clean or clean.endswith(":"))
+            and not re.match(r"^\d+[\.\d]*", clean)
+            and not clean.startswith("Підстава")
+        )
+        is_basis = clean.startswith("Підстава") or clean.startswith("Підстави")
+        is_item = (
+            not is_section
+            and not is_basis
+            and not ("р.н." in clean or "р. н." in clean)
+            and bool(re.match(r"^\d{1,3}(?:\.\d{1,3})*[\.\)]\s+", clean))
+        )
+        is_footer = clean.startswith("Командир") or clean.startswith("ТВО") or clean.startswith("ТИМЧАСОВО") or clean.startswith("Згідно з оригіналом")
+
+        if is_section:
+            if clean.startswith("§") or not current_parent_heading:
+                current_parent_heading = line
+            else:
+                current_parent_heading += "\n\n" + line
+            current_block = {
+                "id": f"block_{block_counter}",
+                "type": "section",
+                "label": clean.split()[0] if clean.split() else "Розділ",
+                "heading": current_parent_heading,
+                "text": line,
+                "lines": [line],
+            }
+            block_counter += 1
+            blocks.append(current_block)
+        elif is_item:
+            match = re.match(r"^(\d+[\.\d]*)", clean)
+            label = f"Пункт {match.group(1)}" if match else "Пункт"
+            current_block = {
+                "id": f"block_{block_counter}",
+                "type": "item",
+                "label": label,
+                "heading": current_parent_heading,
+                "text": line,
+                "lines": [line],
+            }
+            block_counter += 1
+            blocks.append(current_block)
+        elif is_basis:
+            current_block = {
+                "id": f"block_{block_counter}",
+                "type": "basis",
+                "label": "Підстава",
+                "heading": current_parent_heading,
+                "text": line,
+                "lines": [line],
+            }
+            block_counter += 1
+            blocks.append(current_block)
+        elif is_footer:
+            current_block = {
+                "id": f"block_{block_counter}",
+                "type": "footer",
+                "label": "Підпис / Фінал",
+                "heading": "",
+                "text": line,
+                "lines": [line],
+            }
+            block_counter += 1
+            blocks.append(current_block)
+        else:
+            if current_block:
+                current_block["lines"].append(line)
+                current_block["text"] = "\n".join(current_block["lines"])
+            else:
+                current_block = {
+                    "id": f"block_{block_counter}",
+                    "type": "item",
+                    "label": "Основний текст",
+                    "heading": current_parent_heading,
+                    "text": line,
+                    "lines": [line],
+                }
+                block_counter += 1
+                blocks.append(current_block)
+
+    table_rows = [
+        (b["id"], b["type"], b["label"], b["text"][:80] + ("..." if len(b["text"]) > 80 else ""))
+        for b in blocks
+    ]
+    table = DataTable(("ID", "Тип", "Мітка", "Вміст (прев'ю)"), tuple(table_rows), "Блоки наказу")
+
+    return {
+        "blocks": blocks,
+        "table": table,
+        "count": len(blocks),
+        "summary": f"Розділено наказ на {len(blocks)} блоків-конструкторів",
+    }
+
+
+@node(
+    name="Трансформація та фільтрація блоків",
+    category="Наказ",
+    description=(
+        "Фільтрує або змінює окремі блоки наказу: застосовує карту замін (відкриті -> закриті в/ч), "
+        "замінює звороти 'цієї самої бригади' на 'цієї самої військової частини', та фільтрує за типом блоків."
+    ),
+    type_id="builtin.order.filter_transform_blocks",
+    outputs={
+        "blocks": "List",
+        "modified_count": "int",
+        "summary": "str",
+    },
+)
+def filter_transform_blocks(
+    blocks: list | None = None,
+    include_types: str = "",
+    mapping: dict | None = None,
+    replace_unit_phrases: bool = True,
+) -> dict:
+    if not blocks:
+        return {"blocks": [], "modified_count": 0, "summary": "Порожній список блоків"}
+
+    mapping_dict = mapping or {}
+    types_set = {t.strip().casefold() for t in include_types.split(",") if t.strip()} if include_types.strip() else None
+
+    result_blocks = []
+    modified_count = 0
+
+    for block in blocks:
+        if not isinstance(block, dict):
+            continue
+        b_type = str(block.get("type", "")).casefold()
+        if types_set and b_type not in types_set:
+            continue
+
+        b_copy = dict(block)
+        lines = list(b_copy.get("lines", []))
+        text = b_copy.get("text", "\n".join(lines))
+        orig_text = text
+
+        # 1. Заміна назв ВЧ
+        for open_name, mapped_val in mapping_dict.items():
+            closed_code = str(mapped_val.get("cipher") if isinstance(mapped_val, dict) else mapped_val)
+            pattern = _build_unit_fuzzy_pattern(open_name)
+            if pattern.search(text):
+                text = pattern.sub(closed_code, text)
+
+        # 2. Заміна зворотів ("цієї самої бригади" -> "цієї самої військової частини")
+        if replace_unit_phrases:
+            for pattern, replacer in _UNIT_PHRASE_REPLACEMENTS:
+                if pattern.search(text):
+                    text = pattern.sub(replacer, text)
+
+        if text != orig_text:
+            modified_count += 1
+            b_copy["text"] = text
+            b_copy["lines"] = text.splitlines()
+
+        result_blocks.append(b_copy)
+
+    summary = f"Опрацьовано блоків: {len(result_blocks)} (змінено: {modified_count})"
+    return {"blocks": result_blocks, "modified_count": modified_count, "summary": summary}
+
+
+@node(
+    name="Зібрати наказ з блоків",
+    category="Наказ",
+    description=(
+        "Збирає структурований список блоків-конструкторів у єдиний готовий текст наказу "
+        "із можливістю заміни шапки чи розділювачів."
+    ),
+    type_id="builtin.order.assemble_from_blocks",
+    outputs={
+        "text": "str",
+        "count": "int",
+        "summary": "str",
+    },
+)
+def assemble_from_blocks(
+    blocks: list | None = None,
+    new_header: str = "",
+    separator: str = "\n\n",
+) -> dict:
+    if not blocks:
+        return {"text": "", "count": 0, "summary": "Порожній список блоків"}
+
+    block_texts = []
+    header_inserted = False
+
+    for block in blocks:
+        if not isinstance(block, dict):
+            continue
+        b_type = str(block.get("type", "")).casefold()
+        b_text = str(block.get("text", "")).strip()
+
+        if b_type == "header":
+            if new_header.strip():
+                block_texts.append(new_header.strip())
+                header_inserted = True
+            elif b_text:
+                block_texts.append(b_text)
+                header_inserted = True
+        elif b_text:
+            block_texts.append(b_text)
+
+    # Якщо була вказана нова шапка, але блоку 'header' не було у списку — додаємо її на початок
+    if new_header.strip() and not header_inserted:
+        block_texts.insert(0, new_header.strip())
+
+    sep = separator if separator else "\n\n"
+    final_text = sep.join(block_texts).strip()
+
+    summary = f"Зібрано наказ з {len(block_texts)} блоків"
+    return {"text": final_text, "count": len(block_texts), "summary": summary}

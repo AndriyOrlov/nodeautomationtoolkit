@@ -137,3 +137,43 @@ def test_generate_decision_order():
     assert "в/ч А1670" in decision_text
     assert "цієї самої військової частини" in decision_text
     assert res["replaced_count"] >= 3
+
+
+def test_order_block_constructor_pipeline():
+    from nodeautomationtoolkit.builtin_nodes.recipient_mapping import (
+        parse_to_blocks,
+        filter_transform_blocks,
+        assemble_from_blocks,
+    )
+
+    text = (
+        "НАКАЗ командира 160 окремої механізованої бригади\n"
+        "15 січня 2026 року № 100, м. Київ\n\n"
+        "§ 1\n"
+        "1. Молодшого лейтенанта призначити у 167 окрему механізовану бригаду.\n"
+        "2. Військовослужбовця цієї самої бригади звільнити з посади.\n"
+        "Підстава: рапорт командира.\n"
+    )
+
+    mapping = {
+        "167 окрема механізована бригада": {"open_name": "167 окрема механізована бригада", "cipher": "в/ч А1670"},
+    }
+
+    # 1. Parse into blocks
+    parsed = parse_to_blocks(text=text)
+    blocks = parsed["blocks"]
+    assert len(blocks) >= 4  # header, section, item 1, item 2, basis
+
+    # 2. Filter & transform blocks
+    transformed = filter_transform_blocks(blocks=blocks, mapping=mapping, replace_unit_phrases=True)
+    tf_blocks = transformed["blocks"]
+    assert transformed["modified_count"] >= 2
+
+    # 3. Assemble back
+    assembled = assemble_from_blocks(blocks=tf_blocks, new_header="ЗАКРИТИЙ НАКАЗ командира в/ч А0000")
+    final_text = assembled["text"]
+
+    assert "ЗАКРИТИЙ НАКАЗ командира в/ч А0000" in final_text
+    assert "в/ч А1670" in final_text
+    assert "цієї самої військової частини" in final_text
+    assert "Підстава: рапорт командира" in final_text
