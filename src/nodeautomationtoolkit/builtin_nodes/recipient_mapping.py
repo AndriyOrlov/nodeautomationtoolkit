@@ -699,3 +699,144 @@ def split_by_senders(
         "senders_count": len(blocks),
         "summary": summary,
     }
+
+
+# ── Правила заміни займенниково-іменникових зворотів ───────────────────────────
+_UNIT_PHRASE_REPLACEMENTS = [
+    # (цієї / цієї самої / зазначеної / вказаної / даної) (бригади / полку / батальйону ...)
+    (
+        re.compile(
+            r"\b(цієї|цієї\s+самої|цього|цього\s+самого|зазначеної|зазначеного|вказаної|вказаного|даної|даного)\s+(бригади|полку|батальйону|дивізіону|загону|корпусу|центру)\b",
+            re.IGNORECASE | re.UNICODE,
+        ),
+        lambda m: (
+            "цієї самої військової частини" if "само" in m.group(0).lower()
+            else ("цієї військової частини" if m.group(1).lower() in ("цієї", "цього")
+            else ("зазначеної військової частини" if "зазнач" in m.group(1).lower()
+            else ("вказаної військової частини" if "вказан" in m.group(1).lower()
+            else "даної військової частини")))
+        )
+    ),
+    # (цією / цією самою / цим / цим самим) (бригадою / полком ...)
+    (
+        re.compile(
+            r"\b(цією|цією\s+самою|цим|цим\s+самим|зазначеною|зазначеним|вказаною|вказаним|даною|даним)\s+(бригадою|полком|батальйоном|дивізіоном|загоном|корпусом)\b",
+            re.IGNORECASE | re.UNICODE,
+        ),
+        lambda m: (
+            "цією самою військовою частиною" if "само" in m.group(0).lower()
+            else ("цією військовою частиною" if m.group(1).lower() in ("цією", "цим")
+            else ("зазначеною військовою частиною" if "зазнач" in m.group(1).lower()
+            else ("вказаною військовою частиною" if "вказан" in m.group(1).lower()
+            else "даною військовою частиною")))
+        )
+    ),
+    # (у / в / по) (цій / цій самій / цьому / цьому самому) (бригаді / полку / батальйоні ...)
+    (
+        re.compile(
+            r"\b(у|в|по)\s+(цій|цій\s+самій|цьому|цьому\s+самому|зазначеній|зазначеному|вказаній|вказаному|даній|даному)\s+(бригаді|полку|батальйоні|дивізіоні|загоні|корпусі)\b",
+            re.IGNORECASE | re.UNICODE,
+        ),
+        lambda m: (
+            f"{m.group(1)} цій самій військовій частині" if "само" in m.group(0).lower()
+            else (f"{m.group(1)} цій військовій частині" if m.group(2).lower() in ("цій", "цьому")
+            else (f"{m.group(1)} зазначеній військовій частині" if "зазнач" in m.group(2).lower()
+            else (f"{m.group(1)} вказаній військовій частині" if "вказан" in m.group(2).lower()
+            else f"{m.group(1)} даній військовій частині")))
+        )
+    ),
+]
+
+
+@node(
+    name="Генерація наказу про прийняття рішень (закритий)",
+    category="Наказ",
+    description=(
+        "Генерує закритий наказ про прийняття рішень: видаляє/замінює відкриту шапку на закриту, "
+        "конвертує всі відкриті назви частин у шифри (в/ч АXXXX), а також замінює звороти "
+        "('цієї самої бригади', 'цього самого полку' тощо) на 'цієї самої військової частини' "
+        "у відповідних відмінках."
+    ),
+    type_id="builtin.order.generate_decision_order",
+    outputs={
+        "decision_text": "str",
+        "replaced_count": "int",
+        "summary": "str",
+    },
+)
+def generate_decision_order(
+    text: str = "",
+    mapping: dict | None = None,
+    new_header: str = "НАКАЗ командира військової частини А0000 (по стройовій частині)",
+    fuzzy_match: bool = True,
+) -> dict:
+    """Генерує закритий наказ про прийняття рішень."""
+    if not text.strip():
+        return {
+            "decision_text": "",
+            "replaced_count": 0,
+            "summary": "Порожній текст наказу",
+        }
+
+    mapping_dict = mapping or {}
+    lines = [line.rstrip() for line in text.splitlines()]
+
+    # 1. Знаходимо початок змістовної частини (після шапки наказу)
+    content_start_idx = 0
+    for idx, line in enumerate(lines):
+        clean = line.strip()
+        if (
+            clean.startswith("§")
+            or re.match(r"^\d+[\.\)]", clean)
+            or "НАКАЗУЮ" in clean.upper()
+            or "ПРИЗНАЧИТИ" in clean.upper()
+        ):
+            content_start_idx = idx
+            break
+
+    body_lines = lines[content_start_idx:]
+    body_text = "\n".join(body_lines)
+
+    replaced_count = 0
+
+    # 2. Замінюємо відкриті назви частин на закриті шифри
+    for open_name, mapped_val in mapping_dict.items():
+        if isinstance(mapped_val, dict):
+            closed_code = str(mapped_val.get("cipher") or mapped_val.get("closed_name") or open_name)
+            abbreviation = str(mapped_val.get("abbreviation", "")).strip()
+        else:
+            closed_code = str(mapped_val)
+            abbreviation = ""
+
+        # Зіставляємо за сигнатурою відкриту назву
+        pattern = _build_unit_fuzzy_pattern(open_name) if fuzzy_match else re.compile(re.escape(open_name), re.IGNORECASE)
+        matches = pattern.findall(body_text)
+        if matches:
+            replaced_count += len(matches)
+            body_text = pattern.sub(closed_code, body_text)
+
+        # Зіставляємо скорочення
+        if abbreviation and abbreviation != open_name:
+            abbr_pattern = _build_unit_fuzzy_pattern(abbreviation) if fuzzy_match else re.compile(re.escape(abbreviation), re.IGNORECASE)
+            abbr_matches = abbr_pattern.findall(body_text)
+            if abbr_matches:
+                replaced_count += len(abbr_matches)
+                body_text = abbr_pattern.sub(closed_code, body_text)
+
+    # 3. Замінюємо звороти "цієї самої бригади", "цього самого полку" тощо
+    for pattern, replacer in _UNIT_PHRASE_REPLACEMENTS:
+        matches = pattern.findall(body_text)
+        if matches:
+            replaced_count += len(matches)
+            body_text = pattern.sub(replacer, body_text)
+
+    # 4. Збираємо фінальний закритий наказ (нова шапка + закрите тіло)
+    header_str = new_header.strip() if new_header.strip() else ""
+    final_text = f"{header_str}\n\n{body_text}".strip() if header_str else body_text.strip()
+    summary = f"Сформовано закритий наказ. Виконано замін назв та зворотів: {replaced_count}"
+
+    return {
+        "decision_text": final_text,
+        "replaced_count": replaced_count,
+        "summary": summary,
+    }

@@ -111,3 +111,29 @@ def test_tck_full_wording_extracts_only_oblast():
 
     analysis = analyze_senders(text=text)
     assert "Волинський ОТЦК та СП" in analysis["senders_list"]
+
+
+def test_generate_decision_order():
+    from nodeautomationtoolkit.builtin_nodes.recipient_mapping import generate_decision_order
+
+    text = (
+        "НАКАЗ командира 160 окремої механізованої бригади\n"
+        "15 січня 2026 року № 100, м. Київ\n\n"
+        "§ 1\n"
+        "1. Молодшого лейтенанта призначити у 167 окрему механізовану бригаду.\n"
+        "2. Військовослужбовця цієї самої бригади звільнити з посади.\n"
+        "3. Командирові цього самого полку провести розслідування.\n"
+    )
+
+    mapping = {
+        "167 окрема механізована бригада": {"open_name": "167 окрема механізована бригада", "cipher": "в/ч А1670"},
+    }
+
+    res = generate_decision_order(text=text, mapping=mapping, new_header="ЗАКРИТИЙ НАКАЗ командира в/ч А0000")
+    decision_text = res["decision_text"]
+
+    assert "ЗАКРИТИЙ НАКАЗ командира в/ч А0000" in decision_text
+    assert "НАКАЗ командира 160 окремої механізованої бригади" not in decision_text
+    assert "в/ч А1670" in decision_text
+    assert "цієї самої військової частини" in decision_text
+    assert res["replaced_count"] >= 3
