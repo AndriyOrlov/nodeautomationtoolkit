@@ -112,7 +112,7 @@ _SYS_DIFF_TO_GRAPH = """Ти — AI-аналітик трансформацій 
 ## Доступні type_id нод:
 Потік: builtin.flow.start · builtin.flow.sub_start · builtin.flow.branch · builtin.flow.sequence
 Word: builtin.word.read_docx · builtin.word.replace_in_docx · builtin.word.merge_docx · builtin.word.word_count · builtin.word.create_docx · builtin.word.save_selected_paragraphs
-Наказ: builtin.order.read_recipient_mapping · builtin.order.map_military_units · builtin.order.groups_to_ciphers · builtin.order_batch.create_unit_extracts
+Наказ: builtin.order.read_recipient_mapping · builtin.order.map_military_units · builtin.order.analyze_senders · builtin.order.split_by_senders · builtin.order.groups_to_ciphers · builtin.order_batch.create_unit_extracts
 Excel: builtin.excel.read_sheet · builtin.excel.save_table · builtin.excel.write_cell
 Файли: builtin.files.list_files · builtin.files.move_file · builtin.files.create_folder · builtin.files.create
 Текст: builtin.text.replace · builtin.text.fill_template · builtin.text.today_date · builtin.text.clean · builtin.text.regex_replace · builtin.text.split_lines

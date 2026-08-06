@@ -51,3 +51,47 @@ def test_converts_and_merges_groups_with_same_cipher():
     assert "2. Другий" in result["documents"]["Ш-01"]["content"]
     assert result["missing"] == ["НЕМАЄ"]
     assert len(result["report"].rows) == 3
+
+
+def test_analyze_senders_and_split_by_senders():
+    from nodeautomationtoolkit.builtin_nodes.recipient_mapping import (
+        analyze_senders,
+        split_by_senders,
+    )
+
+    text = (
+        "НАКАЗ командира військової частини А0000\n"
+        "15 січня 2026 року № 100, м. Київ\n\n"
+        "§ 1\n"
+        "1. Пункт про 160 окрему механізовану бригаду призначити.\n"
+        "2. Пункт про 167 окрему механізовану бригаду звільнити.\n"
+    )
+
+    mapping = {
+        "160 окрема механізована бригада": {"open_name": "160 окрема механізована бригада", "cipher": "в/ч А1600"},
+        "167 окрема механізована бригада": {"open_name": "167 окрема механізована бригада", "cipher": "в/ч А1670"},
+    }
+
+    res = analyze_senders(text=text, mapping=mapping)
+    assert isinstance(res["sender_paragraphs"], dict)
+    assert len(res["senders_list"]) > 0
+    assert isinstance(res["table"], DataTable)
+
+    res_split = split_by_senders(text=text, mapping=mapping)
+    assert isinstance(res_split["blocks"], dict)
+    assert res_split["senders_count"] > 0
+
+
+def test_army_corps_prioritization_over_subordinate_units():
+    from nodeautomationtoolkit.builtin_nodes.recipient_mapping import analyze_senders
+
+    text = (
+        "§ 1\n"
+        "1. Молодшого лейтенанта призначити у 167 окрему механізовану бригаду 10-го армійського корпусу.\n"
+        "2. Сержанта звільнити з 154 окремої механізованої бригади 3 АК.\n"
+    )
+
+    res = analyze_senders(text=text)
+    assert "10 армійський корпус" in res["senders_list"]
+    assert "3 армійський корпус" in res["senders_list"]
+    assert len(res["sender_paragraphs"]["10 армійський корпус"]) == 1
