@@ -204,15 +204,6 @@ class LocalLlmClient:
             "temperature": temperature,
             "stream": False,
         }
-        if self.config.provider in (
-            LocalLlmProvider.LM_STUDIO,
-            LocalLlmProvider.OLLAMA,
-            LocalLlmProvider.EMBEDDED,
-            LocalLlmProvider.CUSTOM,
-        ):
-            body["num_ctx"] = 16384
-            body["n_ctx"] = 16384
-            body["options"] = {"num_ctx": 16384}
         payload = self._request("chat/completions", body)
         try:
             return str(payload["choices"][0]["message"]["content"])
@@ -269,16 +260,6 @@ class LocalLlmClient:
             "temperature": 0.1,
             "stream": False,
         }
-
-        if self.config.provider in (
-            LocalLlmProvider.LM_STUDIO,
-            LocalLlmProvider.OLLAMA,
-            LocalLlmProvider.EMBEDDED,
-            LocalLlmProvider.CUSTOM,
-        ):
-            body["num_ctx"] = 16384
-            body["n_ctx"] = 16384
-            body["options"] = {"num_ctx": 16384}
 
         if self.config.provider in (
             LocalLlmProvider.LM_STUDIO,

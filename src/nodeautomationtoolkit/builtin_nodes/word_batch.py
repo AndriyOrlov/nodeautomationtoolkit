@@ -1019,19 +1019,19 @@ def create_unit_extracts(
     from nodeautomationtoolkit.builtin_nodes.text_analysis import extract_order_fields
     from nodeautomationtoolkit.core.table_types import DataTable
 
-    if not source_order_path.strip() or not Path(source_order_path).is_file():
-        raise FileNotFoundError(f"Файл наказу не знайдено: {source_order_path}")
-
-    out_dir = Path(output_folder).expanduser() if output_folder.strip() else Path(source_order_path).parent / "Витяги_ВЧ"
+    out_dir = Path(output_folder).expanduser() if output_folder.strip() else Path("output/extracts")
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    src_doc = docx.Document(source_order_path)
-    full_text = "\n".join(p.text for p in src_doc.paragraphs)
-    
-    if not order_number or not order_date:
-        extracted = extract_order_fields(full_text)
-        order_number = order_number or extracted.get("order_number") or "б-н"
-        order_date = order_date or extracted.get("order_date") or "б-д"
+    if source_order_path.strip() and Path(source_order_path).is_file():
+        src_doc = docx.Document(source_order_path)
+        full_text = "\n".join(p.text for p in src_doc.paragraphs)
+        if not order_number or not order_date:
+            extracted = extract_order_fields(full_text)
+            order_number = order_number or extracted.get("order_number") or "б-н"
+            order_date = order_date or extracted.get("order_date") or "б-д"
+    else:
+        order_number = order_number or "б-н"
+        order_date = order_date or "б-д"
 
     units_data = unit_paragraphs or {}
     created_paths = []

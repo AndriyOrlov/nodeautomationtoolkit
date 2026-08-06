@@ -224,3 +224,79 @@ def build_order_blocks_constructor_graph() -> GraphModel:
             ConnectionModel("assemble-order", "text", "show-result", "value"),
         ],
     )
+
+
+def build_order_extracts_generator_graph() -> GraphModel:
+    """Повний автоматизований сценарій: генерація витягів та закритого наказу про прийняття рішень."""
+    return GraphModel(
+        name="Генерація витягів з наказу та закритих наказів",
+        nodes=[
+            NodeModel(id="start", type_id="builtin.flow.start", x=-900, y=0),
+            NodeModel(
+                id="read-mapping",
+                type_id="builtin.order.read_recipient_mapping",
+                x=-900,
+                y=180,
+                parameters={"path": "samples/sample_recipient_mapping.xlsx"},
+            ),
+            NodeModel(
+                id="read-order",
+                type_id="builtin.word.read_docx",
+                x=-600,
+                y=0,
+                parameters={"path": "samples/sample_open_order.docx"},
+            ),
+            NodeModel(
+                id="map-senders",
+                type_id="builtin.order.map_military_units",
+                x=-320,
+                y=0,
+            ),
+            NodeModel(
+                id="generate-extracts",
+                type_id="builtin.order_batch.create_unit_extracts",
+                x=-40,
+                y=-100,
+                parameters={"output_folder": "output/extracts"},
+            ),
+            NodeModel(
+                id="generate-decision",
+                type_id="builtin.word.generate_decision_order_docx",
+                x=-40,
+                y=100,
+                parameters={
+                    "output_path": "output/decision_order.docx",
+                    "new_header": "НАКАЗ командира військової частини А0000 (по стройовій частині)",
+                    "replace_unit_phrases": True,
+                },
+            ),
+            NodeModel(
+                id="group-ciphers",
+                type_id="builtin.order.groups_to_ciphers",
+                x=240,
+                y=-100,
+            ),
+            NodeModel(
+                id="show-report",
+                type_id="builtin.output.show_table",
+                x=520,
+                y=-100,
+            ),
+        ],
+        connections=[
+            ConnectionModel("start", "then", "read-order", "exec", kind="execution"),
+            ConnectionModel("read-order", "then", "map-senders", "exec", kind="execution"),
+            ConnectionModel("map-senders", "then", "generate-extracts", "exec", kind="execution"),
+            ConnectionModel("map-senders", "then", "generate-decision", "exec", kind="execution"),
+            ConnectionModel("generate-extracts", "then", "group-ciphers", "exec", kind="execution"),
+            ConnectionModel("group-ciphers", "then", "show-report", "exec", kind="execution"),
+            ConnectionModel("read-mapping", "mapping", "map-senders", "mapping"),
+            ConnectionModel("read-mapping", "mapping", "generate-decision", "mapping"),
+            ConnectionModel("read-mapping", "mapping", "group-ciphers", "mapping"),
+            ConnectionModel("read-order", "text", "map-senders", "text"),
+            ConnectionModel("read-order", "path", "generate-decision", "path"),
+            ConnectionModel("map-senders", "unit_paragraphs", "generate-extracts", "unit_paragraphs"),
+            ConnectionModel("map-senders", "unit_paragraphs", "group-ciphers", "groups"),
+            ConnectionModel("group-ciphers", "report", "show-report", "table"),
+        ],
+    )
