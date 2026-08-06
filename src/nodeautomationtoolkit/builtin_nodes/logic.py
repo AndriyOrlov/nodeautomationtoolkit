@@ -18,6 +18,18 @@ def start() -> None:
 
 
 @node(
+    name="Старт гілки",
+    category="Потік",
+    description="Запуск для окремої гілки або підсценарію. Дозволяє виконувати виключно виділений ланцюжок нод.",
+    type_id="builtin.flow.sub_start",
+    outputs={},
+    execution_outputs=("then",),
+)
+def sub_start() -> None:
+    return None
+
+
+@node(
     name="Branch",
     category="Потік",
     description="Спрямовує виконання у гілку True або False.",

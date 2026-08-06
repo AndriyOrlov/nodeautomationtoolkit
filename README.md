@@ -21,7 +21,7 @@
 ## Завантажити для Windows
 
 1. Відкрийте сторінку **Releases** праворуч на GitHub.
-2. Завантажте `NodeAutomationToolkit-v0.3.0-windows-x64.zip`.
+2. Завантажте `NodeAutomationToolkit-v0.4.0-windows-x64.zip`.
 3. Розпакуйте архів у звичайну папку.
 4. Запустіть `NodeAutomationToolkit.exe`.
 

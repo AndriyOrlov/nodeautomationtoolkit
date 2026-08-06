@@ -2,13 +2,15 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QThread, Signal, Slot
+from PySide6.QtCore import QObject, QThread, QUrl, Signal, Slot
+from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDialog,
     QDialogButtonBox,
     QFormLayout,
+    QHBoxLayout,
     QLabel,
     QLineEdit,
     QMessageBox,
@@ -22,9 +24,13 @@ from PySide6.QtWidgets import (
 from nodeautomationtoolkit.core.embedded_llm import MODEL_ALIAS, SERVER_API_KEY
 from nodeautomationtoolkit.core.local_llm import (
     DEFAULT_BASE_URLS,
+    PROVIDER_API_KEY_URLS,
+    PROVIDER_PRESET_MODELS,
     LocalLlmClient,
     LocalLlmConfig,
     LocalLlmProvider,
+    load_llm_settings,
+    save_llm_settings,
 )
 from nodeautomationtoolkit.core.node_draft import (
     NodeDraft,
@@ -71,29 +77,53 @@ class NodeAssistantDialog(QDialog):
         self.setWindowTitle("Створити Python-ноду за допомогою LLM")
         self.resize(1050, 720)
 
+        saved = load_llm_settings()
+
         self.provider = QComboBox()
         self.provider.addItems([item.value for item in LocalLlmProvider])
-        selected = initial_config or LocalLlmConfig(
-            provider=LocalLlmProvider.EMBEDDED,
-            base_url=DEFAULT_BASE_URLS[LocalLlmProvider.EMBEDDED],
-            model=MODEL_ALIAS,
-            api_key=SERVER_API_KEY,
-        )
-        self.provider.setCurrentText(selected.provider.value)
-        self.base_url = QLineEdit(selected.base_url)
-        self.model = QLineEdit(selected.model)
-        self.model.setPlaceholderText("Наприклад: gpt-5.6 або локальна модель")
-        self.api_key = QLineEdit(selected.api_key if selected.api_key != "local" else "")
+        self.provider.setCurrentText(saved["provider"])
+
+        self.base_url = QLineEdit(saved["base_url"])
+
+        self.model = QComboBox()
+        self.model.setEditable(True)
+
+        self.refresh_models_btn = QPushButton("🔄 Оновити")
+        self.refresh_models_btn.setToolTip("Запитати точний список доступних моделей у сервера провайдера")
+        self.refresh_models_btn.clicked.connect(self._refresh_models_from_server)
+
+        model_widget = QWidget()
+        model_layout = QHBoxLayout(model_widget)
+        model_layout.setContentsMargins(0, 0, 0, 0)
+        model_layout.addWidget(self.model, 1)
+        model_layout.addWidget(self.refresh_models_btn)
+
+        self.api_key = QLineEdit(saved["api_key"])
         self.api_key.setEchoMode(QLineEdit.EchoMode.Password)
-        self.api_key.setPlaceholderText("Не зберігається у сценарії")
+        self.api_key.setPlaceholderText("Зберігається локально")
+
+        self.api_key_btn = QPushButton("🔑 Отримати API-ключ")
+        self.api_key_btn.setToolTip("Відкрити офіційний сайт для отримання API-ключа у браузері")
+        self.api_key_btn.clicked.connect(self._open_api_key_url)
+
+        api_key_widget = QWidget()
+        api_key_layout = QHBoxLayout(api_key_widget)
+        api_key_layout.setContentsMargins(0, 0, 0, 0)
+        api_key_layout.addWidget(self.api_key)
+        api_key_layout.addWidget(self.api_key_btn)
+
         self.provider.currentTextChanged.connect(self._provider_changed)
-        self._provider_changed(selected.provider.value)
+        self.api_key.textChanged.connect(self._save_settings)
+        self.base_url.textChanged.connect(self._save_settings)
+        self.model.currentTextChanged.connect(self._save_settings)
+
+        self._provider_changed(saved["provider"])
 
         settings = QFormLayout()
         settings.addRow("Провайдер", self.provider)
         settings.addRow("Адреса API", self.base_url)
-        settings.addRow("Модель", self.model)
-        settings.addRow("API-ключ", self.api_key)
+        settings.addRow("Вибір моделі", model_widget)
+        settings.addRow("API-ключ", api_key_widget)
 
         self.prompt = QPlainTextEdit()
         self.prompt.setPlainText(initial_prompt)
@@ -150,32 +180,98 @@ class NodeAssistantDialog(QDialog):
         layout.addWidget(self.buttons)
 
     def _provider_changed(self, value: str) -> None:
-        provider = LocalLlmProvider(value)
-        self.base_url.setText(DEFAULT_BASE_URLS[provider])
+        try:
+            provider = LocalLlmProvider(value)
+        except ValueError:
+            provider = LocalLlmProvider.EMBEDDED
+
+        saved = load_llm_settings(provider)
+        self.base_url.setText(saved["base_url"])
         embedded = provider == LocalLlmProvider.EMBEDDED
         self.base_url.setEnabled(not embedded)
-        self.model.setEnabled(not embedded)
-        self.api_key.setEnabled(not embedded)
+        self.model.setEnabled(True)
+
+        self.model.clear()
+        presets = PROVIDER_PRESET_MODELS.get(provider, [])
+        if presets:
+            self.model.addItems(presets)
+        
+        if saved["model"]:
+            self.model.setCurrentText(saved["model"])
+        elif presets:
+            self.model.setCurrentIndex(0)
+
+        url = PROVIDER_API_KEY_URLS.get(provider, "")
+        self.api_key_btn.setVisible(bool(url))
+        if provider == LocalLlmProvider.GEMINI:
+            self.api_key_btn.setText("🔑 Отримати Google API Key")
+        elif provider == LocalLlmProvider.OPENAI:
+            self.api_key_btn.setText("🔑 Отримати OpenAI Key")
+        elif provider == LocalLlmProvider.LM_STUDIO:
+            self.api_key_btn.setText("🌐 Сайт LM Studio")
+        elif provider == LocalLlmProvider.OLLAMA:
+            self.api_key_btn.setText("🌐 Сайт Ollama")
+
         if embedded:
-            self.model.setText(MODEL_ALIAS)
             self.api_key.setText(SERVER_API_KEY)
+            self.api_key.setEnabled(False)
+        else:
+            self.api_key.setText(saved["api_key"])
+            self.api_key.setEnabled(True)
+
+        self._save_settings()
+
+    def _refresh_models_from_server(self) -> None:
+        self.refresh_models_btn.setEnabled(False)
+        self.refresh_models_btn.setText("🔄 Завантаження…")
+        try:
+            client = LocalLlmClient(self._config())
+            models = client.fetch_available_models()
+            current = self.model.currentText().strip()
+            self.model.clear()
+            if models:
+                self.model.addItems(models)
+                if current in models:
+                    self.model.setCurrentText(current)
+                else:
+                    self.model.setCurrentIndex(0)
+        finally:
+            self.refresh_models_btn.setEnabled(True)
+            self.refresh_models_btn.setText("🔄 Оновити")
+
+    def _save_settings(self) -> None:
+        save_llm_settings(
+            provider_value=self.provider.currentText(),
+            base_url=self.base_url.text().strip(),
+            model=self.model.currentText().strip(),
+            api_key=self.api_key.text().strip(),
+        )
+
+    def _open_api_key_url(self) -> None:
+        provider = LocalLlmProvider(self.provider.currentText())
+        url_str = PROVIDER_API_KEY_URLS.get(provider, "")
+        if url_str:
+            QDesktopServices.openUrl(QUrl(url_str))
 
     def _config(self) -> LocalLlmConfig:
+        provider = LocalLlmProvider(self.provider.currentText())
+        model_name = self.model.currentText().strip()
+        api_key = self.api_key.text().strip()
+        if provider == LocalLlmProvider.EMBEDDED and not api_key:
+            api_key = SERVER_API_KEY
         return LocalLlmConfig(
-            provider=LocalLlmProvider(self.provider.currentText()),
+            provider=provider,
             base_url=self.base_url.text().strip(),
-            model=self.model.text().strip(),
-            api_key=self.api_key.text().strip() or (
-                "local" if self.provider.currentText() != LocalLlmProvider.OPENAI.value else ""
-            ),
+            model=model_name,
+            api_key=api_key or "local",
         )
 
     def generate(self) -> None:
         if not self.prompt.toPlainText().strip():
             QMessageBox.information(self, "Потрібен опис", "Опишіть потрібну ноду")
             return
-        if not self.model.text().strip():
-            QMessageBox.information(self, "Потрібна модель", "Вкажіть локальну модель")
+        if not self.model.currentText().strip():
+            QMessageBox.information(self, "Потрібна модель", "Вкажіть модель")
             return
         self.generate_button.setEnabled(False)
         self.generate_button.setText("Генерування…")

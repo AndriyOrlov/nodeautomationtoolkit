@@ -6,8 +6,8 @@ import re
 from collections import deque
 from typing import Any
 
-from PySide6.QtCore import QObject, QRunnable, Qt, QThreadPool, QTimer, Signal
-from PySide6.QtGui import QAction, QKeySequence
+from PySide6.QtCore import QEvent, QObject, QPointF, QRunnable, Qt, QThreadPool, QTimer, Signal
+from PySide6.QtGui import QAction, QKeySequence, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -18,8 +18,12 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
+    QScrollArea,
     QSplitter,
     QStyle,
+    QTableWidget,
+    QTableWidgetItem,
+    QTabWidget,
     QTextEdit,
     QVBoxLayout,
     QWidget,
@@ -83,6 +87,27 @@ class _PreviewWorker(QRunnable):
             initial_values=self.initial_values,
         )
         self.signals.finished.emit(self.generation, result)
+
+
+class _FileDropFilter(QObject):
+    def __init__(self, editor: NodeGraphQtEditor) -> None:
+        super().__init__(editor)
+        self.editor = editor
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:
+        if event.type() in (QEvent.Type.DragEnter, QEvent.Type.DragMove):
+            if event.mimeData().hasUrls():
+                event.acceptProposedAction()
+                return True
+        elif event.type() == QEvent.Type.Drop:
+            if event.mimeData().hasUrls():
+                event.acceptProposedAction()
+                urls = [url.toLocalFile() for url in event.mimeData().urls() if url.isLocalFile()]
+                if urls:
+                    pos = event.position().toPoint() if hasattr(event, "position") else event.pos()
+                    self.editor._handle_dropped_file_paths(urls, pos)
+                return True
+        return super().eventFilter(watched, event)
 
 
 def port_color(port: PortDefinition) -> tuple[int, int, int]:
@@ -200,6 +225,110 @@ def _node_widget_classes():
             self._editor.setPlainText(str(value))
 
     return NodeStatusWidget, NodePreviewWidget, NodeMultilineWidget, NodeCodeWidget
+
+
+class FullDocumentPreviewWidget(QWidget):
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setMinimumWidth(280)
+        self.setMaximumWidth(600)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(6, 6, 6, 6)
+
+        self.title_label = QLabel("📄 ПОВНЕ ПРЕВ'Ю ДОКУМЕНТА")
+        self.title_label.setStyleSheet("font-weight: 700; color: #38bdf8; font-size: 13px;")
+        self.stats_label = QLabel("Виберіть ноду для перегляду згенерованого результату")
+        self.stats_label.setStyleSheet("color: #94a3b8; font-size: 11px;")
+        layout.addWidget(self.title_label)
+        layout.addWidget(self.stats_label)
+
+        self.tabs = QTabWidget()
+        self.text_edit = QTextEdit()
+        self.text_edit.setReadOnly(True)
+        self.text_edit.setPlaceholderText("Текст згенерованого документа відображатиметься тут…")
+        self.text_edit.setStyleSheet(
+            "QTextEdit { background: #0f172a; color: #f8fafc; font-family: Consolas, monospace; "
+            "border: 1px solid #334155; border-radius: 4px; padding: 6px; }"
+        )
+        self.tabs.addTab(self.text_edit, "Текст")
+
+        self.image_scroll = QScrollArea()
+        self.image_label = QLabel("Схема не згенерована")
+        self.image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.image_scroll.setWidget(self.image_label)
+        self.image_scroll.setWidgetResizable(True)
+        self.tabs.addTab(self.image_scroll, "Схема / Зображення")
+
+        self.table_widget = QTableWidget()
+        self.tabs.addTab(self.table_widget, "Таблиця")
+
+        layout.addWidget(self.tabs)
+
+        btn_layout = QHBoxLayout()
+        copy_btn = QPushButton("Копіювати текст")
+        copy_btn.clicked.connect(self._copy_text)
+        btn_layout.addWidget(copy_btn)
+        layout.addLayout(btn_layout)
+
+    def _copy_text(self) -> None:
+        from PySide6.QtGui import QGuiApplication
+        text = self.text_edit.toPlainText()
+        if text:
+            QGuiApplication.clipboard().setText(text)
+
+    def display_node_output(self, node_title: str, outputs: dict | None) -> None:
+        from pathlib import Path
+        from nodeautomationtoolkit.core.table_types import DataTable
+
+        self.title_label.setText(f"📄 {node_title}")
+        if not outputs:
+            self.stats_label.setText("Результат ще не обчислено")
+            self.text_edit.setPlainText("Запустіть ноду або увімкніть Live-прев'ю для обчислення")
+            self.image_label.setText("Зображення не згенеровано")
+            self.table_widget.setRowCount(0)
+            return
+
+        image_path = ""
+        text_content = ""
+        table_obj = None
+
+        for k, v in outputs.items():
+            if (k in ("image_path", "path") or k.endswith("_path")) and isinstance(v, str) and Path(v).suffix.casefold() in (".png", ".jpg", ".jpeg"):
+                image_path = v
+            elif isinstance(v, DataTable):
+                table_obj = v
+            elif isinstance(v, str) and not text_content:
+                text_content = v
+
+        if not text_content:
+            from nodeautomationtoolkit.core.preview import format_live_preview
+            text_content = format_live_preview(outputs, limit=5000)
+
+        lines = text_content.splitlines()
+        words = len(text_content.split())
+        self.stats_label.setText(f"Рядків: {len(lines)} · Слів: {words} · {len(text_content)} симв.")
+        self.text_edit.setPlainText(text_content)
+
+        if image_path and Path(image_path).is_file():
+            pixmap = QPixmap(image_path)
+            self.image_label.setPixmap(pixmap.scaledToWidth(380, Qt.TransformationMode.SmoothTransformation))
+            self.tabs.setCurrentIndex(1)
+        else:
+            self.image_label.setText("Зображення не згенеровано")
+            if table_obj:
+                self.tabs.setCurrentIndex(2)
+            else:
+                self.tabs.setCurrentIndex(0)
+
+        if table_obj and isinstance(table_obj, DataTable):
+            self.table_widget.setRowCount(len(table_obj.rows))
+            self.table_widget.setColumnCount(len(table_obj.columns))
+            self.table_widget.setHorizontalHeaderLabels(list(table_obj.columns))
+            for r, row in enumerate(table_obj.rows):
+                for c, val in enumerate(row):
+                    self.table_widget.setItem(r, c, QTableWidgetItem(str(val)))
+            self.table_widget.resizeColumnsToContents()
 
 
 def create_nodegraphqt_class(
@@ -369,13 +498,19 @@ class NodeGraphQtEditor(QWidget):
         self._register_definitions()
 
         self.palette = NodesPaletteWidget(node_graph=self.graph)
+        self.left_preview = FullDocumentPreviewWidget()
+
+        self.left_tabs = QTabWidget()
+        self.left_tabs.addTab(self.palette, "Палітра нод")
+        self.left_tabs.addTab(self.left_preview, "📄 Прев'ю документа")
+
         self.properties = PropertiesBinWidget(node_graph=self.graph)
         self.properties.setVisible(False)
         splitter = QSplitter()
-        splitter.addWidget(self.palette)
+        splitter.addWidget(self.left_tabs)
         splitter.addWidget(self.graph.widget)
         splitter.addWidget(self.properties)
-        splitter.setSizes([260, 900, 300])
+        splitter.setSizes([320, 900, 300])
 
         self.live_toggle = QCheckBox("Live-прев'ю")
         self.live_toggle.setChecked(True)
@@ -388,6 +523,14 @@ class NodeGraphQtEditor(QWidget):
             self.style().standardIcon(QStyle.StandardPixmap.SP_MediaPlay)
         )
         run_selected.clicked.connect(self.run_selected_node)
+
+        group_backdrop_btn = QPushButton("🔲 Згрупувати рамкою")
+        group_backdrop_btn.setIcon(
+            self.style().standardIcon(QStyle.StandardPixmap.SP_FileDialogNewFolder)
+        )
+        group_backdrop_btn.setToolTip("Об'єднати виділені ноди у візуальну рамку з підписом (Ctrl+G)")
+        group_backdrop_btn.clicked.connect(lambda: self.create_group_backdrop())
+
         delete_selected = QPushButton("Видалити")
         delete_selected.setIcon(
             self.style().standardIcon(QStyle.StandardPixmap.SP_TrashIcon)
@@ -404,6 +547,7 @@ class NodeGraphQtEditor(QWidget):
         controls.setContentsMargins(8, 5, 8, 5)
         controls.addWidget(self.live_toggle)
         controls.addWidget(run_selected)
+        controls.addWidget(group_backdrop_btn)
         controls.addWidget(delete_selected)
         controls.addWidget(self.properties_toggle)
         controls.addWidget(self.live_status)
@@ -425,11 +569,25 @@ class NodeGraphQtEditor(QWidget):
         run_action.triggered.connect(self.run_selected_node)
         self.addAction(run_action)
 
+        group_action = QAction("Згрупувати рамкою", self)
+        group_action.setShortcut(QKeySequence("Ctrl+G"))
+        group_action.setShortcutContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        group_action.triggered.connect(lambda: self.create_group_backdrop())
+        self.addAction(group_action)
+
         self.graph.node_created.connect(self._on_node_created)
         self.graph.nodes_deleted.connect(self._on_nodes_deleted)
         self.graph.port_connected.connect(self._on_connection_changed)
         self.graph.port_disconnected.connect(self._on_connection_changed)
         self.graph.property_changed.connect(self._on_property_changed)
+        self.graph.node_selection_changed.connect(self._on_node_selection_changed)
+
+        viewer = self.graph.viewer()
+        viewer.setAcceptDrops(True)
+        viewer.viewport().setAcceptDrops(True)
+        self._drop_filter = _FileDropFilter(self)
+        viewer.installEventFilter(self._drop_filter)
+        viewer.viewport().installEventFilter(self._drop_filter)
 
     def _register_definitions(self) -> None:
         node_menu = self.graph.get_context_menu("nodes")
@@ -455,6 +613,36 @@ class NodeGraphQtEditor(QWidget):
 
     def reload_definitions(self) -> None:
         self._register_definitions()
+
+    def create_group_backdrop(self, title: str | None = None) -> None:
+        from PySide6.QtWidgets import QInputDialog, QLineEdit
+
+        selected_nodes = [node for node in self.graph.selected_nodes() if type(node).__name__ != "BackdropNode"]
+
+        if not title:
+            default_name = "Група автоматизації" if selected_nodes else "Нова рамка"
+            name, ok = QInputDialog.getText(
+                self,
+                "Створити рамку групи",
+                "Введіть назву рамки/групи:",
+                QLineEdit.EchoMode.Normal,
+                default_name,
+            )
+            if not ok or not name.strip():
+                return
+            title = name.strip()
+
+        backdrop = self.graph.create_node("nodeGraphQt.nodes.BackdropNode")
+        backdrop.set_name(title)
+
+        if selected_nodes:
+            backdrop.wrap_nodes(selected_nodes)
+        else:
+            view_center = self.graph.viewer().mapToScene(self.graph.viewer().rect().center())
+            backdrop.set_pos(view_center.x() - 100, view_center.y() - 100)
+
+        self.graph_changed.emit()
+        self.message.emit(f"Створено рамку групи: {title}")
 
     def _handle_node_action(self, action: str, node) -> None:
         if action == "pick_file":
@@ -512,7 +700,55 @@ class NodeGraphQtEditor(QWidget):
         self._invalidate_from(node.id)
         self._schedule_live_preview(node.id)
         self.graph_changed.emit()
-        self.message.emit(f"Вибрано файл: {path}")
+    def _on_node_selection_changed(self, selected_nodes, unselected_nodes) -> None:
+        if not selected_nodes:
+            return
+        node = selected_nodes[0]
+        outputs = self._live_values.get(node.id)
+        definition: NodeDefinition | None = getattr(node, "NAT_DEFINITION", None)
+        node_name = node.name() if hasattr(node, "name") else "Нода"
+        self.left_preview.display_node_output(node_name, outputs)
+
+        if definition and (
+            definition.category in ("Результат", "Word · Пакет", "Word", "Наказ")
+            or "output" in definition.type_id
+            or "show" in definition.type_id
+            or "save" in definition.type_id
+            or "visualize" in definition.type_id
+        ):
+            self.left_tabs.setCurrentIndex(1)
+
+    def _handle_dropped_file_paths(self, paths: list[str], drop_pos) -> None:
+        from pathlib import Path
+
+        viewer = self.graph.viewer()
+        scene_pos = viewer.mapToScene(drop_pos) if hasattr(viewer, "mapToScene") else QPointF(0, 0)
+        offset = QPointF(0, 0)
+
+        for file_path in paths:
+            ext = Path(file_path).suffix.casefold()
+            pos_list = [float(scene_pos.x() + offset.x()), float(scene_pos.y() + offset.y())]
+
+            if ext == ".docx":
+                node = self.graph.create_node("builtin.word.read_docx", pos=pos_list)
+                if node and node.has_property("path"):
+                    node.set_property("path", file_path)
+                self.message.emit(f"Перетягнуто DOCX-файл: {Path(file_path).name}")
+            elif ext in (".xlsx", ".csv"):
+                node = self.graph.create_node("builtin.order.read_recipient_mapping", pos=pos_list)
+                if node and node.has_property("path"):
+                    node.set_property("path", file_path)
+                self.message.emit(f"Перетягнуто таблицю відповідностей: {Path(file_path).name}")
+            else:
+                node = self.graph.create_node("builtin.windows.open_file", pos=pos_list)
+                if node and node.has_property("selected_path"):
+                    node.set_property("selected_path", file_path)
+                self.message.emit(f"Перетягнуто файл: {Path(file_path).name}")
+
+            offset += QPointF(40, 40)
+
+        self._schedule_live_preview()
+        self.graph_changed.emit()
 
     def delete_selected_nodes(self) -> None:
         nodes = self.graph.selected_nodes()
@@ -644,9 +880,9 @@ class NodeGraphQtEditor(QWidget):
     def _apply_live_result(self, generation: int, result: PreviewResult) -> None:
         if generation != self._preview_generation:
             return
-        self._live_values = result.values
         for node_id in result.order:
-            self._show_node_outputs(node_id, result.values[node_id])
+            if node_id in result.values:
+                self._show_node_outputs(node_id, result.values[node_id])
         for node_id, error in result.errors.items():
             self._set_node_state(node_id, "error", "ПОМИЛКА", error)
         if result.errors:

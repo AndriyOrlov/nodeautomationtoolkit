@@ -206,3 +206,143 @@ def save_selected_paragraphs(
         paragraph_count=len(selected_indices),
         message="Вибрані абзаци збережено",
     )
+
+
+@node(
+    name="Аналіз колонтитулів та нумерації",
+    category="Word",
+    description=(
+        "Шукає верхні й нижні колонтитули, номери сторінок та службові поля "
+        "у файлі DOCX. Виводить список колонтитулів, наявність нумерації та таблицю."
+    ),
+    type_id="builtin.word.analyze_headers_footers",
+    outputs={
+        "headers": "List",
+        "footers": "List",
+        "has_page_numbers": "bool",
+        "details": "DataTable",
+        "summary": "str",
+    },
+)
+def analyze_headers_footers(path: str = "") -> dict:
+    import re
+    from nodeautomationtoolkit.core.table_types import DataTable
+
+    source_path = _validated_docx_path(path, must_exist=True)
+    doc = _document_class()(source_path)
+
+    headers: list[str] = []
+    footers: list[str] = []
+    has_page_numbers = False
+    table_rows = []
+
+    page_regex = re.compile(
+        r"(?i)\b(?:стор\.?|сторінка|page|numpages)\b|\b\d+\s*(?:з|/)\s*\d+\b"
+    )
+
+    for idx, section in enumerate(doc.sections, start=1):
+        sec_headers = [
+            ("Верхній (основний)", section.header),
+            ("Верхній (перша ст.)", getattr(section, "first_page_header", None)),
+            ("Верхній (парна ст.)", getattr(section, "even_page_header", None)),
+        ]
+        sec_footers = [
+            ("Нижній (основний)", section.footer),
+            ("Нижній (перша ст.)", getattr(section, "first_page_footer", None)),
+            ("Нижній (парна ст.)", getattr(section, "even_page_footer", None)),
+        ]
+
+        for kind, h_obj in sec_headers:
+            if h_obj is None or getattr(h_obj, "is_linked_to_previous", False):
+                continue
+            h_text = "\n".join(p.text for p in h_obj.paragraphs if p.text.strip()).strip()
+            if h_text:
+                headers.append(h_text)
+            h_xml = h_obj._element.xml
+            has_num = bool("PAGE" in h_xml or "NUMPAGES" in h_xml or page_regex.search(h_text))
+            if has_num:
+                has_page_numbers = True
+            if h_text or has_num:
+                table_rows.append((idx, kind, h_text or "(поля нумерації)", "Так" if has_num else "Ні"))
+
+        for kind, f_obj in sec_footers:
+            if f_obj is None or getattr(f_obj, "is_linked_to_previous", False):
+                continue
+            f_text = "\n".join(p.text for p in f_obj.paragraphs if p.text.strip()).strip()
+            if f_text:
+                footers.append(f_text)
+            f_xml = f_obj._element.xml
+            has_num = bool("PAGE" in f_xml or "NUMPAGES" in f_xml or page_regex.search(f_text))
+            if has_num:
+                has_page_numbers = True
+            if f_text or has_num:
+                table_rows.append((idx, kind, f_text or "(поля нумерації)", "Так" if has_num else "Ні"))
+
+    headers = list(dict.fromkeys(headers))
+    footers = list(dict.fromkeys(footers))
+    table = DataTable(
+        ("Секція", "Тип колонтитула", "Текст", "Нумерація сторінок"),
+        tuple(table_rows),
+        "Аналіз колонтитулів",
+    )
+    summary = (
+        f"Верхніх колонтитулів: {len(headers)} · Нижніх: {len(footers)} · "
+        f"Нумерація: {'Знайдено' if has_page_numbers else 'Відсутня'}"
+    )
+    return {
+        "headers": headers,
+        "footers": footers,
+        "has_page_numbers": has_page_numbers,
+        "details": table,
+        "summary": summary,
+    }
+
+
+@node(
+    name="Видалити колонтитули та нумерацію",
+    category="Word",
+    description=(
+        "Видаляє всі верхні/нижні колонтитули та поля нумерації сторінок із файлу DOCX."
+    ),
+    type_id="builtin.word.clear_headers_footers",
+    execution_inputs=("exec",),
+    execution_outputs=("then",),
+    outputs={
+        "path": "str",
+        "cleared_sections": "int",
+        "summary": "str",
+    },
+)
+def clear_headers_footers(
+    path: str = "",
+    output_path: str = "",
+    clear_headers: bool = True,
+    clear_footers: bool = True,
+) -> dict:
+    source_path = _validated_docx_path(path, must_exist=True)
+    target_path = _validated_docx_path(output_path or str(source_path), must_exist=False)
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    doc = _document_class()(source_path)
+
+    cleared_count = 0
+    for section in doc.sections:
+        cleared_count += 1
+        if clear_headers:
+            for h in [section.header, getattr(section, "first_page_header", None), getattr(section, "even_page_header", None)]:
+                if h is not None:
+                    for p in h.paragraphs:
+                        p.text = ""
+        if clear_footers:
+            for f in [section.footer, getattr(section, "first_page_footer", None), getattr(section, "even_page_footer", None)]:
+                if f is not None:
+                    for p in f.paragraphs:
+                        p.text = ""
+
+    doc.save(target_path)
+    summary = f"Очищено колонтитули у {cleared_count} секціях -> {target_path.name}"
+    return {
+        "path": str(target_path),
+        "cleared_sections": cleared_count,
+        "summary": summary,
+    }
+

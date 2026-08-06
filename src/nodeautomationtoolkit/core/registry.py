@@ -53,6 +53,8 @@ class NodeRegistry:
             "nodeautomationtoolkit.builtin_nodes.windows_dialogs",
             "nodeautomationtoolkit.builtin_nodes.word",
             "nodeautomationtoolkit.builtin_nodes.word_batch",
+            "nodeautomationtoolkit.builtin_nodes.excel_nodes",
+            "nodeautomationtoolkit.builtin_nodes.windows_system",
             "nodeautomationtoolkit.builtin_nodes.output",
         ]
         for module_name in modules:

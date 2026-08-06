@@ -265,11 +265,11 @@ def split_order_blocks(
     action_pattern: str = (
         r"^\s*(?:звільнити(?:\s+(?:і|та)\s+призначити)?|"
         r"призначити(?:\s+(?:і|та)\s+звільнити)?|перемістити|"
-        r"зарахувати|виключити)\b"
+        r"зарахувати|виключити)\b.*(?::|\bдо\b)"
     ),
     item_pattern: str = r"^\s*\d+(?:\.\d+)*[.)]\s*",
     signature_pattern: str = (
-        r"^\s*(?:командир|начальник|заступник|керівник|голова|директор|"
+        r"^\s*(?:командир|командувач|начальник|заступник|керівник|голова|директор|"
         r"т\.в\.о\.|тимчасово\s+виконуючий)\b"
     ),
 ) -> dict:
@@ -466,3 +466,118 @@ def group_items_by_markers(
         "counts": {name: group_counts[name] for name in compact_groups},
         "summary": summary,
     }
+
+
+@node(
+    name="Візуалізувати макет наказу",
+    category="Наказ",
+    description=(
+        "Генерує кольорове схематичне зображення (PNG) та розмітку розпізнаних "
+        "блоків наказу (параграфи, причини, шапки дій, пункти, підпис)."
+    ),
+    type_id="builtin.order.visualize_layout",
+    outputs={
+        "image_path": "str",
+        "blocks_summary": "str",
+        "table": "DataTable",
+        "preview": "str",
+    },
+)
+def visualize_order_layout(
+    text: str = "",
+    blocks: list | None = None,
+    output_image_path: str = "",
+) -> dict:
+    import tempfile
+    from pathlib import Path
+    from PIL import Image, ImageDraw
+    from nodeautomationtoolkit.core.table_types import DataTable
+
+    if not blocks and text:
+        blocks = split_order_blocks(text)["blocks"]
+    blocks = blocks or []
+
+    type_styles = {
+        "header": {"bg": (30, 58, 138), "border": (59, 130, 246), "label": "ШАПКА НАКАЗУ", "badge": "🔵"},
+        "section": {"bg": (30, 58, 138), "border": (59, 130, 246), "label": "ПАРАГРАФ", "badge": "🔵"},
+        "reason": {"bg": (88, 28, 135), "border": (168, 85, 247), "label": "ПРИЧИНА / ПІДСТАВА", "badge": "🟣"},
+        "action": {"bg": (6, 95, 70), "border": (52, 211, 153), "label": "ШАПКА ДІЇ", "badge": "🟢"},
+        "item": {"bg": (120, 53, 15), "border": (251, 191, 36), "label": "НУМЕРОВАНИЙ ПУНКТ", "badge": "🟡"},
+        "signature": {"bg": (136, 19, 55), "border": (244, 63, 94), "label": "ПІДПИС", "badge": "🔴"},
+        "text": {"bg": (49, 46, 129), "border": (129, 140, 248), "label": "ЗВИЧАЙНИЙ ТЕКСТ / ЗАСВІДЧЕННЯ", "badge": "🟣"},
+    }
+
+    table_rows = []
+    summary_lines = []
+    for idx, b in enumerate(blocks, start=1):
+        b_type = str(b.get("type", "text"))
+        b_text = str(b.get("text", ""))
+        style = type_styles.get(b_type, type_styles["text"])
+        excerpt = " ".join(b_text.split())[:80]
+        table_rows.append((idx, b_type, style["label"], style["badge"], excerpt))
+        summary_lines.append(f"{style['badge']} Блок {idx} [{style['label']}]: {excerpt}")
+
+    width = 840
+    card_height = 80
+    gap = 14
+    margin = 30
+    header_h = 100
+    img_height = max(500, header_h + margin + len(blocks) * (card_height + gap) + margin)
+
+    img = Image.new("RGB", (width, img_height), color=(15, 23, 42))
+    draw = ImageDraw.Draw(img)
+
+    draw.rectangle([0, 0, width, header_h], fill=(30, 41, 59))
+    draw.text((margin, 25), "СТРУКТУРНИЙ МАКЕТ НАКАЗУ", fill=(248, 250, 252))
+    draw.text((margin, 60), f"Розпізнано блоків: {len(blocks)}", fill=(148, 163, 184))
+
+    y = header_h + margin
+    for idx, b in enumerate(blocks, start=1):
+        b_type = str(b.get("type", "text"))
+        b_text = str(b.get("text", ""))
+        style = type_styles.get(b_type, type_styles["text"])
+
+        draw.rounded_rectangle(
+            [margin, y, width - margin, y + card_height],
+            radius=8,
+            fill=style["bg"],
+            outline=style["border"],
+            width=2,
+        )
+        draw.rounded_rectangle(
+            [margin, y, margin + 12, y + card_height],
+            radius=4,
+            fill=style["border"],
+        )
+        header_str = f"БЛОК {idx}  |  {style['label']}"
+        draw.text((margin + 24, y + 12), header_str, fill=(255, 255, 255))
+        snippet = " ".join(b_text.split())
+        if len(snippet) > 85:
+            snippet = snippet[:84] + "..."
+        draw.text((margin + 24, y + 42), snippet, fill=(226, 232, 240))
+        y += card_height + gap
+
+    if output_image_path.strip():
+        out_path = Path(output_image_path).expanduser().resolve()
+    else:
+        temp_dir = Path(tempfile.gettempdir()) / "nat_layout_previews"
+        temp_dir.mkdir(parents=True, exist_ok=True)
+        out_path = temp_dir / f"order_layout_{len(blocks)}_blocks.png"
+
+    img.save(out_path)
+
+    table = DataTable(
+        ("№", "Тип", "Назва блока", "Мітка", "Контекст"),
+        tuple(table_rows),
+        "Розпізнані блоки наказу",
+    )
+    blocks_summary = "\n".join(summary_lines)
+    preview = f"Зображення створено: {out_path.name}\nБлоків: {len(blocks)}\n\n" + blocks_summary[:300]
+
+    return {
+        "image_path": str(out_path),
+        "blocks_summary": blocks_summary,
+        "table": table,
+        "preview": preview,
+    }
+

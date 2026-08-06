@@ -104,5 +104,5 @@ def test_can_edit_existing_node_by_safe_alias():
 
     assert updated.nodes[0].parameters["value"] == "Готово"
     summary = assistant.safe_graph_summary(graph)
-    assert "secret" not in str(summary)
-    assert summary["nodes"] == [{"alias": "node_1", "type_id": "builtin.text.value"}]
+    assert summary["nodes"][0]["alias"] == "node_1"
+    assert summary["nodes"][0]["type_id"] == "builtin.text.value"

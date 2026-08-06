@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import encodings.idna  # noqa: F401
 import hashlib
 import json
 import os
@@ -195,6 +196,38 @@ def _server_healthy() -> bool:
         return False
 
 
+def _launch_process(status: EmbeddedLlmStatus, gpu_layers: str) -> subprocess.Popen:
+    command = [
+        status.runtime_path,
+        "--model",
+        status.model_path,
+        "--alias",
+        MODEL_ALIAS,
+        "--host",
+        "127.0.0.1",
+        "--port",
+        str(SERVER_PORT),
+        "--ctx-size",
+        "32768",
+        "--n-gpu-layers",
+        gpu_layers,
+        "--jinja",
+        "--offline",
+        "--no-webui",
+        "--api-key",
+        SERVER_API_KEY,
+    ]
+    creationflags = 0x08000000 if os.name == "nt" else 0
+    return subprocess.Popen(
+        command,
+        cwd=str(Path(status.runtime_path).parent),
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        creationflags=creationflags,
+    )
+
+
 def ensure_embedded_server(base_dir: Path | None = None) -> str:
     global _process
     if _server_healthy():
@@ -208,44 +241,37 @@ def ensure_embedded_server(base_dir: Path | None = None) -> str:
             raise RuntimeError(
                 "Локальна модель не встановлена. Натисніть 'Локальна модель' → 'Встановити'."
             )
-        command = [
-            status.runtime_path,
-            "--model",
-            status.model_path,
-            "--alias",
-            MODEL_ALIAS,
-            "--host",
-            "127.0.0.1",
-            "--port",
-            str(SERVER_PORT),
-            "--ctx-size",
-            "16384",
-            "--n-gpu-layers",
-            "all",
-            "--jinja",
-            "--reasoning",
-            "off",
-            "--offline",
-            "--no-webui",
-            "--api-key",
-            SERVER_API_KEY,
-            "--log-disable",
-        ]
-        creationflags = 0x08000000 if os.name == "nt" else 0
-        _process = subprocess.Popen(
-            command,
-            cwd=str(Path(status.runtime_path).parent),
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            creationflags=creationflags,
-        )
+
+        # 1. Спроба виділення на GPU (Vulkan)
+        proc = _launch_process(status, "99")
+        start_time = time.monotonic()
+        while time.monotonic() - start_time < 8:
+            if _server_healthy():
+                _process = proc
+                return embedded_base_url()
+            if proc.poll() is not None:
+                break
+            time.sleep(0.4)
+
+        # Якщо GPU видав ErrorOutOfDeviceMemory або впав - завершуємо процес та переходимо на CPU
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+
+        # 2. Фолбек на CPU ("0" шарів на GPU) - використовує системне оперативне ОЗП
+        cpu_proc = _launch_process(status, "0")
         deadline = time.monotonic() + 240
         while time.monotonic() < deadline:
-            if _process.poll() is not None:
-                raise RuntimeError("Локальна модель не запустилась")
+            if cpu_proc.poll() is not None:
+                err_text = (cpu_proc.stderr.read() if cpu_proc.stderr else b"").decode("utf-8", errors="ignore").strip()
+                raise RuntimeError(f"Помилка запуску моделі: {err_text}")
             if _server_healthy():
+                _process = cpu_proc
                 return embedded_base_url()
             time.sleep(0.5)
-        _process.terminate()
+
+        cpu_proc.terminate()
         raise RuntimeError("Локальна модель не встигла запуститися")

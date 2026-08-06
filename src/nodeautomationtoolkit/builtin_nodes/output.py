@@ -127,3 +127,55 @@ def save_table_csv(table: DataTable, path: str = "", delimiter: str = ";") -> di
         "rows": len(table.rows),
         "message": f"Збережено рядків: {len(table.rows)}",
     }
+
+
+def _show_image_dialog(title: str, image_path: str) -> None:
+    from pathlib import Path
+    from PySide6.QtGui import QPixmap
+    from PySide6.QtWidgets import (
+        QApplication,
+        QDialog,
+        QDialogButtonBox,
+        QLabel,
+        QScrollArea,
+        QVBoxLayout,
+    )
+
+    if QApplication.instance() is None:
+        raise RuntimeError("Перегляд зображення доступний лише у вікні програми")
+
+    path = Path(image_path).expanduser()
+    if not path.is_file():
+        raise FileNotFoundError(f"Зображення не знайдено: {image_path}")
+
+    dialog = QDialog()
+    dialog.setWindowTitle(title or "Прев'ю зображення")
+    dialog.resize(900, 680)
+    layout = QVBoxLayout(dialog)
+
+    scroll = QScrollArea()
+    pixmap = QPixmap(str(path))
+    label = QLabel()
+    label.setPixmap(pixmap)
+    scroll.setWidget(label)
+    scroll.setWidgetResizable(True)
+    layout.addWidget(scroll)
+
+    buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+    buttons.rejected.connect(dialog.reject)
+    layout.addWidget(buttons)
+    dialog.exec()
+
+
+@node(
+    name="Показати зображення",
+    category="Результат",
+    description="Фінальна нода: відкриває кольорове зображення або схему в окремому вікні.",
+    type_id="builtin.output.show_image",
+    execution_inputs=("exec",),
+    preview_policy="never",
+)
+def show_image(image_path: str, title: str = "Схема макету наказу") -> str:
+    _show_image_dialog(title, image_path)
+    return image_path
+

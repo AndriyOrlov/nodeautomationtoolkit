@@ -13,6 +13,7 @@ from .node_draft import NodeDraft
 
 class LocalLlmProvider(StrEnum):
     EMBEDDED = "Вбудована Qwen3 4B"
+    GEMINI = "Google Gemini API"
     OPENAI = "OpenAI API"
     LM_STUDIO = "LM Studio"
     OLLAMA = "Ollama"
@@ -21,10 +22,56 @@ class LocalLlmProvider(StrEnum):
 
 DEFAULT_BASE_URLS = {
     LocalLlmProvider.EMBEDDED: "http://127.0.0.1:11439/v1/",
+    LocalLlmProvider.GEMINI: "https://generativelanguage.googleapis.com/v1beta/openai/",
     LocalLlmProvider.OPENAI: "https://api.openai.com/v1/",
     LocalLlmProvider.LM_STUDIO: "http://127.0.0.1:1234/v1/",
     LocalLlmProvider.OLLAMA: "http://127.0.0.1:11434/v1/",
     LocalLlmProvider.CUSTOM: "http://127.0.0.1:1234/v1/",
+}
+
+PROVIDER_API_KEY_URLS = {
+    LocalLlmProvider.GEMINI: "https://aistudio.google.com/app/apikey",
+    LocalLlmProvider.OPENAI: "https://platform.openai.com/api-keys",
+    LocalLlmProvider.LM_STUDIO: "https://lmstudio.ai/",
+    LocalLlmProvider.OLLAMA: "https://ollama.com/",
+    LocalLlmProvider.EMBEDDED: "",
+    LocalLlmProvider.CUSTOM: "",
+}
+
+PROVIDER_PRESET_MODELS = {
+    LocalLlmProvider.GEMINI: [
+        "gemini-3.0-flash",
+        "gemini-3.0-pro",
+        "gemini-2.5-flash",
+        "gemini-2.5-pro",
+        "gemini-2.0-flash",
+        "gemini-1.5-flash",
+        "gemini-1.5-pro",
+    ],
+    LocalLlmProvider.OPENAI: [
+        "gpt-5.6",
+        "gpt-5.0",
+        "gpt-4o",
+        "gpt-4o-mini",
+        "o3-mini",
+        "gpt-4-turbo",
+        "gpt-3.5-turbo",
+    ],
+    LocalLlmProvider.EMBEDDED: [
+        "embedded-qwen3-4b",
+    ],
+    LocalLlmProvider.LM_STUDIO: [
+        "qwen2.5-coder-7b-instruct",
+        "llama-3.2-3b-instruct",
+    ],
+    LocalLlmProvider.OLLAMA: [
+        "qwen2.5-coder",
+        "llama3.2",
+        "mistral",
+    ],
+    LocalLlmProvider.CUSTOM: [
+        "default",
+    ],
 }
 
 
@@ -38,6 +85,40 @@ class LocalLlmConfig:
 
     def normalized_base_url(self) -> str:
         return self.base_url.rstrip("/") + "/"
+
+
+def load_llm_settings(provider: LocalLlmProvider | None = None) -> dict[str, str]:
+    from PySide6.QtCore import QSettings
+
+    settings = QSettings("DEADSUE.ART", "NodeAutomationToolkit")
+    if provider is None:
+        provider_name = settings.value("ai/last_provider", LocalLlmProvider.EMBEDDED.value)
+        try:
+            provider = LocalLlmProvider(str(provider_name))
+        except ValueError:
+            provider = LocalLlmProvider.EMBEDDED
+
+    saved_url = settings.value(f"ai/base_url_{provider.value}", DEFAULT_BASE_URLS[provider])
+    saved_model = settings.value(f"ai/model_{provider.value}", "")
+    saved_key = settings.value(f"ai/api_key_{provider.value}", "")
+
+    return {
+        "provider": provider.value,
+        "base_url": str(saved_url) if saved_url else DEFAULT_BASE_URLS[provider],
+        "model": str(saved_model) if saved_model else "",
+        "api_key": str(saved_key) if saved_key else "",
+    }
+
+
+def save_llm_settings(provider_value: str, base_url: str, model: str, api_key: str) -> None:
+    from PySide6.QtCore import QSettings
+
+    settings = QSettings("DEADSUE.ART", "NodeAutomationToolkit")
+    settings.setValue("ai/last_provider", provider_value)
+    settings.setValue(f"ai/base_url_{provider_value}", base_url)
+    settings.setValue(f"ai/model_{provider_value}", model)
+    if provider_value != LocalLlmProvider.EMBEDDED.value:
+        settings.setValue(f"ai/api_key_{provider_value}", api_key)
 
 
 SYSTEM_PROMPT = """Ти створюєш одну локальну Python-ноду для Node Automation Toolkit.
@@ -101,6 +182,7 @@ class LocalLlmClient:
     ) -> dict[str, Any]:
         if not self.config.model.strip():
             raise ValueError("Оберіть модель")
+
         if self.config.provider == LocalLlmProvider.OPENAI:
             return self._generate_responses(
                 system_prompt=system_prompt,
@@ -108,29 +190,48 @@ class LocalLlmClient:
                 schema_name=schema_name,
                 schema=schema,
             )
-        body = {
+
+        system_instruction = (
+            f"{system_prompt}\n\nВАЖЛИВО: Дай відповідь ВИКЛЮЧНО у форматі валідного JSON за цією схемою:\n"
+            f"{json.dumps(schema, ensure_ascii=False)}"
+        )
+
+        body: dict[str, Any] = {
             "model": self.config.model,
             "messages": [
-                {"role": "system", "content": system_prompt},
+                {"role": "system", "content": system_instruction},
                 {"role": "user", "content": user_prompt},
             ],
             "temperature": 0.1,
             "stream": False,
-            "response_format": {
+        }
+
+        if self.config.provider == LocalLlmProvider.GEMINI:
+            body["response_format"] = {"type": "json_object"}
+        else:
+            body["response_format"] = {
                 "type": "json_schema",
                 "json_schema": {
                     "name": schema_name,
                     "strict": True,
                     "schema": schema,
                 },
-            },
-        }
+            }
+
         payload = self._request("chat/completions", body)
         try:
             content = payload["choices"][0]["message"]["content"]
-            data = json.loads(content)
+            clean_content = content.strip()
+            if clean_content.startswith("```"):
+                lines = clean_content.splitlines()
+                if lines[0].startswith("```"):
+                    lines = lines[1:]
+                if lines and lines[-1].startswith("```"):
+                    lines = lines[:-1]
+                clean_content = "\n".join(lines).strip()
+            data = json.loads(clean_content)
         except (KeyError, IndexError, TypeError, json.JSONDecodeError) as error:
-            raise LocalLlmError("Локальна модель повернула некоректний JSON") from error
+            raise LocalLlmError(f"LLM модель повернула некоректний JSON: {error}") from error
         if not isinstance(data, dict):
             raise LocalLlmError("Очікувався JSON-об'єкт")
         return data
@@ -175,6 +276,29 @@ class LocalLlmClient:
         if not isinstance(data, dict):
             raise LocalLlmError("Очікувався JSON-об'єкт")
         return data
+
+    def fetch_available_models(self) -> list[str]:
+        if self.config.provider == LocalLlmProvider.EMBEDDED:
+            from .embedded_llm import MODEL_ALIAS
+            return [MODEL_ALIAS]
+        try:
+            payload = self._request("models", method="GET")
+            data = payload.get("data", [])
+            models = []
+            if isinstance(data, list):
+                for item in data:
+                    if isinstance(item, dict) and "id" in item:
+                        model_id = str(item["id"])
+                        if model_id.startswith("models/"):
+                            model_id = model_id[7:]
+                        models.append(model_id)
+                    elif isinstance(item, str):
+                        models.append(item)
+            if models:
+                return sorted(list(dict.fromkeys(models)))
+        except Exception:
+            pass
+        return PROVIDER_PRESET_MODELS.get(self.config.provider, ["default"])
 
     def _request(
         self,

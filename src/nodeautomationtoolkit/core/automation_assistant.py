@@ -48,6 +48,7 @@ class MissingNodeRequest(BaseModel):
     description: str = Field(min_length=1, max_length=500)
     inputs: dict[str, str] = Field(default_factory=dict)
     outputs: dict[str, str] = Field(default_factory=dict)
+    suggested_prompt: str = Field(default="", max_length=1000)
 
 
 class AutomationPlan(BaseModel):
@@ -57,18 +58,20 @@ class AutomationPlan(BaseModel):
     missing_nodes: list[MissingNodeRequest] = Field(default_factory=list, max_length=10)
 
 
-AUTOMATION_SYSTEM_PROMPT = """Ти плануєш локальний граф автоматизації.
+AUTOMATION_SYSTEM_PROMPT = """Ти — аналітик та головний інженер автоматизації в Node Automation Toolkit.
+Твоє завдання — проаналізувати поточний граф дій користувача та вимоги щодо автоматизації, виявити відсутні зв'язки чи ноди та сформувати 100% валідний план дій.
 
-Поверни лише JSON за схемою. Використовуй виключно ноди з каталогу користувача та
-точні type_id і назви портів. Спочатку додавай усі ноди через add_node, потім
-налаштовуй параметри й створюй з'єднання. Кожній ноді дай короткий унікальний alias.
-Розкладай граф зліва направо: x збільшується приблизно на 280, y розділяє гілки.
-Не додавай мережеві дії. Не вигадуй ноди, порти або значення. Якщо потрібної ноди
-немає, опиши її в missing_nodes. Не використовуй її в actions, доки вона не буде
-створена й не з'явиться в каталозі. Не запускай граф і не видаляй наявні ноди.
-Наявні ноди можна налаштовувати та з'єднувати через alias node_1, node_2 тощо,
-передані в описі поточного графа.
-Текст і вміст документів у контекст не передаються.
+ГЛИБОКЕ РОЗУМІННЯ АВТОМАТИЗАЦІЇ ДОКУМЕНТІВ ТА НАКАЗІВ:
+- Ти володієш глибокими знаннями військово-адміністративного діловодства, опрацювання наказів, конвертації відкритих назв частин у закриті в/ч, розпізнавання параграфів (§), преамбул ("Відповідно до... ЗВІЛЬНИТИ і ПРИЗНАЧИТИ:"), витягів, таблиць відповідностей та пакетної роботи з DOCX.
+- Проаналізуй вузли поточного графа. Якщо для виконання завдання потрібні нові кроки чи з'єднання — використовуй наявні ноди або створюй нові.
+- Створюй ланцюжок дій зліва направо: координата x збільшується на +280 для кожного наступного кроку.
+
+СУВОРІ ПРАВИЛА:
+1. Повертай ВИКЛЮЧНО валідний JSON за схемою `AutomationPlan`.
+2. Користуйся ТІЛЬКИ нодами з каталогу `type_id`.
+3. Послідовність виконання ПОВИННА з'єднувати `exec_out` (порт 'then') першої ноди з `exec_in` (порт 'exec') наступної ноди.
+4. Передавай значення параметрів та шляхи файлів між виходами `outputs` та входами `inputs`.
+5. Якщо в каталозі відсутня необхідна нода для специфічної операції, ЧІТКО заповни масив `missing_nodes` з детальним описом функціоналу та підказкою для генерації Python-коду у `suggested_prompt`.
 """
 
 
@@ -89,9 +92,9 @@ class AutomationAssistant:
         catalog = self._catalog()
         user_prompt = (
             f"ЗАПИТ КОРИСТУВАЧА:\n{request_text.strip()}\n\n"
-            f"ПОТОЧНИЙ ГРАФ БЕЗ ЗНАЧЕНЬ ПАРАМЕТРІВ:\n"
-            f"{json.dumps(self.safe_graph_summary(graph), ensure_ascii=False, indent=2)}\n\n"
-            f"ДОСТУПНІ НОДИ:\n{json.dumps(catalog, ensure_ascii=False, indent=2)}"
+            f"ПОТОЧНИЙ ГРАФ ТА НАЯВНІ ВУЗЛИ:\n"
+            f"{json.dumps(self.safe_graph_summary(graph), ensure_ascii=False, separators=(',', ':'))}\n\n"
+            f"ДОСТУПНІ НОДИ В КАТАЛОЗІ:\n{json.dumps(catalog, ensure_ascii=False, separators=(',', ':'))}"
         )
         data = self.client.generate_structured(
             system_prompt=AUTOMATION_SYSTEM_PROMPT,
@@ -118,6 +121,7 @@ class AutomationAssistant:
                 definition = self.registry.get(action.type_id)
                 parameters = self._validated_parameters(definition, action.parameters)
                 model = NodeModel(
+                    id=action.alias,
                     type_id=action.type_id,
                     x=action.x,
                     y=action.y,
@@ -157,16 +161,21 @@ class AutomationAssistant:
                 )
         return lines
 
-    @staticmethod
-    def safe_graph_summary(graph: GraphModel | None) -> dict:
+    def safe_graph_summary(self, graph: GraphModel | None) -> dict:
         if graph is None:
             return {"nodes": [], "connections": []}
         aliases = {node.id: f"node_{index}" for index, node in enumerate(graph.nodes, 1)}
+        nodes_info = []
+        for node in graph.nodes:
+            definition = self.registry.get(node.type_id)
+            nodes_info.append({
+                "alias": aliases[node.id],
+                "type_id": node.type_id,
+                "name": definition.name if definition else node.type_id,
+                "category": definition.category if definition else "",
+            })
         return {
-            "nodes": [
-                {"alias": aliases[node.id], "type_id": node.type_id}
-                for node in graph.nodes
-            ],
+            "nodes": nodes_info,
             "connections": [
                 {
                     "source": aliases.get(item.source_node, "unknown"),

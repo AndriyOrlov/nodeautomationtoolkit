@@ -163,7 +163,7 @@ def batch_replace_body(
         r"виключити|\d+(?:\.\d+)*[.)])"
     ),
     end_pattern: str = (
-        r"(?im)^\s*(?:командир|начальник|заступник|керівник|голова|директор|"
+        r"(?im)^\s*(?:командир|командувач|начальник|заступник|керівник|голова|директор|"
         r"т\.в\.о\.|тимчасово\s+виконуючий)\b"
     ),
     replacement_text: str = "{{content}}",
@@ -344,7 +344,7 @@ def batch_keep_items_together(
     batch: WordDocumentBatch,
     item_pattern: str = r"^\s*\d+(?:\.\d+)*[.)]\s*",
     signature_pattern: str = (
-        r"^\s*(?:командир|начальник|заступник|керівник|голова|директор|"
+        r"^\s*(?:командир|командувач|начальник|заступник|керівник|голова|директор|"
         r"т\.в\.о\.|тимчасово\s+виконуючий)\b"
     ),
 ) -> WordDocumentBatch:
@@ -857,6 +857,27 @@ def preview_document_batch(batch: WordDocumentBatch) -> dict:
     execution_outputs=("then",),
     preview_policy="never",
 )
+@node(
+    name="Очистити колонтитули у пакеті",
+    category="Word · Пакет",
+    description=(
+        "Видаляє всі верхні/нижні колонтитули та поля нумерації з кожного "
+        "документа в пакеті."
+    ),
+    type_id="builtin.word_batch.clear_headers_footers",
+)
+def batch_clear_headers_footers(
+    batch: WordDocumentBatch,
+    clear_headers: bool = True,
+    clear_footers: bool = True,
+) -> WordDocumentBatch:
+    return batch.with_operation(
+        "clear_headers_footers",
+        clear_headers=clear_headers,
+        clear_footers=clear_footers,
+    )
+
+
 def save_document_batch(
     batch: WordDocumentBatch,
     output_folder: str = "",
@@ -890,4 +911,180 @@ def save_document_batch(
         "paths": [str(path) for path in targets],
         "count": len(targets),
         "message": f"Створено документів: {len(targets)}",
+    }
+
+
+@node(
+    name="Сортувати накази по папках",
+    category="Word · Пакет",
+    description=(
+        "Сканує папку з наказами DOCX, розпізнає номер і дату кожного наказу, "
+        "створює підпапки за номерами наказів, переміщує файли та перейменовує "
+        "за шаблоном 'прим_2_[Дата]_[Номер]'."
+    ),
+    type_id="builtin.word_batch.organize_by_number",
+    outputs={
+        "summary": "str",
+        "processed_count": "int",
+        "details": "DataTable",
+    },
+    execution_inputs=("exec",),
+    execution_outputs=("then",),
+    preview_policy="never",
+)
+def organize_orders_by_number(
+    input_folder: str = "",
+    create_subfolders: bool = True,
+    rename_pattern: str = "прим_2_{date}_№{number}",
+    copy_number: str = "2",
+) -> dict:
+    import shutil
+    import docx
+    from nodeautomationtoolkit.builtin_nodes.text_analysis import extract_order_fields
+    from nodeautomationtoolkit.core.table_types import DataTable
+
+    folder = Path(input_folder).expanduser()
+    if not folder.is_dir():
+        raise NotADirectoryError(f"Папку не знайдено: {input_folder}")
+
+    files = [f for f in folder.glob("*.docx") if not f.name.startswith("~$")]
+    rows = []
+    processed = 0
+
+    for doc_path in files:
+        try:
+            doc = docx.Document(doc_path)
+            text = "\n".join(p.text for p in doc.paragraphs)
+            extracted = extract_order_fields(text)
+            order_num = extracted.get("order_number") or "б-н"
+            order_date = extracted.get("order_date") or "б-д"
+
+            clean_num = order_num.replace("/", "-").replace("\\", "-").strip()
+            target_dir = folder / f"Наказ № {clean_num}" if create_subfolders else folder
+            target_dir.mkdir(parents=True, exist_ok=True)
+
+            formatted_name = rename_pattern.format(
+                date=order_date.replace(" ", "_"),
+                number=clean_num,
+                copy=copy_number,
+            ) + ".docx"
+
+            new_file_path = target_dir / formatted_name
+            if new_file_path.exists() and new_file_path != doc_path:
+                new_file_path.unlink()
+
+            moved_path = shutil.move(str(doc_path), str(new_file_path))
+            processed += 1
+            rows.append([doc_path.name, clean_num, order_date, Path(moved_path).name, str(target_dir.name)])
+        except Exception as err:
+            rows.append([doc_path.name, "Помилка", "", str(err), ""])
+
+    table = DataTable(
+        columns=["Початковий файл", "Номер наказу", "Дата наказу", "Нова назва", "Папка"],
+        rows=rows,
+    )
+    return {
+        "summary": f"Опрацьовано наказів: {processed} з {len(files)}",
+        "processed_count": processed,
+        "details": table,
+    }
+
+
+@node(
+    name="Пакетне створення витягів за ВЧ",
+    category="Word · Пакет",
+    description=(
+        "Генерує окремі витяги з наказу у форматі DOCX для кожної розпізнаної військової частини "
+        "з використанням картованих пунктів."
+    ),
+    type_id="builtin.order_batch.create_unit_extracts",
+    outputs={
+        "summary": "str",
+        "count": "int",
+        "details": "DataTable",
+        "paths": "List",
+    },
+    execution_inputs=("exec",),
+    execution_outputs=("then",),
+    preview_policy="never",
+)
+def create_unit_extracts(
+    source_order_path: str = "",
+    unit_paragraphs: dict | None = None,
+    output_folder: str = "",
+    order_number: str = "",
+    order_date: str = "",
+) -> dict:
+    import docx
+    from nodeautomationtoolkit.builtin_nodes.text_analysis import extract_order_fields
+    from nodeautomationtoolkit.core.table_types import DataTable
+
+    if not source_order_path.strip() or not Path(source_order_path).is_file():
+        raise FileNotFoundError(f"Файл наказу не знайдено: {source_order_path}")
+
+    out_dir = Path(output_folder).expanduser() if output_folder.strip() else Path(source_order_path).parent / "Витяги_ВЧ"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    src_doc = docx.Document(source_order_path)
+    full_text = "\n".join(p.text for p in src_doc.paragraphs)
+    
+    if not order_number or not order_date:
+        extracted = extract_order_fields(full_text)
+        order_number = order_number or extracted.get("order_number") or "б-н"
+        order_date = order_date or extracted.get("order_date") or "б-д"
+
+    units_data = unit_paragraphs or {}
+    created_paths = []
+    table_rows = []
+
+    for unit_code, unit_entry in units_data.items():
+        clean_unit = str(unit_code).replace("/", "-").replace("\\", "-").strip()
+        new_doc = docx.Document()
+
+        if isinstance(unit_entry, dict):
+            header_lines = unit_entry.get("header_lines", [])
+            items = unit_entry.get("items", [])
+        else:
+            header_lines = []
+            items = [{"parent_heading": "", "text": str(x)} for x in unit_entry]
+
+        for line in header_lines:
+            new_doc.add_paragraph(line)
+
+        new_doc.add_heading(f"ВИТЯГ З НАКАЗУ № {order_number}", level=1)
+        new_doc.add_paragraph(f"Призначено для: {unit_code}\n")
+
+        printed_headings = set()
+        for item_data in items:
+            if isinstance(item_data, dict):
+                heading = item_data.get("parent_heading", "")
+                text = item_data.get("text", "")
+            else:
+                heading = ""
+                text = str(item_data)
+
+            if heading and heading not in printed_headings:
+                p = new_doc.add_paragraph(heading)
+                p.runs[0].bold = True if p.runs else False
+                printed_headings.add(heading)
+
+            new_doc.add_paragraph(text)
+
+        out_name = f"Витяг_{clean_unit}_№{order_number}.docx"
+        out_file = out_dir / out_name
+        new_doc.save(out_file)
+
+        created_paths.append(str(out_file))
+        table_rows.append((unit_code, len(items), out_name, str(out_file)))
+
+    table = DataTable(
+        ("Військова частина", "Кількість пунктів", "Файл витягу", "Повний шлях"),
+        tuple(table_rows),
+    )
+
+    return {
+        "summary": f"Створено витягів: {len(created_paths)} у папці {out_dir.name}",
+        "count": len(created_paths),
+        "details": table,
+        "paths": created_paths,
     }

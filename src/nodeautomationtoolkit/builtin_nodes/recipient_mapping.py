@@ -204,3 +204,168 @@ def groups_to_ciphers(
     )
     summary = f"Документів: {len(documents)} · без відповідності: {len(missing)}"
     return {"documents": documents, "report": report, "missing": missing, "summary": summary}
+
+
+@node(
+    name="Картування та пошук військових частин",
+    category="Наказ",
+    description=(
+        "Шукає відкриті найменування військових частин у тексті наказу, замінює їх на закриті "
+        "найменування (шифри / в/ч), зберігає шапки, преамбули (§) та повні блоки пунктів з Підставами."
+    ),
+    type_id="builtin.order.map_military_units",
+    outputs={
+        "processed_text": "str",
+        "units_table": "DataTable",
+        "units_list": "List",
+        "unit_paragraphs": "Dictionary",
+        "summary": "str",
+    },
+)
+def map_military_units(
+    text: str = "",
+    mapping: dict | None = None,
+    default_prefix: str = "військова частина ",
+) -> dict:
+    if not text.strip():
+        return {
+            "processed_text": "",
+            "units_table": DataTable(("Закрита ВЧ", "Відкрита назва", "Пункти наказу", "Згадок"), ()),
+            "units_list": [],
+            "unit_paragraphs": {},
+            "summary": "Порожній текст наказу",
+        }
+
+    mapping_dict = mapping or {}
+    lines = [line.rstrip() for line in text.splitlines()]
+
+    header_lines = []
+    content_start_idx = len(lines)
+    for idx, line in enumerate(lines):
+        clean = line.strip()
+        if clean.startswith("§") or re.match(r"^\d+[\.\)]", clean) or "НАКАЗУЮ" in clean.upper() or "ПРИЗНАЧИТИ" in clean.upper():
+            content_start_idx = idx
+            break
+        if clean:
+            header_lines.append(line)
+
+    if not header_lines and lines:
+        header_lines = lines[:3]
+
+    blocks = []
+    current_parent_heading = ""
+    current_block = None
+
+    for line in lines[content_start_idx:]:
+        clean = line.strip()
+        if not clean:
+            if current_block:
+                current_block["lines"].append("")
+            continue
+
+        is_section_marker = clean.startswith("§") or (("Відповідно до" in clean or "Згідно з" in clean or clean.endswith(":")) and not re.match(r"^\d+[\.\d]*", clean) and not clean.startswith("Підстава"))
+        
+        is_new_item = (
+            not is_section_marker
+            and not ("р.н." in clean or "р. н." in clean or clean.startswith("Підстава"))
+            and bool(re.match(r"^\d{1,3}(?:\.\d{1,3})*[\.\)]\s+", clean))
+        )
+
+        if is_section_marker:
+            if clean.startswith("§") or not current_parent_heading:
+                current_parent_heading = line
+            else:
+                current_parent_heading += "\n\n" + line
+            current_block = {
+                "type": "section",
+                "heading": current_parent_heading,
+                "label": clean.split()[0] if clean.split() else "Розділ",
+                "lines": [line],
+            }
+            blocks.append(current_block)
+        elif is_new_item:
+            match = re.match(r"^(\d+[\.\d]*)", clean)
+            label = f"Пункт {match.group(1)}" if match else "Пункт"
+            current_block = {
+                "type": "item",
+                "heading": current_parent_heading,
+                "label": label,
+                "lines": [line],
+            }
+            blocks.append(current_block)
+        else:
+            if current_block:
+                current_block["lines"].append(line)
+            else:
+                current_block = {
+                    "type": "item",
+                    "heading": current_parent_heading,
+                    "label": "Основний текст",
+                    "lines": [line],
+                }
+                blocks.append(current_block)
+
+    unit_data_map: dict[str, dict] = {}
+    unit_counts: dict[str, int] = {}
+    unit_open_names: dict[str, set[str]] = {}
+
+    processed_lines = list(lines)
+
+    for block in blocks:
+        if block["type"] != "item":
+            continue
+        
+        block_raw_text = "\n".join(block["lines"])
+        block_replaced_lines = list(block["lines"])
+        matched_units_in_block = set()
+
+        for open_name, mapped_val in mapping_dict.items():
+            if isinstance(mapped_val, dict):
+                closed_code = str(mapped_val.get("cipher") or mapped_val.get("closed_name") or open_name)
+            else:
+                closed_code = str(mapped_val)
+
+            if open_name.casefold() in block_raw_text.casefold():
+                pattern = re.compile(re.escape(open_name), re.IGNORECASE)
+                block_replaced_lines = [pattern.sub(closed_code, l) for l in block_replaced_lines]
+                matched_units_in_block.add((closed_code, open_name))
+
+        if matched_units_in_block:
+            full_item_text = "\n".join(block_replaced_lines).strip()
+            for closed_code, open_name in matched_units_in_block:
+                unit_entry = unit_data_map.setdefault(closed_code, {
+                    "unit_code": closed_code,
+                    "header_lines": header_lines,
+                    "items": [],
+                })
+                unit_entry["items"].append({
+                    "parent_heading": block["heading"],
+                    "label": block["label"],
+                    "text": full_item_text,
+                })
+                unit_counts[closed_code] = unit_counts.get(closed_code, 0) + 1
+                unit_open_names.setdefault(closed_code, set()).add(open_name)
+
+    table_rows = []
+    for closed_code, count in unit_counts.items():
+        open_str = ", ".join(sorted(unit_open_names.get(closed_code, [])))
+        entry = unit_data_map[closed_code]
+        p_labels = ", ".join(dict.fromkeys(item["label"] for item in entry["items"]))
+        table_rows.append((closed_code, open_str, p_labels, count))
+
+    table = DataTable(
+        ("Закрита назва (ВЧ)", "Відкрита назва", "Пункти наказу", "Згадок"),
+        tuple(table_rows),
+        "Розпізнані військові частини",
+    )
+
+    final_text = "\n".join(processed_lines)
+    summary = f"Знайдено частин: {len(unit_counts)} · Загалом згадок: {sum(unit_counts.values())}"
+
+    return {
+        "processed_text": final_text,
+        "units_table": table,
+        "units_list": list(unit_counts.keys()),
+        "unit_paragraphs": unit_data_map,
+        "summary": summary,
+    }
