@@ -121,7 +121,6 @@ class MainWindow(QMainWindow):
             ("Зберегти", QKeySequence.StandardKey.Save, self.save_graph),
             ("Зберегти як", QKeySequence.StandardKey.SaveAs, self.save_graph_as),
             ("Запустити", "F5", self.run_graph),
-            ("🧩 Блочний конструктор", "Ctrl+Shift+B", self.open_order_blocks_preset),
             ("🔍 Аналіз відправників", "Ctrl+Shift+S", self.open_order_senders_preset),
             ("🔍 Аналіз наказу", "Ctrl+Shift+O", self.open_order_analysis),
             ("AI-сценарій", "Ctrl+Shift+A", self.open_automation_assistant),
@@ -233,17 +232,6 @@ class MainWindow(QMainWindow):
         self._autosave_graph()
         self._update_title()
         self._log("Завантажено сценарій: Аналіз відправників та відповідних пунктів наказу. Натисніть F5 для запуску.")
-
-    def open_order_blocks_preset(self) -> None:
-        if not self._confirm_discard():
-            return
-        self._set_graph_everywhere(build_order_blocks_constructor_graph())
-        self.current_path = None
-        self.dirty = True
-        QSettings().setValue("workspace/dirty", True)
-        self._autosave_graph()
-        self._update_title()
-        self._log("Завантажено сценарій: Блочний конструктор закритих наказів (Lego). Натисніть F5 для запуску.")
 
     def open_graph(self) -> None:
         if not self._confirm_discard():
