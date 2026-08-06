@@ -239,7 +239,12 @@ class LocalLlmClient:
             "stream": False,
         }
 
-        if self.config.provider == LocalLlmProvider.GEMINI:
+        if self.config.provider in (
+            LocalLlmProvider.LM_STUDIO,
+            LocalLlmProvider.OLLAMA,
+            LocalLlmProvider.GEMINI,
+            LocalLlmProvider.CUSTOM,
+        ):
             body["response_format"] = {"type": "json_object"}
         else:
             body["response_format"] = {
@@ -251,9 +256,22 @@ class LocalLlmClient:
                 },
             }
 
-        payload = self._request("chat/completions", body)
         try:
-            content = payload["choices"][0]["message"]["content"]
+            payload = self._request("chat/completions", body)
+        except LocalLlmError as err:
+            if "response_format" in body:
+                # Автоматичний fallback для серверів, які не підтримують response_format
+                body_fallback = dict(body)
+                del body_fallback["response_format"]
+                payload = self._request("chat/completions", body_fallback)
+            else:
+                raise
+
+        try:
+            choices = payload.get("choices")
+            if not choices or not isinstance(choices, list):
+                raise LocalLlmError(f"LLM-сервер не повернув choices: {payload}")
+            content = choices[0]["message"]["content"]
             clean_content = content.strip()
             if clean_content.startswith("```"):
                 lines = clean_content.splitlines()
@@ -374,4 +392,11 @@ class LocalLlmClient:
             raise LocalLlmError("LLM API повернув не JSON") from error
         if not isinstance(payload, dict):
             raise LocalLlmError("Некоректний формат відповіді LLM-сервера")
+        if "error" in payload:
+            err = payload["error"]
+            if isinstance(err, dict) and "message" in err:
+                msg = err["message"]
+            else:
+                msg = str(err)
+            raise LocalLlmError(f"Помилка LLM-сервера: {msg}")
         return payload
