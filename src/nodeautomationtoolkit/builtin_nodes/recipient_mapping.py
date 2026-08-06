@@ -88,6 +88,8 @@ def _read_rows(path: Path, sheet_name: str = "") -> list[list[str]]:
         "C (Скорочення), D (Корпус). Якщо колонка D вказана — відправником є Корпус; якщо порожня — частина."
     ),
     type_id="builtin.order.read_recipient_mapping",
+    execution_inputs=("exec",),
+    execution_outputs=("then",),
     outputs={"mapping": "Dictionary", "markers": "List", "table": "DataTable", "count": "int"},
 )
 def read_recipient_mapping(
@@ -758,6 +760,8 @@ _UNIT_PHRASE_REPLACEMENTS = [
         "у відповідних відмінках."
     ),
     type_id="builtin.order.generate_decision_order",
+    execution_inputs=("exec",),
+    execution_outputs=("then",),
     outputs={
         "decision_text": "str",
         "replaced_count": "int",
@@ -852,6 +856,8 @@ def generate_decision_order(
         "розділи (§ / section), пронумеровані пункти (item), підстави (basis) та підписи (footer)."
     ),
     type_id="builtin.order.parse_to_blocks",
+    execution_inputs=("exec",),
+    execution_outputs=("then",),
     outputs={
         "blocks": "List",
         "table": "DataTable",
@@ -1005,6 +1011,8 @@ def parse_to_blocks(text: str = "") -> dict:
         "замінює звороти 'цієї самої бригади' на 'цієї самої військової частини', та фільтрує за типом блоків."
     ),
     type_id="builtin.order.filter_transform_blocks",
+    execution_inputs=("exec",),
+    execution_outputs=("then",),
     outputs={
         "blocks": "List",
         "modified_count": "int",
@@ -1070,6 +1078,8 @@ def filter_transform_blocks(
         "із можливістю заміни шапки чи розділювачів."
     ),
     type_id="builtin.order.assemble_from_blocks",
+    execution_inputs=("exec",),
+    execution_outputs=("then",),
     outputs={
         "text": "str",
         "count": "int",

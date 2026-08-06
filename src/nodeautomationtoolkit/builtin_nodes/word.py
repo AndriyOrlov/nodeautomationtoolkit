@@ -51,6 +51,8 @@ def _iter_all_paragraphs(document):
     category="Word",
     description="Читає локальний DOCX, його назву, текст і абзаци.",
     type_id="builtin.word.read_docx",
+    execution_inputs=("exec",),
+    execution_outputs=("then",),
     outputs={
         "document": "WordDocument",
         "file_name": "str",
