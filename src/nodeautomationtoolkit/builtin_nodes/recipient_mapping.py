@@ -798,13 +798,93 @@ def _format_full_closed_unit_text(mapped_val: dict | str, mapping_dict: dict) ->
     return unit_code
 
 
+def _match_case(original_matched_text: str, replacement_text: str) -> str:
+    """Якщо оригінальний співпавший текст введений великими літерами (ALL CAPS), повертає заміну у ВЕЛИКИХ ЛІТЕРАХ."""
+    if not original_matched_text or not replacement_text:
+        return replacement_text
+    letters = [ch for ch in original_matched_text if ch.isalpha()]
+    if letters and all(ch.isupper() for ch in letters):
+        return replacement_text.upper()
+    return replacement_text
+
+
+def _apply_custom_rules(text: str, rules: dict | list | str | None) -> tuple[str, int]:
+    """Застосовує додаткові правила/виправлення, передані через нижній порт 'rules' / 'corrections'."""
+    if not text or not rules:
+        return text, 0
+
+    count = 0
+    rule_dict = {}
+
+    if isinstance(rules, dict):
+        rule_dict = dict(rules)
+    elif isinstance(rules, list):
+        for item in rules:
+            if isinstance(item, dict):
+                rule_dict.update(item)
+            elif isinstance(item, str) and "->" in item:
+                parts = item.split("->", 1)
+                rule_dict[parts[0].strip()] = parts[1].strip()
+    elif isinstance(rules, str):
+        for line in rules.splitlines():
+            if "->" in line:
+                parts = line.split("->", 1)
+                rule_dict[parts[0].strip()] = parts[1].strip()
+
+    for old_val, new_val in rule_dict.items():
+        if not old_val or not isinstance(new_val, str):
+            continue
+        pattern = re.compile(re.escape(str(old_val)), re.IGNORECASE)
+        if pattern.search(text):
+            matches = pattern.findall(text)
+            count += len(matches)
+            text = pattern.sub(lambda m: _match_case(m.group(0), new_val), text)
+
+    return text, count
+
+
+@node(
+    name="Правила та виправлення (підключення знизу)",
+    category="Наказ",
+    description=(
+        "Створює пакет додаткових правил та виправлень для підключення до нижнього порту 'rules' / 'corrections' "
+        "нод опрацювання наказів. Підтримує виправлення у форматі 'старе -> нове'."
+    ),
+    type_id="builtin.order.create_rules",
+    outputs={
+        "rules": "dict",
+        "count": "int",
+        "summary": "str",
+    },
+)
+def create_order_rules(
+    text_rules: str = "",
+    overrides: dict | None = None,
+) -> dict:
+    rule_dict = {}
+    if overrides:
+        rule_dict.update(overrides)
+    if text_rules.strip():
+        for line in text_rules.splitlines():
+            if "->" in line:
+                parts = line.split("->", 1)
+                rule_dict[parts[0].strip()] = parts[1].strip()
+    summary = f"Сформовано правил/виправлень: {len(rule_dict)}"
+    return {
+        "rules": rule_dict,
+        "count": len(rule_dict),
+        "summary": summary,
+    }
+
+
 @node(
     name="Генерація наказу про прийняття рішень (закритий)",
     category="Наказ",
     description=(
         "Генерує закритий наказ про прийняття рішень: видаляє/замінює відкриту шапку на закриту, "
         "конвертує всі відкриті назви частин у форматовані шифри ('військової частини АXXXX' чи 'військової частини АXXXX військової частини АYYYY' для корпусів), "
-        "замінює звороти ('цієї самої бригади' -> 'цієї самої військової частини'), та повертає таблицю виявлених частин і корпусів."
+        "зберігає CAPS якщо оригінальний текст введений ВЕЛИКИМИ ЛІТЕРАМИ, замінює звороти ('цієї самої бригади' -> 'цієї самої військової частини'), "
+        "застосовує виправлення з нижнього порту 'rules', та повертає таблицю виявлених частин і корпусів."
     ),
     type_id="builtin.order.generate_decision_order",
     execution_inputs=("exec",),
@@ -821,6 +901,7 @@ def generate_decision_order(
     mapping: dict | None = None,
     new_header: str = "НАКАЗ командира військової частини А0000 (по стройовій частині)",
     fuzzy_match: bool = True,
+    rules: dict | list | str | None = None,
 ) -> dict:
     """Генерує закритий наказ про прийняття рішень."""
     if not text.strip():
@@ -853,7 +934,7 @@ def generate_decision_order(
     replaced_count = 0
     report_rows = []
 
-    # 2. Замінюємо відкриті назви частин на закриті формовані назви (із корпусом)
+    # 2. Замінюємо відкриті назви частин на закриті формовані назви (із корпусом) та збереженням CAPS
     for open_name, mapped_val in mapping_dict.items():
         closed_code = _format_full_closed_unit_text(mapped_val, mapping_dict)
         if isinstance(mapped_val, dict):
@@ -872,7 +953,7 @@ def generate_decision_order(
         matches = pattern.findall(body_text)
         if matches:
             replaced_count += len(matches)
-            body_text = pattern.sub(closed_code, body_text)
+            body_text = pattern.sub(lambda m: _match_case(m.group(0), closed_code), body_text)
             matched = True
 
         # Зіставляємо скорочення
@@ -881,20 +962,27 @@ def generate_decision_order(
             abbr_matches = abbr_pattern.findall(body_text)
             if abbr_matches:
                 replaced_count += len(abbr_matches)
-                body_text = abbr_pattern.sub(closed_code, body_text)
+                body_text = abbr_pattern.sub(lambda m: _match_case(m.group(0), closed_code), body_text)
                 matched = True
 
         if matched:
             report_rows.append((open_name, raw_cipher, corps_info or "—", closed_code))
 
-    # 3. Замінюємо звороти "цієї самої бригади", "цього самого полку" тощо
+    # 3. Замінюємо звороти "цієї самої бригади", "цього самого полку" тощо (із збереженням CAPS)
     for pattern, replacer in _UNIT_PHRASE_REPLACEMENTS:
         matches = pattern.findall(body_text)
         if matches:
             replaced_count += len(matches)
-            body_text = pattern.sub(replacer, body_text)
+            def _make_phrase_rep(r_func):
+                return lambda m: _match_case(m.group(0), r_func(m))
+            body_text = pattern.sub(_make_phrase_rep(replacer), body_text)
 
-    # 4. Збираємо фінальний закритий наказ (нова шапка + закрите тіло)
+    # 4. Застосовуємо додаткові правила/виправлення з нижнього порту 'rules'
+    if rules:
+        body_text, custom_count = _apply_custom_rules(body_text, rules)
+        replaced_count += custom_count
+
+    # 5. Збираємо фінальний закритий наказ (нова шапка + закрите тіло)
     header_str = new_header.strip() if new_header.strip() else ""
     final_text = f"{header_str}\n\n{body_text}".strip() if header_str else body_text.strip()
     table = DataTable(

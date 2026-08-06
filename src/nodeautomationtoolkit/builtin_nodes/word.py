@@ -575,8 +575,8 @@ def set_metadata(
     description=(
         "Створює новий DOCX файл із закритим наказом про прийняття рішень: "
         "замінює відкриту шапку, замінює всі відкриті назви частин на форматовані шифри ('військової частини АXXXX' чи 'військової частини АXXXX військової частини АYYYY'), "
-        "та нормалізує звороти 'цієї самої бригади' -> 'цієї самої військової частини', "
-        "зберігаючи 100% форматування, шрифти, відступи та стилі оригінального DOCX документа."
+        "зберігає CAPS якщо оригінальний текст введений ВЕЛИКИМИ ЛІТЕРАМИ, нормалізує звороти 'цієї самої бригади' -> 'цієї самої військової частини', "
+        "застосовує виправлення з нижнього порту 'rules', та зберігає 100% форматування оригінального DOCX документа."
     ),
     type_id="builtin.word.generate_decision_order_docx",
     execution_inputs=("exec",),
@@ -595,12 +595,15 @@ def generate_decision_order_docx(
     output_path: str = "",
     new_header: str = "НАКАЗ командира військової частини А0000 (по стройовій частині)",
     replace_unit_phrases: bool = True,
+    rules: dict | list | str | None = None,
 ) -> dict:
     from docx import Document
     from nodeautomationtoolkit.builtin_nodes.recipient_mapping import (
         _build_unit_fuzzy_pattern,
         _UNIT_PHRASE_REPLACEMENTS,
         _format_full_closed_unit_text,
+        _match_case,
+        _apply_custom_rules,
     )
     from nodeautomationtoolkit.core.table_types import DataTable
 
@@ -630,7 +633,7 @@ def generate_decision_order_docx(
         if not p_text.strip():
             continue
 
-        # Заміна відкритих назв ВЧ
+        # Заміна відкритих назв ВЧ (із збереженням CAPS)
         for open_name, mapped_val in mapping_dict.items():
             closed_code = _format_full_closed_unit_text(mapped_val, mapping_dict)
             pattern = _build_unit_fuzzy_pattern(open_name)
@@ -641,7 +644,7 @@ def generate_decision_order_docx(
                     if run.text and pattern.search(run.text):
                         matches = len(pattern.findall(run.text))
                         replaced_count += matches
-                        run.text = pattern.sub(closed_code, run.text)
+                        run.text = pattern.sub(lambda m: _match_case(m.group(0), closed_code), run.text)
                         matched = True
                 if matched:
                     raw_cipher = str(mapped_val.get("cipher", "")) if isinstance(mapped_val, dict) else str(mapped_val)
@@ -654,9 +657,18 @@ def generate_decision_order_docx(
                 if pattern.search(p_text):
                     for run in p.runs:
                         if run.text and pattern.search(run.text):
-                            matches = len(pattern.findall(run.text))
-                            replaced_count += matches
-                            run.text = pattern.sub(replacer, run.text)
+                            def _make_run_rep(r_func):
+                                return lambda m: _match_case(m.group(0), r_func(m))
+                            run.text = pattern.sub(_make_run_rep(replacer), run.text)
+
+        # Застосування додаткових правил з нижнього порту rules
+        if rules:
+            for run in p.runs:
+                if run.text:
+                    new_run_text, c_count = _apply_custom_rules(run.text, rules)
+                    if c_count:
+                        replaced_count += c_count
+                        run.text = new_run_text
 
     # 3. Обробка таблиць у документах (збереження стилів осередків)
     for table_obj in doc.tables:
