@@ -322,7 +322,12 @@ def _extract_army_corps(text: str) -> str | None:
     return None
 
 
-_TCK_OBL_RE = re.compile(
+_TCK_KEYWORDS_RE = re.compile(
+    r"(?:територіальн\w*\s+центр\w*\s+комплектування\w*|ТЦК\w*|РТЦК\w*|МТЦК\w*|ОТЦК\w*)",
+    re.IGNORECASE | re.UNICODE,
+)
+
+_TCK_OBLAST_RE = re.compile(
     r"([А-ЯІЇЄa-ua-z]+сько\w*)\s+област\w*",
     re.IGNORECASE | re.UNICODE,
 )
@@ -330,17 +335,21 @@ _TCK_OBL_RE = re.compile(
 
 def _extract_tck_sender(text: str) -> str | None:
     """
-    Якщо у тексті згадується ТЦК (районний / міський), відправником завжди є ОБЛАСТЬ (ОТЦК).
-    Наприклад: 'Ковельського районного ТЦК та СП Волинської області' -> 'Волинський ОТЦК та СП'.
+    Розпізнає ТЦК / територіальний центр комплектування та соціальної підтримки.
+    Якщо у тексті згадується районний або міський ТЦК (наприклад, 'Ковельського районного територіального
+    центру комплектування та соціальної підтримки Волинської області'), район/місто відкидаються,
+    і у витяги успадковується ЛИШЕ ОБЛАСТЬ ('Волинський ОТЦК та СП').
     """
-    if "ТЦК" not in text.upper() and "комплектування" not in text.lower():
+    if not _TCK_KEYWORDS_RE.search(text):
         return None
 
-    match = _TCK_OBL_RE.search(text)
+    match = _TCK_OBLAST_RE.search(text)
     if match:
-        region = match.group(1).strip()
-        region_base = re.sub(r"ської$", "ський", region, flags=re.IGNORECASE)
+        region_raw = match.group(1).strip()
+        region_base = re.sub(r"ської$", "ський", region_raw, flags=re.IGNORECASE)
         region_base = re.sub(r"скої$", "ський", region_base, flags=re.IGNORECASE)
+        region_base = re.sub(r"ої$", "ий", region_base, flags=re.IGNORECASE)
+
         return f"{region_base} ОТЦК та СП"
 
     return "Обласний ТЦК та СП"

@@ -95,3 +95,19 @@ def test_army_corps_prioritization_over_subordinate_units():
     assert "10 армійський корпус" in res["senders_list"]
     assert "3 армійський корпус" in res["senders_list"]
     assert len(res["sender_paragraphs"]["10 армійський корпус"]) == 1
+
+
+def test_tck_full_wording_extracts_only_oblast():
+    from nodeautomationtoolkit.builtin_nodes.recipient_mapping import _extract_tck_sender, analyze_senders
+
+    text = (
+        "§ 1\n"
+        "1. Направити документи до Ковельського районного територіального центру "
+        "комплектування та соціальної підтримки Волинської області.\n"
+    )
+
+    extracted = _extract_tck_sender(text)
+    assert extracted == "Волинський ОТЦК та СП"
+
+    analysis = analyze_senders(text=text)
+    assert "Волинський ОТЦК та СП" in analysis["senders_list"]
