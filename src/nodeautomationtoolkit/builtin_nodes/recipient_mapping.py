@@ -750,20 +750,56 @@ _UNIT_PHRASE_REPLACEMENTS = [
 ]
 
 
+def _format_full_closed_unit_text(mapped_val: dict | str, mapping_dict: dict) -> str:
+    """Форматує закриту назву ВЧ: 'військової частини АXXXX', а якщо вказано корпус — 'військової частини АXXXX військової частини АYYYY'."""
+    if isinstance(mapped_val, dict):
+        cipher = str(mapped_val.get("cipher") or mapped_val.get("closed_name") or "").strip()
+        corps_name = str(mapped_val.get("corps", "")).strip()
+    else:
+        cipher = str(mapped_val).strip()
+        corps_name = ""
+
+    def _to_unit_phrase(raw: str) -> str:
+        clean = raw.strip()
+        if not clean:
+            return ""
+        if clean.lower().startswith("військової частини") or clean.lower().startswith("військова частина"):
+            return clean
+        if clean.lower().startswith("в/ч"):
+            code = clean[3:].strip()
+            return f"військової частини {code}"
+        if clean.upper().startswith("А") or clean.upper().startswith("A") or clean.isdigit():
+            return f"військової частини {clean}"
+        return f"військової частини {clean}"
+
+    unit_code = _to_unit_phrase(cipher)
+
+    if corps_name:
+        corps_entry = mapping_dict.get(corps_name)
+        if corps_entry:
+            corps_cipher = str(corps_entry.get("cipher") if isinstance(corps_entry, dict) else corps_entry)
+            corps_code = _to_unit_phrase(corps_cipher)
+        else:
+            corps_code = _to_unit_phrase(corps_name)
+        return f"{unit_code} {corps_code}"
+
+    return unit_code
+
+
 @node(
     name="Генерація наказу про прийняття рішень (закритий)",
     category="Наказ",
     description=(
         "Генерує закритий наказ про прийняття рішень: видаляє/замінює відкриту шапку на закриту, "
-        "конвертує всі відкриті назви частин у шифри (в/ч АXXXX), а також замінює звороти "
-        "('цієї самої бригади', 'цього самого полку' тощо) на 'цієї самої військової частини' "
-        "у відповідних відмінках."
+        "конвертує всі відкриті назви частин у форматовані шифри ('військової частини АXXXX' чи 'військової частини АXXXX військової частини АYYYY' для корпусів), "
+        "замінює звороти ('цієї самої бригади' -> 'цієї самої військової частини'), та повертає таблицю виявлених частин і корпусів."
     ),
     type_id="builtin.order.generate_decision_order",
     execution_inputs=("exec",),
     execution_outputs=("then",),
     outputs={
         "decision_text": "str",
+        "table": "DataTable",
         "replaced_count": "int",
         "summary": "str",
     },
@@ -778,6 +814,7 @@ def generate_decision_order(
     if not text.strip():
         return {
             "decision_text": "",
+            "table": DataTable(("Відкрита назва", "Закритий код ВЧ", "Армійський корпус", "Форматована заміна"), ()),
             "replaced_count": 0,
             "summary": "Порожній текст наказу",
         }
@@ -802,15 +839,21 @@ def generate_decision_order(
     body_text = "\n".join(body_lines)
 
     replaced_count = 0
+    report_rows = []
 
-    # 2. Замінюємо відкриті назви частин на закриті шифри
+    # 2. Замінюємо відкриті назви частин на закриті формовані назви (із корпусом)
     for open_name, mapped_val in mapping_dict.items():
+        closed_code = _format_full_closed_unit_text(mapped_val, mapping_dict)
         if isinstance(mapped_val, dict):
-            closed_code = str(mapped_val.get("cipher") or mapped_val.get("closed_name") or open_name)
+            raw_cipher = str(mapped_val.get("cipher", ""))
+            corps_info = str(mapped_val.get("corps", ""))
             abbreviation = str(mapped_val.get("abbreviation", "")).strip()
         else:
-            closed_code = str(mapped_val)
+            raw_cipher = str(mapped_val)
+            corps_info = ""
             abbreviation = ""
+
+        matched = False
 
         # Зіставляємо за сигнатурою відкриту назву
         pattern = _build_unit_fuzzy_pattern(open_name) if fuzzy_match else re.compile(re.escape(open_name), re.IGNORECASE)
@@ -818,6 +861,7 @@ def generate_decision_order(
         if matches:
             replaced_count += len(matches)
             body_text = pattern.sub(closed_code, body_text)
+            matched = True
 
         # Зіставляємо скорочення
         if abbreviation and abbreviation != open_name:
@@ -826,6 +870,10 @@ def generate_decision_order(
             if abbr_matches:
                 replaced_count += len(abbr_matches)
                 body_text = abbr_pattern.sub(closed_code, body_text)
+                matched = True
+
+        if matched:
+            report_rows.append((open_name, raw_cipher, corps_info or "—", closed_code))
 
     # 3. Замінюємо звороти "цієї самої бригади", "цього самого полку" тощо
     for pattern, replacer in _UNIT_PHRASE_REPLACEMENTS:
@@ -837,10 +885,16 @@ def generate_decision_order(
     # 4. Збираємо фінальний закритий наказ (нова шапка + закрите тіло)
     header_str = new_header.strip() if new_header.strip() else ""
     final_text = f"{header_str}\n\n{body_text}".strip() if header_str else body_text.strip()
-    summary = f"Сформовано закритий наказ. Виконано замін назв та зворотів: {replaced_count}"
+    table = DataTable(
+        ("Відкрита назва", "Закритий код ВЧ", "Армійський корпус", "Форматована заміна у тексті"),
+        tuple(report_rows),
+        "Звіт частин та корпусів наказу",
+    )
+    summary = f"Сформовано закритий наказ. Знайдено ВЧ/корпусів: {len(report_rows)}, замін: {replaced_count}"
 
     return {
         "decision_text": final_text,
+        "table": table,
         "replaced_count": replaced_count,
         "summary": summary,
     }
@@ -1007,7 +1061,7 @@ def parse_to_blocks(text: str = "") -> dict:
     name="Трансформація та фільтрація блоків",
     category="Наказ",
     description=(
-        "Фільтрує або змінює окремі блоки наказу: застосовує карту замін (відкриті -> закриті в/ч), "
+        "Фільтрує або змінює окремі блоки наказу: застосовує карту замін (відкриті -> 'військової частини АXXXX' / 'військової частини АXXXX військової частини АYYYY'), "
         "замінює звороти 'цієї самої бригади' на 'цієї самої військової частини', та фільтрує за типом блоків."
     ),
     type_id="builtin.order.filter_transform_blocks",
@@ -1015,6 +1069,7 @@ def parse_to_blocks(text: str = "") -> dict:
     execution_outputs=("then",),
     outputs={
         "blocks": "List",
+        "table": "DataTable",
         "modified_count": "int",
         "summary": "str",
     },
@@ -1026,7 +1081,7 @@ def filter_transform_blocks(
     replace_unit_phrases: bool = True,
 ) -> dict:
     if not blocks:
-        return {"blocks": [], "modified_count": 0, "summary": "Порожній список блоків"}
+        return {"blocks": [], "table": DataTable(("ID", "Тип", "Мітка", "Вміст"), ()), "modified_count": 0, "summary": "Порожній список блоків"}
 
     mapping_dict = mapping or {}
     types_set = {t.strip().casefold() for t in include_types.split(",") if t.strip()} if include_types.strip() else None
@@ -1046,9 +1101,9 @@ def filter_transform_blocks(
         text = b_copy.get("text", "\n".join(lines))
         orig_text = text
 
-        # 1. Заміна назв ВЧ
+        # 1. Заміна назв ВЧ та корпусів на форматовані шифри
         for open_name, mapped_val in mapping_dict.items():
-            closed_code = str(mapped_val.get("cipher") if isinstance(mapped_val, dict) else mapped_val)
+            closed_code = _format_full_closed_unit_text(mapped_val, mapping_dict)
             pattern = _build_unit_fuzzy_pattern(open_name)
             if pattern.search(text):
                 text = pattern.sub(closed_code, text)
@@ -1066,8 +1121,14 @@ def filter_transform_blocks(
 
         result_blocks.append(b_copy)
 
+    table_rows = [
+        (b.get("id", ""), b.get("type", ""), b.get("label", ""), b.get("text", "")[:80] + ("..." if len(b.get("text", "")) > 80 else ""))
+        for b in result_blocks
+    ]
+    table = DataTable(("ID", "Тип", "Мітка", "Вміст (прев'ю)"), tuple(table_rows), "Трансформовані блоки")
+
     summary = f"Опрацьовано блоків: {len(result_blocks)} (змінено: {modified_count})"
-    return {"blocks": result_blocks, "modified_count": modified_count, "summary": summary}
+    return {"blocks": result_blocks, "table": table, "modified_count": modified_count, "summary": summary}
 
 
 @node(

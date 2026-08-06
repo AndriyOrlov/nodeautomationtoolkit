@@ -574,7 +574,7 @@ def set_metadata(
     category="Word",
     description=(
         "Створює новий DOCX файл із закритим наказом про прийняття рішень: "
-        "замінює відкриту шапку, замінює всі відкриті назви частин на закриті шиفري (в/ч), "
+        "замінює відкриту шапку, замінює всі відкриті назви частин на форматовані шифри ('військової частини АXXXX' чи 'військової частини АXXXX військової частини АYYYY'), "
         "та нормалізує звороти 'цієї самої бригади' -> 'цієї самої військової частини', "
         "зберігаючи 100% форматування, шрифти, відступи та стилі оригінального DOCX документа."
     ),
@@ -584,6 +584,7 @@ def set_metadata(
     preview_policy="never",
     outputs={
         "path": "str",
+        "table": "DataTable",
         "replaced_count": "int",
         "summary": "str",
     },
@@ -596,7 +597,12 @@ def generate_decision_order_docx(
     replace_unit_phrases: bool = True,
 ) -> dict:
     from docx import Document
-    from nodeautomationtoolkit.builtin_nodes.recipient_mapping import _build_unit_fuzzy_pattern, _UNIT_PHRASE_REPLACEMENTS
+    from nodeautomationtoolkit.builtin_nodes.recipient_mapping import (
+        _build_unit_fuzzy_pattern,
+        _UNIT_PHRASE_REPLACEMENTS,
+        _format_full_closed_unit_text,
+    )
+    from nodeautomationtoolkit.core.table_types import DataTable
 
     source_path = _validated_docx_path(path, must_exist=True)
     target_path = _validated_docx_path(output_path or str(source_path.with_name(f"{source_path.stem}_decision.docx")), must_exist=False)
@@ -605,6 +611,7 @@ def generate_decision_order_docx(
     doc = Document(source_path)
     mapping_dict = mapping or {}
     replaced_count = 0
+    report_rows = []
 
     # 1. Заміна шапки у першому абзаці зі збереженням шрифту та стилю
     if new_header.strip() and doc.paragraphs:
@@ -625,15 +632,21 @@ def generate_decision_order_docx(
 
         # Заміна відкритих назв ВЧ
         for open_name, mapped_val in mapping_dict.items():
-            closed_code = str(mapped_val.get("cipher") if isinstance(mapped_val, dict) else mapped_val)
+            closed_code = _format_full_closed_unit_text(mapped_val, mapping_dict)
             pattern = _build_unit_fuzzy_pattern(open_name)
 
             if pattern.search(p_text):
+                matched = False
                 for run in p.runs:
                     if run.text and pattern.search(run.text):
                         matches = len(pattern.findall(run.text))
                         replaced_count += matches
                         run.text = pattern.sub(closed_code, run.text)
+                        matched = True
+                if matched:
+                    raw_cipher = str(mapped_val.get("cipher", "")) if isinstance(mapped_val, dict) else str(mapped_val)
+                    corps_info = str(mapped_val.get("corps", "")) if isinstance(mapped_val, dict) else ""
+                    report_rows.append((open_name, raw_cipher, corps_info or "—", closed_code))
 
         # Заміна зворотів ("цієї самої бригади" -> "цієї самої військової частини")
         if replace_unit_phrases:
@@ -646,8 +659,8 @@ def generate_decision_order_docx(
                             run.text = pattern.sub(replacer, run.text)
 
     # 3. Обробка таблиць у документах (збереження стилів осередків)
-    for table in doc.tables:
-        for row in table.rows:
+    for table_obj in doc.tables:
+        for row in table_obj.rows:
             for cell in row.cells:
                 for p in cell.paragraphs:
                     p_text = p.text
@@ -655,7 +668,7 @@ def generate_decision_order_docx(
                         continue
 
                     for open_name, mapped_val in mapping_dict.items():
-                        closed_code = str(mapped_val.get("cipher") if isinstance(mapped_val, dict) else mapped_val)
+                        closed_code = _format_full_closed_unit_text(mapped_val, mapping_dict)
                         pattern = _build_unit_fuzzy_pattern(open_name)
                         if pattern.search(p_text):
                             for run in p.runs:
@@ -670,9 +683,15 @@ def generate_decision_order_docx(
                                         run.text = pattern.sub(replacer, run.text)
 
     doc.save(target_path)
-    summary = f"Сформовано закритий DOCX із збереженням стилів -> {target_path.name} (замін: {replaced_count})"
+    report_table = DataTable(
+        ("Відкрита назва", "Закритий код ВЧ", "Армійський корпус", "Форматована заміна у тексті"),
+        tuple(report_rows),
+        "Звіт частин та корпусів у DOCX",
+    )
+    summary = f"Сформовано закритий DOCX із збереженням стилів -> {target_path.name} (знайдено ВЧ: {len(report_rows)}, замін: {replaced_count})"
     return {
         "path": str(target_path),
+        "table": report_table,
         "replaced_count": replaced_count,
         "summary": summary,
     }

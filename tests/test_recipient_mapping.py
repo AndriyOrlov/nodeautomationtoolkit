@@ -134,7 +134,7 @@ def test_generate_decision_order():
 
     assert "ЗАКРИТИЙ НАКАЗ командира в/ч А0000" in decision_text
     assert "НАКАЗ командира 160 окремої механізованої бригади" not in decision_text
-    assert "в/ч А1670" in decision_text
+    assert "А1670" in decision_text
     assert "цієї самої військової частини" in decision_text
     assert res["replaced_count"] >= 3
 
@@ -174,6 +174,6 @@ def test_order_block_constructor_pipeline():
     final_text = assembled["text"]
 
     assert "ЗАКРИТИЙ НАКАЗ командира в/ч А0000" in final_text
-    assert "в/ч А1670" in final_text
+    assert "А1670" in final_text
     assert "цієї самої військової частини" in final_text
     assert "Підстава: рапорт командира" in final_text
