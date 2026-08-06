@@ -11,13 +11,61 @@ from typing import Any, Union, get_args, get_origin, get_type_hints
 def type_name(annotation: Any) -> str:
     if annotation in (inspect.Signature.empty, Any, None):
         return "Any"
+    if annotation is str:
+        return "str"
+    if annotation is int:
+        return "int"
+    if annotation is float:
+        return "float"
+    if annotation is bool:
+        return "bool"
+    if annotation is list:
+        return "list"
+    if annotation is dict:
+        return "dict"
     origin = get_origin(annotation)
     if origin in (list, tuple, set, dict):
-        return origin.__name__.title()
+        return origin.__name__.lower()
     if origin in (Union, UnionType):
         names = [type_name(item) for item in get_args(annotation) if item is not type(None)]
         return names[0] if len(names) == 1 else "Any"
-    return getattr(annotation, "__name__", str(annotation).replace("typing.", ""))
+    res = getattr(annotation, "__name__", str(annotation).replace("typing.", ""))
+    if res in ("List", "Dict", "Set", "Tuple", "Dictionary"):
+        return res.lower()
+    return res
+
+
+def are_types_compatible(source_type: str, target_type: str) -> bool:
+    """Перевіряє гнучку сумісність типів даних між портами нод."""
+    if not source_type or not target_type:
+        return True
+    s, t = source_type.strip(), target_type.strip()
+    if "Any" in (s, t) or "any" in (s.lower(), t.lower()):
+        return True
+    if s.casefold() == t.casefold():
+        return True
+
+    s_base = s.split("[")[0].strip().casefold()
+    t_base = t.split("[")[0].strip().casefold()
+
+    if s_base == t_base:
+        return True
+
+    aliases = {
+        "list": {"list", "array", "sequence"},
+        "dict": {"dict", "dictionary", "object", "mapping", "json"},
+        "datatable": {"datatable", "table", "dataframe"},
+        "str": {"str", "string", "text", "path"},
+        "int": {"int", "integer", "number", "count"},
+        "float": {"float", "number"},
+        "bool": {"bool", "boolean"},
+    }
+
+    for canon, group in aliases.items():
+        if s_base in group and t_base in group:
+            return True
+
+    return False
 
 
 class PortKind(StrEnum):

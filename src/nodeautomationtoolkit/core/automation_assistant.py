@@ -5,7 +5,7 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, Field
 
-from .definition import NodeDefinition
+from .definition import NodeDefinition, are_types_compatible
 from .local_llm import LocalLlmClient
 from .models import ConnectionModel, GraphModel, NodeModel
 from .registry import NodeRegistry
@@ -270,7 +270,7 @@ class AutomationAssistant:
         source_type = source_ports[action.source_port].data_type
         target_type = target_ports[action.target_port].data_type
         if action.kind == "data":
-            if "Any" not in (source_type, target_type) and source_type != target_type:
+            if not are_types_compatible(source_type, target_type):
                 raise ValueError(f"Несумісні типи: {source_type} → {target_type}")
         if any(
             item.target_node == target.id and item.target_port == action.target_port

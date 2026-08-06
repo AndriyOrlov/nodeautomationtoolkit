@@ -24,7 +24,12 @@ from PySide6.QtWidgets import (
     QListWidgetItem,
 )
 
-from nodeautomationtoolkit.core.definition import NodeDefinition, PortDefinition, PortKind
+from nodeautomationtoolkit.core.definition import (
+    NodeDefinition,
+    PortDefinition,
+    PortKind,
+    are_types_compatible,
+)
 from nodeautomationtoolkit.core.models import ConnectionModel, GraphModel, NodeModel
 from nodeautomationtoolkit.core.registry import NodeRegistry
 
@@ -293,7 +298,7 @@ class GraphScene(QGraphicsScene):
         source, target = (first, second) if first.is_output else (second, first)
         source_type = source.definition.data_type
         target_type = target.definition.data_type
-        if "Any" not in (source_type, target_type) and source_type != target_type:
+        if not are_types_compatible(source_type, target_type):
             self.message.emit(f"Несумісні типи: {source_type} → {target_type}")
             return
         if source.node_item.model.id == target.node_item.model.id:
