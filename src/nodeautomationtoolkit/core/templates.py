@@ -136,3 +136,91 @@ def build_order_senders_graph() -> GraphModel:
             ConnectionModel("groups-ciphers", "report", "show-report", "table"),
         ],
     )
+
+
+def build_order_blocks_constructor_graph() -> GraphModel:
+    """Готовий сценарій: Блочний конструктор наказу (розбірка на блоки, заміна назв і зворотів та збирання закритими)."""
+    return GraphModel(
+        name="Конструктор блоків наказу (закритий наказ)",
+        nodes=[
+            NodeModel(id="start", type_id="builtin.flow.start", x=-900, y=0),
+            NodeModel(
+                id="pick-order-file",
+                type_id="builtin.windows.open_file",
+                x=-900,
+                y=200,
+                parameters={
+                    "title": "Виберіть відкритий наказ (.docx)",
+                    "file_filter": "Документи Word (*.docx)",
+                    "initial_folder": "",
+                },
+            ),
+            NodeModel(
+                id="read-order",
+                type_id="builtin.word.read_docx",
+                x=-620,
+                y=160,
+            ),
+            NodeModel(
+                id="pick-mapping-file",
+                type_id="builtin.windows.open_file",
+                x=-620,
+                y=380,
+                parameters={
+                    "title": "Виберіть таблицю ВЧ (.xlsx/.csv)",
+                    "file_filter": "Таблиці (*.xlsx *.csv)",
+                    "initial_folder": "",
+                },
+            ),
+            NodeModel(
+                id="read-mapping",
+                type_id="builtin.order.read_recipient_mapping",
+                x=-340,
+                y=360,
+            ),
+            NodeModel(
+                id="parse-blocks",
+                type_id="builtin.order.parse_to_blocks",
+                x=-340,
+                y=160,
+            ),
+            NodeModel(
+                id="transform-blocks",
+                type_id="builtin.order.filter_transform_blocks",
+                x=-60,
+                y=160,
+                parameters={"replace_unit_phrases": True},
+            ),
+            NodeModel(
+                id="assemble-order",
+                type_id="builtin.order.assemble_from_blocks",
+                x=220,
+                y=160,
+                parameters={
+                    "new_header": "НАКАЗ командира військової частини А0000 (по стройовій частині)",
+                    "separator": "\n\n",
+                },
+            ),
+            NodeModel(
+                id="show-result",
+                type_id="builtin.output.show_text",
+                x=500,
+                y=160,
+                parameters={"title": "Сформований закритий наказ про прийняття рішень"},
+            ),
+        ],
+        connections=[
+            ConnectionModel("start", "then", "read-order", "exec", kind="execution"),
+            ConnectionModel("read-order", "then", "parse-blocks", "exec", kind="execution"),
+            ConnectionModel("parse-blocks", "then", "transform-blocks", "exec", kind="execution"),
+            ConnectionModel("transform-blocks", "then", "assemble-order", "exec", kind="execution"),
+            ConnectionModel("assemble-order", "then", "show-result", "exec", kind="execution"),
+            ConnectionModel("pick-order-file", "result", "read-order", "path"),
+            ConnectionModel("read-order", "text", "parse-blocks", "text"),
+            ConnectionModel("pick-mapping-file", "result", "read-mapping", "path"),
+            ConnectionModel("read-mapping", "mapping", "transform-blocks", "mapping"),
+            ConnectionModel("parse-blocks", "blocks", "transform-blocks", "blocks"),
+            ConnectionModel("transform-blocks", "blocks", "assemble-order", "blocks"),
+            ConnectionModel("assemble-order", "text", "show-result", "value"),
+        ],
+    )
