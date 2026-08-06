@@ -751,13 +751,25 @@ _UNIT_PHRASE_REPLACEMENTS = [
 
 
 def _format_full_closed_unit_text(mapped_val: dict | str, mapping_dict: dict) -> str:
-    """Форматує закриту назву ВЧ: 'військової частини АXXXX', а якщо вказано корпус — 'військової частини АXXXX військової частини АYYYY'."""
+    """Форматує закриту назву ВЧ: 'військової частини АXXXX', а якщо вказано корпус — 'військової частини АXXXX військової частини АYYYY'. Для ТЦК зберігає назву без змін."""
     if isinstance(mapped_val, dict):
+        open_name = str(mapped_val.get("open_name", "")).strip()
         cipher = str(mapped_val.get("cipher") or mapped_val.get("closed_name") or "").strip()
         corps_name = str(mapped_val.get("corps", "")).strip()
     else:
+        open_name = ""
         cipher = str(mapped_val).strip()
         corps_name = ""
+
+    # Перевірка на ТЦК (територіальний центр комплектування) — залишаємо як є
+    is_tck = (
+        "тцк" in open_name.lower()
+        or "комплектування" in open_name.lower()
+        or "тцк" in cipher.lower()
+        or "комплектування" in cipher.lower()
+    )
+    if is_tck:
+        return cipher or open_name
 
     def _to_unit_phrase(raw: str) -> str:
         clean = raw.strip()
