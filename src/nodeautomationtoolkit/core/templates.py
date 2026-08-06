@@ -203,7 +203,7 @@ def build_order_blocks_constructor_graph() -> GraphModel:
             ),
             NodeModel(
                 id="show-result",
-                type_id="builtin.output.show_text",
+                type_id="builtin.output.show_result",
                 x=500,
                 y=160,
                 parameters={"title": "Сформований закритий наказ про прийняття рішень"},

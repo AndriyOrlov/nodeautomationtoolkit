@@ -565,3 +565,112 @@ def set_metadata(
         "path": str(target_path),
         "summary": summary,
     }
+
+
+@node(
+    name="Генерація закритого наказу у DOCX (збереження стилів)",
+    category="Word",
+    description=(
+        "Створює новий DOCX файл із закритим наказом про прийняття рішень: "
+        "замінює відкриту шапку, замінює всі відкриті назви частин на закриті шиفري (в/ч), "
+        "та нормалізує звороти 'цієї самої бригади' -> 'цієї самої військової частини', "
+        "зберігаючи 100% форматування, шрифти, відступи та стилі оригінального DOCX документа."
+    ),
+    type_id="builtin.word.generate_decision_order_docx",
+    execution_inputs=("exec",),
+    execution_outputs=("then",),
+    preview_policy="never",
+    outputs={
+        "path": "str",
+        "replaced_count": "int",
+        "summary": "str",
+    },
+)
+def generate_decision_order_docx(
+    path: str = "",
+    mapping: dict | None = None,
+    output_path: str = "",
+    new_header: str = "НАКАЗ командира військової частини А0000 (по стройовій частині)",
+    replace_unit_phrases: bool = True,
+) -> dict:
+    from docx import Document
+    from nodeautomationtoolkit.builtin_nodes.recipient_mapping import _build_unit_fuzzy_pattern, _UNIT_PHRASE_REPLACEMENTS
+
+    source_path = _validated_docx_path(path, must_exist=True)
+    target_path = _validated_docx_path(output_path or str(source_path.with_name(f"{source_path.stem}_decision.docx")), must_exist=False)
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+
+    doc = Document(source_path)
+    mapping_dict = mapping or {}
+    replaced_count = 0
+
+    # 1. Заміна шапки у першому абзаці зі збереженням шрифту та стилю
+    if new_header.strip() and doc.paragraphs:
+        header_p = doc.paragraphs[0]
+        if header_p.runs:
+            header_p.runs[0].text = new_header.strip()
+            for r in header_p.runs[1:]:
+                r.text = ""
+        else:
+            header_p.text = new_header.strip()
+        replaced_count += 1
+
+    # 2. Обробка абзаців на рівні run (збереження шрифтів, жирності, курсиву, відступів)
+    for p in doc.paragraphs:
+        p_text = p.text
+        if not p_text.strip():
+            continue
+
+        # Заміна відкритих назв ВЧ
+        for open_name, mapped_val in mapping_dict.items():
+            closed_code = str(mapped_val.get("cipher") if isinstance(mapped_val, dict) else mapped_val)
+            pattern = _build_unit_fuzzy_pattern(open_name)
+
+            if pattern.search(p_text):
+                for run in p.runs:
+                    if run.text and pattern.search(run.text):
+                        matches = len(pattern.findall(run.text))
+                        replaced_count += matches
+                        run.text = pattern.sub(closed_code, run.text)
+
+        # Заміна зворотів ("цієї самої бригади" -> "цієї самої військової частини")
+        if replace_unit_phrases:
+            for pattern, replacer in _UNIT_PHRASE_REPLACEMENTS:
+                if pattern.search(p_text):
+                    for run in p.runs:
+                        if run.text and pattern.search(run.text):
+                            matches = len(pattern.findall(run.text))
+                            replaced_count += matches
+                            run.text = pattern.sub(replacer, run.text)
+
+    # 3. Обробка таблиць у документах (збереження стилів осередків)
+    for table in doc.tables:
+        for row in table.rows:
+            for cell in row.cells:
+                for p in cell.paragraphs:
+                    p_text = p.text
+                    if not p_text.strip():
+                        continue
+
+                    for open_name, mapped_val in mapping_dict.items():
+                        closed_code = str(mapped_val.get("cipher") if isinstance(mapped_val, dict) else mapped_val)
+                        pattern = _build_unit_fuzzy_pattern(open_name)
+                        if pattern.search(p_text):
+                            for run in p.runs:
+                                if run.text and pattern.search(run.text):
+                                    run.text = pattern.sub(closed_code, run.text)
+
+                    if replace_unit_phrases:
+                        for pattern, replacer in _UNIT_PHRASE_REPLACEMENTS:
+                            if pattern.search(p_text):
+                                for run in p.runs:
+                                    if run.text and pattern.search(run.text):
+                                        run.text = pattern.sub(replacer, run.text)
+
+    doc.save(target_path)
+    summary = f"Сформовано закритий DOCX із збереженням стилів -> {target_path.name} (замін: {replaced_count})"
+    return {
+        "path": str(target_path),
+        "replaced_count": replaced_count,
+        "summary": summary,
+    }
