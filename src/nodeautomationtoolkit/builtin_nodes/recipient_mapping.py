@@ -84,8 +84,8 @@ def _read_rows(path: Path, sheet_name: str = "") -> list[list[str]]:
     name="Прочитати таблицю відповідностей",
     category="Наказ",
     description=(
-        "Читає CSV/XLSX: відкрите найменування, шифр та куди направляється. "
-        "Вміст залишається локально й далі передається по дротах графа."
+        "Читає CSV/XLSX таблицю за колонками A (Відкрита назва), B (Закрите найменування / в/ч), "
+        "C (Скорочення), D (Корпус). Якщо колонка D вказана — відправником є Корпус; якщо порожня — частина."
     ),
     type_id="builtin.order.read_recipient_mapping",
     outputs={"mapping": "Dictionary", "markers": "List", "table": "DataTable", "count": "int"},
@@ -103,45 +103,87 @@ def read_recipient_mapping(
     rows = _read_rows(source, sheet_name)
     if not rows:
         raise ValueError("Таблиця порожня")
-    requested = [open_name_column, cipher_column, destination_column]
+
+    # ── Визначаємо індекси колонок або позиційний доступ A, B, C, D, E ──────────
     header_index = -1
-    normalized: dict[str, int] = {}
-    for index, row in enumerate(rows[:20]):
-        candidate = {
-            name.strip().casefold(): column
-            for column, name in enumerate(row)
-            if name.strip()
-        }
-        if all(name.casefold() in candidate for name in requested):
+    col_a_idx, col_b_idx = 0, 1
+    col_c_idx, col_d_idx, col_e_idx = -1, -1, -1
+    has_explicit_abbreviation = False
+
+    for index, row in enumerate(rows[:10]):
+        row_norm = {cell.strip().casefold(): i for i, cell in enumerate(row) if cell.strip()}
+        if any("відкрит" in k or "найменування" in k for k in row_norm) or any("шифр" in k for k in row_norm):
             header_index = index
-            normalized = candidate
+            for k, i in row_norm.items():
+                if "відкрит" in k or "назва" in k or "найменування" in k:
+                    col_a_idx = i
+                elif "шифр" in k or "закрит" in k:
+                    col_b_idx = i
+                elif "скороч" in k or "абрев" in k:
+                    col_c_idx = i
+                    has_explicit_abbreviation = True
+                elif "корпус" in k:
+                    col_d_idx = i
+                elif "дислокац" in k or "адрес" in k or "витяг" in k or "куди" in k:
+                    col_e_idx = i
             break
-    if header_index < 0:
-        headers = [cell.strip() for cell in rows[0]]
-        normalized = {name.casefold(): index for index, name in enumerate(headers)}
-    missing = [name for name in requested if name.casefold() not in normalized]
-    if missing:
-        raise ValueError("У таблиці немає колонок: " + ", ".join(missing))
-    indexes = [normalized[name.casefold()] for name in requested]
+
+    data_rows = rows[header_index + 1 :] if header_index >= 0 else rows
+
     mapping: dict[str, dict[str, str]] = {}
     table_rows = []
-    for row in rows[header_index + 1 :]:
-        values = [row[index].strip() if index < len(row) else "" for index in indexes]
-        open_name, cipher, destination = values
-        if not open_name:
+
+    for row in data_rows:
+        if not any(row):
             continue
-        mapping[open_name] = {
+        open_name = row[col_a_idx].strip() if col_a_idx < len(row) else ""
+        cipher = row[col_b_idx].strip() if col_b_idx < len(row) else ""
+
+        # Якщо таблиця має 4+ колонок (A, B, C, D, E):
+        if len(row) >= 4 or has_explicit_abbreviation:
+            c_pos = col_c_idx if col_c_idx >= 0 else 2
+            d_pos = col_d_idx if col_d_idx >= 0 else 3
+            e_pos = col_e_idx if col_e_idx >= 0 else 4
+            abbreviation = row[c_pos].strip() if c_pos < len(row) else ""
+            corps = row[d_pos].strip() if d_pos < len(row) else ""
+            dislocation = row[e_pos].strip() if e_pos < len(row) else ""
+            destination = dislocation if dislocation else (corps if corps else (cipher or open_name))
+        else:
+            abbreviation = ""
+            corps = ""
+            dislocation = ""
+            destination = row[2].strip() if len(row) > 2 else (cipher or open_name)
+
+        if not cipher and not abbreviation and not corps and not dislocation:
+            continue
+        if not open_name:
+            open_name = abbreviation or cipher
+
+        entry = {
             "open_name": open_name,
-            "cipher": cipher,
+            "cipher": cipher or open_name,
+            "abbreviation": abbreviation,
+            "corps": corps,  # Якщо D порожнє -> "", відправник сама частина!
+            "dislocation": dislocation,  # Колонка E: Дислокація / куди направляти у витяги
             "destination": destination,
         }
-        table_rows.append(tuple(values))
-    table = DataTable(tuple(requested), tuple(table_rows), "Таблиця відповідностей")
+
+        mapping[open_name] = entry
+        if abbreviation and abbreviation != open_name:
+            mapping[abbreviation] = entry
+
+        table_rows.append((open_name, cipher, abbreviation, corps, dislocation or destination))
+
+    table = DataTable(
+        ("Відкрита назва (A)", "Закрите найменування (B)", "Скорочення (C)", "Корпус (D)", "Дислокація / Куди направляти (E)"),
+        tuple(table_rows),
+        "Таблиця відповідностей ВЧ",
+    )
     return {
         "mapping": mapping,
         "markers": list(mapping),
         "table": table,
-        "count": len(mapping),
+        "count": len(table_rows),
     }
 
 
@@ -280,6 +322,30 @@ def _extract_army_corps(text: str) -> str | None:
     return None
 
 
+_TCK_OBL_RE = re.compile(
+    r"([А-ЯІЇЄa-ua-z]+сько\w*)\s+област\w*",
+    re.IGNORECASE | re.UNICODE,
+)
+
+
+def _extract_tck_sender(text: str) -> str | None:
+    """
+    Якщо у тексті згадується ТЦК (районний / міський), відправником завжди є ОБЛАСТЬ (ОТЦК).
+    Наприклад: 'Ковельського районного ТЦК та СП Волинської області' -> 'Волинський ОТЦК та СП'.
+    """
+    if "ТЦК" not in text.upper() and "комплектування" not in text.lower():
+        return None
+
+    match = _TCK_OBL_RE.search(text)
+    if match:
+        region = match.group(1).strip()
+        region_base = re.sub(r"ської$", "ський", region, flags=re.IGNORECASE)
+        region_base = re.sub(r"скої$", "ський", region_base, flags=re.IGNORECASE)
+        return f"{region_base} ОТЦК та СП"
+
+    return "Обласний ТЦК та СП"
+
+
 
 @node(
     name="Картування та пошук військових частин",
@@ -339,23 +405,30 @@ def map_military_units(
         header_lines = lines[:3]
 
     # ── Компілюємо патерни для кожної ВЧ ──────────────────────────────────────
-    unit_patterns: list[tuple[str, str, re.Pattern]] = []
+    unit_patterns: list[tuple[str, str, str, re.Pattern]] = []
     for open_name, mapped_val in mapping_dict.items():
+        corps_col = ""
         if isinstance(mapped_val, dict):
             closed_code = str(
                 mapped_val.get("cipher")
                 or mapped_val.get("closed_name")
                 or open_name
             )
+            corps_col = str(mapped_val.get("corps", "")).strip()
+            abbreviation = str(mapped_val.get("abbreviation", "")).strip()
         else:
             closed_code = str(mapped_val)
+            abbreviation = ""
 
         if fuzzy_match:
             pattern = _build_unit_fuzzy_pattern(open_name)
         else:
             pattern = re.compile(re.escape(open_name), re.IGNORECASE)
 
-        unit_patterns.append((open_name, closed_code, pattern))
+        unit_patterns.append((open_name, closed_code, corps_col, pattern))
+        if abbreviation and abbreviation != open_name:
+            abbr_pattern = _build_unit_fuzzy_pattern(abbreviation) if fuzzy_match else re.compile(re.escape(abbreviation), re.IGNORECASE)
+            unit_patterns.append((abbreviation, closed_code, corps_col, abbr_pattern))
 
     # ── Парсимо тіло наказу у блоки (§-параграфи та пронумеровані пункти) ─────
     blocks = []
@@ -431,13 +504,12 @@ def map_military_units(
         block_replaced_lines = list(block["lines"])
         matched_units_in_block: set[tuple[str, str]] = set()
 
-        for open_name, closed_code, pattern in unit_patterns:
-            # Знаходимо всі збіги (для звіту)
+        # 1. Зіставлення за патернами з колонок A (повна назва) та C (скорочення)
+        for open_name, closed_code, corps_col, pattern in unit_patterns:
             all_matches = pattern.findall(block_raw_text)
             if not all_matches:
                 continue
 
-            # Підраховуємо унікальні знайдені форми
             for found_form in set(str(m) if isinstance(m, str) else str(m[0]) for m in all_matches):
                 existing = next(
                     (r for r in match_report_rows if r[0] == open_name and r[1] == found_form),
@@ -451,22 +523,23 @@ def map_military_units(
                 else:
                     match_report_rows.append((open_name, found_form, closed_code, 1))
 
-            # Замінюємо знайдені форми на закритий шифр
             block_replaced_lines = [pattern.sub(closed_code, ln) for ln in block_replaced_lines]
-            matched_units_in_block.add((closed_code, open_name))
+            # Якщо колонка D (corps_col) вказана -> відправником є Корпус з D.
+            # Якщо колонка D порожня -> відправником є сама частина (не успадковує корпус з тексту)!
+            sender_key = corps_col if corps_col else closed_code
+            matched_units_in_block.add((sender_key, open_name))
 
-        # ── Пріоритет Армійського Корпусу (АК): якщо є АК, він є головним відправником ──
-        corps_name = _extract_army_corps(block_raw_text)
-        if corps_name:
-            corps_code = None
-            for open_name, closed_code, pattern in unit_patterns:
-                if pattern.search(corps_name) or corps_name.casefold() in open_name.casefold():
-                    corps_code = closed_code
-                    break
-            if not corps_code:
-                corps_code = corps_name
-            # АК стає головним відправником даного блоку
-            matched_units_in_block = {(corps_code, corps_name)}
+        # 2. Якщо в таблиці немає відповідностей — перевіряємо ТЦК (районний/міський -> Область)
+        if not matched_units_in_block:
+            tck_sender = _extract_tck_sender(block_raw_text)
+            if tck_sender:
+                matched_units_in_block = {(tck_sender, "ТЦК та СП (Область)")}
+
+        # 3. Якщо в таблиці немає відповідностей — перевіряємо чи в тексті явно є АК
+        if not matched_units_in_block:
+            corps_name = _extract_army_corps(block_raw_text)
+            if corps_name:
+                matched_units_in_block = {(corps_name, corps_name)}
 
         if matched_units_in_block:
             full_item_text = "\n".join(block_replaced_lines).strip()

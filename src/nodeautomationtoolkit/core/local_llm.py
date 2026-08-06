@@ -109,6 +109,15 @@ class LocalLlmConfig:
                 url += "/v1"
         return url + "/"
 
+    @property
+    def is_local(self) -> bool:
+        """Повертає True, якщо провайдер працює повністю локально на комп'ютері користувача."""
+        return self.provider in (
+            LocalLlmProvider.EMBEDDED,
+            LocalLlmProvider.LM_STUDIO,
+            LocalLlmProvider.OLLAMA,
+        )
+
 
 def load_llm_settings(provider: LocalLlmProvider | str | None = None) -> dict[str, str]:
     from PySide6.QtCore import QSettings
