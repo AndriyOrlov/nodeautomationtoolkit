@@ -29,6 +29,7 @@ from .embedded_model_dialog import EmbeddedModelDialog
 from .graph_view import GraphScene, GraphView, NodePalette
 from .node_assistant_dialog import NodeAssistantDialog
 from .nodegraphqt_editor import NodeGraphQtEditor
+from .order_analysis_dialog import OrderAnalysisDialog
 from .properties import PropertiesPanel
 
 
@@ -115,8 +116,8 @@ class MainWindow(QMainWindow):
             ("Відкрити", QKeySequence.StandardKey.Open, self.open_graph),
             ("Зберегти", QKeySequence.StandardKey.Save, self.save_graph),
             ("Зберегти як", QKeySequence.StandardKey.SaveAs, self.save_graph_as),
-            ("Word тест", "Ctrl+Shift+W", self.open_word_smoke_graph),
             ("Запустити", "F5", self.run_graph),
+            ("🔍 Аналіз наказу", "Ctrl+Shift+O", self.open_order_analysis),
             ("AI-сценарій", "Ctrl+Shift+A", self.open_automation_assistant),
             ("AI-нода", "Ctrl+Shift+N", self.open_node_assistant),
             ("Локальна модель", "Ctrl+Shift+L", self.open_embedded_model),
@@ -166,6 +167,11 @@ class MainWindow(QMainWindow):
             f"Версію {installed.version} встановлено.\n\n"
             "Збережіть граф і один раз перезапустіть програму.",
         )
+
+    def open_order_analysis(self) -> None:
+        dialog = OrderAnalysisDialog(self.registry, self.plugin_dir, self)
+        dialog.graph_created.connect(self._apply_assistant_graph)
+        dialog.exec()
 
     def open_node_assistant(self) -> None:
         dialog = NodeAssistantDialog(self.plugin_dir, self)

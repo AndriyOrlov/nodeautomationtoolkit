@@ -61,13 +61,23 @@ PROVIDER_PRESET_MODELS = {
         "embedded-qwen3-4b",
     ],
     LocalLlmProvider.LM_STUDIO: [
+        "qwen2.5-7b-instruct",
         "qwen2.5-coder-7b-instruct",
+        "phi-4-mini-instruct",
         "llama-3.2-3b-instruct",
     ],
     LocalLlmProvider.OLLAMA: [
-        "qwen2.5-coder",
-        "llama3.2",
+        # ── Оптимальні для 6 GB VRAM ───────────────────────────────────────────
+        "qwen2.5:7b",            # ~5.5 GB VRAM · Найкраща для аналізу наказів та JSON
+        "qwen2.5:3b",            # ~2 GB VRAM   · Дуже швидка, менш точна
+        "phi4-mini",             # ~2.5 GB VRAM · Microsoft, відмінно для структурованих відповідей
+        "llama3.2:3b",           # ~2 GB VRAM   · Хороший универсальний варіант
+        # ── Для генерації Python-нод ──────────────────────────────────────────
+        "qwen2.5-coder:7b",      # ~5.5 GB VRAM · Спеціалізований на коді
+        "qwen2.5-coder:3b",      # ~2 GB VRAM   · Легша версія для Python-нод
+        # ── Старіші (для сумісності) ──────────────────────────────────────────
         "mistral",
+        "llama3.2",
     ],
     LocalLlmProvider.CUSTOM: [
         "default",
