@@ -11,10 +11,14 @@ from PySide6.QtGui import QAction, QKeySequence, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
+    QDialog,
     QFileDialog,
+    QFrame,
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QListWidget,
+    QListWidgetItem,
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
@@ -225,6 +229,97 @@ def _node_widget_classes():
             self._editor.setPlainText(str(value))
 
     return NodeStatusWidget, NodePreviewWidget, NodeMultilineWidget, NodeCodeWidget
+
+
+class QuickNodeSearchDialog(QDialog):
+    """Швидке вікно пошуку та вставки нод за кнопкою Пробіл / Tab."""
+
+    def __init__(self, registry: NodeRegistry, parent=None) -> None:
+        super().__init__(parent)
+        self.registry = registry
+        self.selected_type_id: str | None = None
+
+        self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.Popup)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+
+        container = QFrame(self)
+        container.setObjectName("quick_container")
+        container.setStyleSheet(
+            "#quick_container { background-color: #0f172a; border: 2px solid #38bdf8; "
+            "border-radius: 10px; }"
+        )
+
+        layout = QVBoxLayout(container)
+        layout.setContentsMargins(10, 10, 10, 10)
+
+        title = QLabel("🔍 ШВИДКИЙ ПОШУК ТА ДОДАВАННЯ НОДИ (Space / Tab)")
+        title.setStyleSheet("color: #38bdf8; font-weight: 700; font-size: 11px; margin-bottom: 2px;")
+        layout.addWidget(title)
+
+        self.search_input = QLineEdit()
+        self.search_input.setPlaceholderText("Пошук ноди (введіть Наказ, DOCX, Заміна)...")
+        self.search_input.setStyleSheet(
+            "QLineEdit { background: #1e293b; color: #f8fafc; font-size: 13px; "
+            "border: 1px solid #475569; border-radius: 6px; padding: 6px 10px; }"
+            "QLineEdit:focus { border-color: #38bdf8; }"
+        )
+        self.search_input.textChanged.connect(self._filter_list)
+        layout.addWidget(self.search_input)
+
+        self.list_widget = QListWidget()
+        self.list_widget.setStyleSheet(
+            "QListWidget { background: #1e293b; color: #f8fafc; border: 1px solid #334155; border-radius: 6px; padding: 4px; font-size: 12px; }"
+            "QListWidget::item { padding: 8px; border-bottom: 1px solid #334155; border-radius: 4px; }"
+            "QListWidget::item:selected { background: #0284c7; color: #ffffff; font-weight: bold; }"
+            "QListWidget::item:hover { background: #0f766e; }"
+        )
+        self.list_widget.itemDoubleClicked.connect(self._accept_item)
+        layout.addWidget(self.list_widget)
+
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.addWidget(container)
+
+        self.setFixedSize(460, 340)
+        self.search_input.installEventFilter(self)
+        self._populate("")
+
+    def _populate(self, query: str) -> None:
+        self.list_widget.clear()
+        query = query.casefold().strip()
+        for definition in self.registry.all():
+            haystack = f"{definition.category} {definition.name} {definition.description}".casefold()
+            if query and query not in haystack:
+                continue
+            item = QListWidgetItem(f"[{definition.category}]\n{definition.name}")
+            item.setData(Qt.ItemDataRole.UserRole, definition.type_id)
+            item.setToolTip(f"{definition.name}\n{definition.description}")
+            self.list_widget.addItem(item)
+        if self.list_widget.count() > 0:
+            self.list_widget.setCurrentRow(0)
+
+    def _filter_list(self, text: str) -> None:
+        self._populate(text)
+
+    def _accept_item(self, item: QListWidgetItem | None = None) -> None:
+        item = item or self.list_widget.currentItem()
+        if item:
+            self.selected_type_id = item.data(Qt.ItemDataRole.UserRole)
+            self.accept()
+
+    def eventFilter(self, watched, event) -> bool:
+        if watched is self.search_input and event.type() == QEvent.Type.KeyPress:
+            key = event.key()
+            if key in (Qt.Key.Key_Down, Qt.Key.Key_Up):
+                self.list_widget.keyPressEvent(event)
+                return True
+            elif key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+                self._accept_item()
+                return True
+            elif key == Qt.Key.Key_Escape:
+                self.reject()
+                return True
+        return super().eventFilter(watched, event)
 
 
 class FullDocumentPreviewWidget(QWidget):
@@ -575,6 +670,18 @@ class NodeGraphQtEditor(QWidget):
         group_action.triggered.connect(lambda: self.create_group_backdrop())
         self.addAction(group_action)
 
+        space_action = QAction("Швидкий пошук та додавання ноди (Space)", self)
+        space_action.setShortcut(QKeySequence(Qt.Key.Key_Space))
+        space_action.setShortcutContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        space_action.triggered.connect(self._open_quick_node_search)
+        self.addAction(space_action)
+
+        tab_action = QAction("Швидкий пошук та додавання ноди (Tab)", self)
+        tab_action.setShortcut(QKeySequence(Qt.Key.Key_Tab))
+        tab_action.setShortcutContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        tab_action.triggered.connect(self._open_quick_node_search)
+        self.addAction(tab_action)
+
         self.graph.node_created.connect(self._on_node_created)
         self.graph.nodes_deleted.connect(self._on_nodes_deleted)
         self.graph.port_connected.connect(self._on_connection_changed)
@@ -749,6 +856,21 @@ class NodeGraphQtEditor(QWidget):
 
         self._schedule_live_preview()
         self.graph_changed.emit()
+
+    def _open_quick_node_search(self) -> None:
+        from PySide6.QtGui import QCursor
+        cursor_pos = QCursor.pos()
+        dialog = QuickNodeSearchDialog(self.registry, parent=self)
+        dialog.move(cursor_pos.x() - 230, cursor_pos.y() - 170)
+        if dialog.exec() == QDialog.DialogCode.Accepted and dialog.selected_type_id:
+            viewer = self.graph.viewer()
+            local_pos = viewer.mapFromGlobal(cursor_pos)
+            scene_pos = viewer.mapToScene(local_pos) if hasattr(viewer, "mapToScene") else QPointF(0, 0)
+            pos_list = [float(scene_pos.x()), float(scene_pos.y())]
+            node = self.graph.create_node(dialog.selected_type_id, pos=pos_list)
+            if node:
+                self.message.emit(f"Додано ноду з швидкого пошуку: {node.name()}")
+            self.graph_changed.emit()
 
     def delete_selected_nodes(self) -> None:
         nodes = self.graph.selected_nodes()

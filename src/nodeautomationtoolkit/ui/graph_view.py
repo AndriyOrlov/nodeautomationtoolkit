@@ -41,6 +41,13 @@ class NodePalette(QListWidget):
         super().__init__(parent)
         self.setDragEnabled(True)
         self.setAlternatingRowColors(True)
+        self.setStyleSheet(
+            "QListWidget { background: #0f172a; color: #f8fafc; border: 1px solid #334155; font-size: 12px; padding: 4px; }"
+            "QListWidget::item { padding: 8px 10px; border-bottom: 1px solid #1e293b; border-radius: 4px; margin-bottom: 2px; }"
+            "QListWidget::item:hover { background: #1e293b; color: #38bdf8; }"
+            "QListWidget::item:selected { background: #0284c7; color: white; font-weight: bold; }"
+        )
+        self.setWordWrap(True)
 
     def populate(self, registry: NodeRegistry, query: str = "") -> None:
         self.clear()
@@ -51,9 +58,9 @@ class NodePalette(QListWidget):
             ).casefold()
             if query and query not in haystack:
                 continue
-            item = QListWidgetItem(f"{definition.category}  ·  {definition.name}")
+            item = QListWidgetItem(f"[{definition.category}]\n{definition.name}")
             item.setData(Qt.ItemDataRole.UserRole, definition.type_id)
-            item.setToolTip(definition.description)
+            item.setToolTip(f"{definition.name}\n{definition.description}")
             self.addItem(item)
 
     def startDrag(self, supported_actions: Qt.DropAction) -> None:
@@ -82,6 +89,8 @@ class PortItem(QGraphicsEllipseItem):
         self.is_output = is_output
         if definition.kind == PortKind.EXECUTION:
             color = QColor("#f8fafc")
+        elif definition.name in ("rules", "corrections", "overrides", "additional_rules"):
+            color = QColor("#f472b6")  # Рожевий колір для портів правил/виправлень знизу
         else:
             color = QColor("#5eead4") if is_output else QColor("#93c5fd")
         self.setBrush(QBrush(color))
@@ -94,9 +103,8 @@ class PortItem(QGraphicsEllipseItem):
 
 
 class NodeItem(QGraphicsRectItem):
-    WIDTH = 210.0
-    HEADER = 34.0
-    ROW = 25.0
+    HEADER = 36.0
+    ROW = 26.0
 
     def __init__(
         self,
@@ -104,10 +112,26 @@ class NodeItem(QGraphicsRectItem):
         definition: NodeDefinition,
         moved_callback: Callable[[], None],
     ) -> None:
+        from PySide6.QtGui import QFont, QFontMetrics
+
         all_inputs = definition.execution_inputs + definition.inputs
         all_outputs = definition.execution_outputs + definition.outputs
         rows = max(len(all_inputs), len(all_outputs), 1)
-        super().__init__(0, 0, self.WIDTH, self.HEADER + rows * self.ROW + 12)
+
+        # Адаптивний розрахунок ширини ноди під назву та порти
+        title_font = QFont("Segoe UI", 10, QFont.Weight.Bold)
+        title_metrics = QFontMetrics(title_font)
+        title_w = title_metrics.horizontalAdvance(definition.name) + 36.0
+
+        port_font = QFont("Segoe UI", 9)
+        port_metrics = QFontMetrics(port_font)
+        in_max = max([port_metrics.horizontalAdvance(p.name) for p in all_inputs] + [0])
+        out_max = max([port_metrics.horizontalAdvance(p.name) for p in all_outputs] + [0])
+        ports_w = in_max + out_max + 54.0
+
+        self.WIDTH = max(250.0, title_w, ports_w)
+
+        super().__init__(0, 0, self.WIDTH, self.HEADER + rows * self.ROW + 14)
         self.model = model
         self.definition = definition
         self.moved_callback = moved_callback
@@ -128,6 +152,7 @@ class NodeItem(QGraphicsRectItem):
         title_background.setBrush(QBrush(QColor("#0f766e")))
         title_background.setPen(QPen(Qt.PenStyle.NoPen))
         title = QGraphicsSimpleTextItem(definition.name, self)
+        title.setFont(title_font)
         title.setBrush(QBrush(QColor("#f8fafc")))
         title.setPos(12, 8)
 
@@ -137,6 +162,7 @@ class NodeItem(QGraphicsRectItem):
             port_item.setPos(0, y)
             self.inputs[port.name] = port_item
             label = QGraphicsSimpleTextItem(port.name, self)
+            label.setFont(port_font)
             label.setBrush(QBrush(QColor("#dbeafe")))
             label.setPos(10, y - 9)
 
@@ -146,6 +172,7 @@ class NodeItem(QGraphicsRectItem):
             port_item.setPos(self.WIDTH, y)
             self.outputs[port.name] = port_item
             label = QGraphicsSimpleTextItem(port.name, self)
+            label.setFont(port_font)
             label.setBrush(QBrush(QColor("#ccfbf1")))
             label_width = label.boundingRect().width()
             label.setPos(self.WIDTH - label_width - 10, y - 9)
