@@ -165,6 +165,22 @@ class LocalLlmClient:
         payload = self._request("models", method="GET")
         return [str(item["id"]) for item in payload.get("data", []) if item.get("id")]
 
+    def chat(self, messages: list[dict[str, str]], temperature: float = 0.3) -> str:
+        """Вільний текстовий chat/completions запит (без json_schema)."""
+        if not self.config.model.strip():
+            raise ValueError("Оберіть модель")
+        body: dict[str, Any] = {
+            "model": self.config.model,
+            "messages": messages,
+            "temperature": temperature,
+            "stream": False,
+        }
+        payload = self._request("chat/completions", body)
+        try:
+            return str(payload["choices"][0]["message"]["content"])
+        except (KeyError, IndexError, TypeError) as err:
+            raise LocalLlmError(f"Некоректна відповідь LLM: {payload}") from err
+
     def generate_node(self, request_text: str) -> NodeDraft:
         if not request_text.strip():
             raise ValueError("Опишіть, яку ноду потрібно створити")

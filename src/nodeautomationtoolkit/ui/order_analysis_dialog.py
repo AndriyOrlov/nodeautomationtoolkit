@@ -595,15 +595,20 @@ class OrderAnalysisDialog(QDialog):
 
     # ── Налаштування ────────────────────────────────────────────────────────────
     def _apply_settings(self) -> None:
-        provider = self._settings.get("provider", LocalLlmProvider.OLLAMA)
+        settings = load_llm_settings()
+        try:
+            provider = LocalLlmProvider(settings["provider"])
+        except ValueError:
+            provider = LocalLlmProvider.OLLAMA
+
         idx = self._prov.findData(provider)
         if idx >= 0:
             self._prov.setCurrentIndex(idx)
         self._on_provider()
-        saved = self._settings.get(f"model_{provider}", "")
-        if saved:
-            self._model.setCurrentText(saved)
-        self._apikey.setText(self._settings.get(f"api_key_{provider}", ""))
+        
+        if settings["model"]:
+            self._model.setCurrentText(settings["model"])
+        self._apikey.setText(settings["api_key"])
 
     def _on_provider(self) -> None:
         provider: LocalLlmProvider = self._prov.currentData()
@@ -611,6 +616,11 @@ class OrderAnalysisDialog(QDialog):
         self._model.clear()
         for m in models:
             self._model.addItem(m.split("#")[0].strip() if "#" in m else m)
+            
+        settings = load_llm_settings(provider)
+        if settings["model"]:
+            self._model.setCurrentText(settings["model"])
+        self._apikey.setText(settings["api_key"])
 
     def _refresh_models(self) -> None:
         try:
@@ -625,20 +635,22 @@ class OrderAnalysisDialog(QDialog):
 
     def _save_settings(self) -> None:
         provider: LocalLlmProvider = self._prov.currentData()
-        s = dict(self._settings)
-        s["provider"] = provider
-        s[f"model_{provider}"] = self._model.currentText().strip()
-        s[f"api_key_{provider}"] = self._apikey.text().strip()
-        save_llm_settings(s)
-        self._settings = s
+        base_url = load_llm_settings(provider)["base_url"]
+        save_llm_settings(
+            provider_value=provider.value,
+            base_url=base_url,
+            model=self._model.currentText().strip(),
+            api_key=self._apikey.text().strip(),
+        )
 
     def _build_config(self) -> LocalLlmConfig:
         provider: LocalLlmProvider = self._prov.currentData()
+        base_url = load_llm_settings(provider)["base_url"]
         return LocalLlmConfig(
             provider=provider,
             model=self._model.currentText().strip(),
             api_key=self._apikey.text().strip(),
-            base_url=DEFAULT_BASE_URLS.get(provider, ""),
+            base_url=base_url,
         )
 
     # ── Запуск аналізу ─────────────────────────────────────────────────────────
