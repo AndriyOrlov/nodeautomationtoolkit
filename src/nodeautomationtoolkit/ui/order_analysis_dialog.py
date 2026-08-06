@@ -594,6 +594,15 @@ class OrderAnalysisDialog(QDialog):
         root.addWidget(self._status)
 
     # ── Налаштування ────────────────────────────────────────────────────────────
+    def _get_provider(self) -> LocalLlmProvider:
+        data = self._prov.currentData()
+        if isinstance(data, LocalLlmProvider):
+            return data
+        try:
+            return LocalLlmProvider(str(data))
+        except ValueError:
+            return LocalLlmProvider.OLLAMA
+
     def _apply_settings(self) -> None:
         settings = load_llm_settings()
         try:
@@ -610,8 +619,8 @@ class OrderAnalysisDialog(QDialog):
             self._model.setCurrentText(settings["model"])
         self._apikey.setText(settings["api_key"])
 
-    def _on_provider(self) -> None:
-        provider: LocalLlmProvider = self._prov.currentData()
+    def _on_provider(self, *args) -> None:
+        provider = self._get_provider()
         models = PROVIDER_PRESET_MODELS.get(provider, [])
         self._model.clear()
         for m in models:
@@ -634,7 +643,7 @@ class OrderAnalysisDialog(QDialog):
             self._set_status(f"❌ {err}")
 
     def _save_settings(self) -> None:
-        provider: LocalLlmProvider = self._prov.currentData()
+        provider = self._get_provider()
         base_url = load_llm_settings(provider)["base_url"]
         save_llm_settings(
             provider_value=provider.value,
@@ -644,7 +653,7 @@ class OrderAnalysisDialog(QDialog):
         )
 
     def _build_config(self) -> LocalLlmConfig:
-        provider: LocalLlmProvider = self._prov.currentData()
+        provider = self._get_provider()
         base_url = load_llm_settings(provider)["base_url"]
         return LocalLlmConfig(
             provider=provider,

@@ -97,24 +97,31 @@ class LocalLlmConfig:
         return self.base_url.rstrip("/") + "/"
 
 
-def load_llm_settings(provider: LocalLlmProvider | None = None) -> dict[str, str]:
+def load_llm_settings(provider: LocalLlmProvider | str | None = None) -> dict[str, str]:
     from PySide6.QtCore import QSettings
 
     settings = QSettings("DEADSUE.ART", "NodeAutomationToolkit")
     if provider is None:
         provider_name = settings.value("ai/last_provider", LocalLlmProvider.EMBEDDED.value)
         try:
-            provider = LocalLlmProvider(str(provider_name))
+            provider_enum = LocalLlmProvider(str(provider_name))
         except ValueError:
-            provider = LocalLlmProvider.EMBEDDED
+            provider_enum = LocalLlmProvider.EMBEDDED
+    elif isinstance(provider, LocalLlmProvider):
+        provider_enum = provider
+    else:
+        try:
+            provider_enum = LocalLlmProvider(str(provider))
+        except ValueError:
+            provider_enum = LocalLlmProvider.EMBEDDED
 
-    saved_url = settings.value(f"ai/base_url_{provider.value}", DEFAULT_BASE_URLS[provider])
-    saved_model = settings.value(f"ai/model_{provider.value}", "")
-    saved_key = settings.value(f"ai/api_key_{provider.value}", "")
+    saved_url = settings.value(f"ai/base_url_{provider_enum.value}", DEFAULT_BASE_URLS[provider_enum])
+    saved_model = settings.value(f"ai/model_{provider_enum.value}", "")
+    saved_key = settings.value(f"ai/api_key_{provider_enum.value}", "")
 
     return {
-        "provider": provider.value,
-        "base_url": str(saved_url) if saved_url else DEFAULT_BASE_URLS[provider],
+        "provider": provider_enum.value,
+        "base_url": str(saved_url) if saved_url else DEFAULT_BASE_URLS[provider_enum],
         "model": str(saved_model) if saved_model else "",
         "api_key": str(saved_key) if saved_key else "",
     }
