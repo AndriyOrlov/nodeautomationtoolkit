@@ -673,14 +673,18 @@ class OrderAnalysisDialog(QDialog):
 
         self._save_settings()
 
-        before_text = self._before.get_text()
-        after_text = self._after.get_text()
-        extra = self._extra.text().strip()
+        def _compact_sample(text: str, max_chars: int = 2500) -> str:
+            if len(text) <= max_chars:
+                return text
+            return text[:max_chars] + f"\n\n[... Текст фрагменту обрізано для аналізу: всього {len(text)} символів ...]"
+
+        b_sample = _compact_sample(before_text)
+        a_sample = _compact_sample(after_text)
 
         # Перелік доступних нод для контексту
         node_list = "\n".join(
             f"- {d.type_id}: {d.name} ({d.category})"
-            for d in self.registry.all()[:70]
+            for d in self.registry.all()[:60]
         )
 
         config = self._build_config()
@@ -696,9 +700,9 @@ class OrderAnalysisDialog(QDialog):
             )
         else:
             user_msg = (
-                f"## ВХІДНИЙ ДОКУМЕНТ (ДО):\n\n{before_text}\n\n"
+                f"## ВХІДНИЙ ДОКУМЕНТ (ДО):\n\n{b_sample}\n\n"
                 f"{'=' * 60}\n\n"
-                f"## ОЧІКУВАНИЙ РЕЗУЛЬТАТ (ПІСЛЯ):\n\n{after_text}\n\n"
+                f"## ОЧІКУВАНИЙ РЕЗУЛЬТАТ (ПІСЛЯ):\n\n{a_sample}\n\n"
                 f"{'=' * 60}\n\n"
                 f"## Доступні ноди для побудови графа:\n{node_list}"
             )
