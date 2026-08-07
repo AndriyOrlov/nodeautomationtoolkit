@@ -419,6 +419,40 @@ def _normalize_key(raw_k: str, canonical_map: dict[str, str] | None = None) -> s
     return k
 
 
+def _auto_abbreviate_unit_name(open_name: str) -> str:
+    """Автоматично генерує скорочення ВЧ з повної назви (напр. '15 окрема механізована бригада' -> '15омбр')."""
+    clean = str(open_name).strip()
+    match_num = re.search(r"\b(\d{1,4})\b", clean)
+    num_str = match_num.group(1) if match_num else ""
+
+    low = clean.lower()
+    type_abbr = ""
+    if "механізован" in low or "омбр" in low:
+        type_abbr = "омбр"
+    elif "танков" in low or "отбр" in low:
+        type_abbr = "отбр"
+    elif "десантно-штурмов" in low or "одшбр" in low:
+        type_abbr = "одшбр"
+    elif "гірсько-штурмов" in low or "огшбр" in low:
+        type_abbr = "огшбр"
+    elif "артилерійськ" in low or "оабр" in low:
+        type_abbr = "оабр"
+    elif "полк зв" in low or "зв’язку" in low or "зв'язку" in low or "опз" in low:
+        type_abbr = "опз"
+    elif "розвідувальн" in low or "орб" in low:
+        type_abbr = "орб"
+    elif "інженерн" in low or "оібр" in low:
+        type_abbr = "оібр"
+    elif "автомобільн" in low or "оаб" in low:
+        type_abbr = "оаб"
+    elif "батальйон" in low:
+        type_abbr = "об"
+
+    if num_str and type_abbr:
+        return f"{num_str}{type_abbr}"
+    return num_str or clean
+
+
 def _short_closed_code(code: str, abbreviation: str = "") -> str:
     """Формує коротке закрите найменування частини з скороченням (напр. '15омбр А1500' або '10АК А1000')."""
     clean_code = str(code).strip()
@@ -593,10 +627,20 @@ def map_military_units(
                 or open_name
             )
             corps_col = str(mapped_val.get("corps", "")).strip()
-            abbreviation = str(mapped_val.get("abbreviation", "")).strip()
+            abbreviation = str(
+                mapped_val.get("abbreviation")
+                or mapped_val.get("abbr")
+                or mapped_val.get("short_name")
+                or mapped_val.get("скорочення")
+                or mapped_val.get("скорочена_назва")
+                or ""
+            ).strip()
         else:
             closed_code = str(mapped_val)
             abbreviation = ""
+
+        if isinstance(mapped_val, dict) and not abbreviation and not corps_col:
+            abbreviation = _auto_abbreviate_unit_name(open_name)
 
         short_cipher = _short_closed_code(closed_code)
 
