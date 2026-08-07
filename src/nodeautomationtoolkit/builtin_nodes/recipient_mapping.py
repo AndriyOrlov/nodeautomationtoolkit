@@ -956,8 +956,11 @@ def map_military_units(
 
             if kudy_text and "цього саг" not in kudy_text.lower() and "цієї саг" not in kudy_text.lower() and "того ж" not in kudy_text.lower():
                 for open_name, closed_code, corps_col, sender_key, pattern in unit_patterns:
-                    if pattern.search(kudy_text):
-                        sec_units.add((sender_key, open_name))
+                    m = pattern.search(kudy_text)
+                    if m:
+                        matched_str = m.group(0)
+                        target_name = corps_col if (corps_col and ("корпус" in matched_str.lower() or "ак" in matched_str.lower())) else open_name
+                        sec_units.add((sender_key, target_name))
                 if not sec_units:
                     sec_tck = _extract_tck_sender(kudy_text)
                     if sec_tck:
@@ -966,8 +969,11 @@ def map_military_units(
             # 2. Якщо окремого напрямку КУДИ немає або вказано 'до цього самого полку' — шукаємо по всій шапці
             if not sec_units:
                 for open_name, closed_code, corps_col, sender_key, pattern in unit_patterns:
-                    if pattern.search(section_raw_text):
-                        sec_units.add((sender_key, open_name))
+                    m = pattern.search(section_raw_text)
+                    if m:
+                        matched_str = m.group(0)
+                        target_name = corps_col if (corps_col and ("корпус" in matched_str.lower() or "ак" in matched_str.lower())) else open_name
+                        sec_units.add((sender_key, target_name))
                         break
                 if not sec_units:
                     sec_ciphers = re.findall(r"\bА\s*(\d{4})\b", section_raw_text, re.IGNORECASE)
@@ -1037,8 +1043,9 @@ def map_military_units(
                         match_report_rows.append((open_name, found_form, closed_code, 1))
 
                 block_replaced_lines = [pattern.sub(closed_code, ln) for ln in block_replaced_lines]
-                # Якщо частина у складі Корпусу -> отримувачем є сам Корпус (усі пункти об'єднуються у єдиний витяг)
-                matched_units_in_block.add((sender_key, open_name))
+                matched_str = str(all_matches[0]) if all_matches else ""
+                target_name = corps_col if (corps_col and ("корпус" in matched_str.lower() or "ак" in matched_str.lower())) else open_name
+                matched_units_in_block.add((sender_key, target_name))
 
 
 
