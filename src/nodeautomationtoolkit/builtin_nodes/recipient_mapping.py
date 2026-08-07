@@ -513,6 +513,43 @@ def map_military_units(
     canonical_key_map: dict[str, str] = {}
     cipher_digits_map: dict[str, tuple[str, str]] = {}
 
+    # ── Прохід 1: визначаємо ЄДИНИЙ шифр для кожного Корпусу ─────────────────
+    corps_resolved_cipher: dict[str, str] = {}  # corps_abbr -> шифр корпусу
+
+    def _find_corps_entry(corps_col_val: str, corps_abbr_val: str) -> dict | None:
+        """Шукає рядок корпусу у таблиці за ключем, скороченням або повною назвою."""
+        # 1) Прямий пошук за ключем словника
+        entry = mapping_dict.get(corps_col_val) or mapping_dict.get(corps_abbr_val)
+        if isinstance(entry, dict) and entry.get("cipher"):
+            return entry
+        # 2) Пошук за полем abbreviation серед усіх записів
+        for _name, _val in mapping_dict.items():
+            if not isinstance(_val, dict):
+                continue
+            abbr = str(_val.get("abbreviation", "")).strip()
+            if abbr and _extract_corps_abbr(abbr) == corps_abbr_val and _val.get("cipher"):
+                return _val
+            # 3) Пошук за open_name якщо містить номер корпусу
+            if _extract_corps_abbr(_name) == corps_abbr_val and _val.get("cipher"):
+                return _val
+        return None
+
+    for open_name, mapped_val in mapping_dict.items():
+        if not isinstance(mapped_val, dict):
+            continue
+        corps_col = str(mapped_val.get("corps", "")).strip()
+        if corps_col:
+            corps_abbr = _extract_corps_abbr(corps_col)
+            if corps_abbr not in corps_resolved_cipher:
+                corps_entry = _find_corps_entry(corps_col, corps_abbr)
+                if corps_entry:
+                    corps_resolved_cipher[corps_abbr] = _short_closed_code(str(corps_entry["cipher"]))
+                else:
+                    # Якщо корпус не має окремого рядка — використовуємо шифр першої бригади
+                    unit_cipher = str(mapped_val.get("cipher") or mapped_val.get("closed_name") or "")
+                    corps_resolved_cipher[corps_abbr] = _short_closed_code(unit_cipher)
+
+    # ── Прохід 2: компілюємо патерни з єдиним sender_key ─────────────────────
     for open_name, mapped_val in mapping_dict.items():
         corps_col = ""
         if isinstance(mapped_val, dict):
@@ -531,12 +568,8 @@ def map_military_units(
 
         if corps_col:
             corps_abbr = _extract_corps_abbr(corps_col)
-            corps_entry = mapping_dict.get(corps_col) or mapping_dict.get(corps_abbr)
-            if isinstance(corps_entry, dict) and corps_entry.get("cipher"):
-                corps_own_cipher = _short_closed_code(str(corps_entry["cipher"]))
-                sender_key = f"{corps_abbr} {corps_own_cipher}"
-            else:
-                sender_key = corps_abbr
+            corps_cipher = corps_resolved_cipher.get(corps_abbr, short_cipher)
+            sender_key = f"{corps_abbr} {corps_cipher}"
             unit_abbr_map[sender_key] = corps_abbr
         elif abbreviation:
             sender_key = f"{abbreviation} {short_cipher}"
