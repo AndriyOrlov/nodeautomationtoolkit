@@ -616,14 +616,16 @@ def _build_sender_key(closed_code: str, abbreviation: str, corps_col: str, corps
         if corps_entry:
             c_abbr = str(corps_entry.get("abbreviation") or corps_entry.get("abbr") or corps_abbr).strip()
             if c_abbr:
-                if re.search(r"\bА\s*\d{4}\b", c_abbr, re.IGNORECASE) or corps_cipher.casefold() in c_abbr.casefold():
+                if re.search(r"\bА\s*\d{4}\b", c_abbr, re.IGNORECASE) or (corps_cipher and corps_cipher.casefold() in c_abbr.casefold()):
                     sender_key = c_abbr
-                else:
+                elif corps_cipher:
                     sender_key = f"{c_abbr} {corps_cipher}"
+                else:
+                    sender_key = c_abbr
             else:
-                sender_key = f"{corps_abbr} {corps_cipher}"
+                sender_key = f"{corps_abbr} {corps_cipher}".strip() if corps_cipher else corps_abbr
         else:
-            sender_key = f"{corps_abbr} {corps_cipher}"
+            sender_key = f"{corps_abbr} {corps_cipher}".strip() if corps_cipher else corps_abbr
         return sender_key, corps_abbr
 
     abbr = str(abbreviation).strip()
@@ -809,9 +811,8 @@ def map_military_units(
                 if corps_entry:
                     corps_resolved_cipher[corps_abbr] = _short_closed_code(str(corps_entry["cipher"]))
                 else:
-                    # Якщо корпус не має окремого рядка — використовуємо шифр першої бригади
-                    unit_cipher = str(mapped_val.get("cipher") or mapped_val.get("closed_name") or "")
-                    corps_resolved_cipher[corps_abbr] = _short_closed_code(unit_cipher)
+                    # Якщо корпус не має окремого рядка — не підставляємо шифр підпорядкованої частини!
+                    corps_resolved_cipher[corps_abbr] = ""
 
     # ── Прохід 2: компілюємо патерни з єдиним sender_key ─────────────────────
     for open_name, mapped_val in mapping_dict.items():
