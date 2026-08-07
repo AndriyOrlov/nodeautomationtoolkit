@@ -276,6 +276,9 @@ _MILITARY_TYPO_DICTIONARY = [
     (re.compile(r"\bгірськоштурмов\w*\b", re.IGNORECASE), "гірсько-штурмової"),
     (re.compile(r"\bдесантно\s+штурмов\w*\b", re.IGNORECASE), "десантно-штурмової"),
     (re.compile(r"\bдесантноштурмов\w*\b", re.IGNORECASE), "десантно-штурмової"),
+    # Описи для центр та рекрутинг
+    (re.compile(r"\bцнтр[уомівіаб]?\b", re.IGNORECASE), "центру"),
+    (re.compile(r"\bрекрутинг[уомівіаб]?\b", re.IGNORECASE), "рекрутингу"),
 ]
 
 
@@ -308,6 +311,10 @@ def _stem_ukrainian_word(word: str) -> str:
         return "артил"
     if w.startswith("баталь") or w.startswith("батальон"):
         return "бат"
+    if w.startswith("центр") or w.startswith("цнтр"):
+        return "центр"
+    if w.startswith("рекрутинг") or w.startswith("рекрут"):
+        return "рекрут"
 
     endings = [
         "ий", "ій", "ого", "ому", "им", "ім", "ої", "ою", "их", "ними", "ими",
@@ -374,6 +381,12 @@ def _extract_army_corps(text: str) -> str | None:
         num = match.group(1)
         return f"{num} армійський корпус"
     return None
+
+
+_RECRUITING_CENTER_9_RE = re.compile(
+    r"\b9[-\s]*(?:-?й|-?го|-?му|-?м)?\s*(?:центр\w*|цнтр\w*)\s+рекрутинг\w*\b",
+    re.IGNORECASE | re.UNICODE,
+)
 
 
 _TCK_KEYWORDS_RE = re.compile(
@@ -481,8 +494,11 @@ def _normalize_region_to_nominative(region_raw: str) -> str:
 
 
 def _extract_tck_sender(text: str) -> str | None:
-    """Розпізнає ТЦК та СП і ЗАВЖДИ виводить ОБЛАСНИЙ рівень (напр: Броварський РТЦК Київської області -> Київський ОТЦК та СП)."""
-    if not _TCK_KEYWORDS_RE.search(text):
+    """Розпізнає ТЦК та СП, а також 9 Центр рекрутингу (тимчасове правило розсилання на ТЦК)."""
+    is_tck = bool(_TCK_KEYWORDS_RE.search(text))
+    is_recruiting_9 = bool(_RECRUITING_CENTER_9_RE.search(text))
+
+    if not (is_tck or is_recruiting_9):
         return None
 
     # Пріоритет 1: Якщо у тексті прямо вказано назву області (напр: Київської області)
