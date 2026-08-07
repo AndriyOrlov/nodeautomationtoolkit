@@ -255,6 +255,40 @@ def _normalize_unit_name(name: str) -> str:
     return re.sub(r"\s+", " ", name.strip().casefold())
 
 
+_MILITARY_TYPO_DICTIONARY = [
+    # Описи та оддруки у слові "бригада / бригади"
+    (re.compile(r"\bбригд[иаоеемся]?\b", re.IGNORECASE), "бригади"),
+    (re.compile(r"\bбригаи\b", re.IGNORECASE), "бригади"),
+    (re.compile(r"\bбриади?\b", re.IGNORECASE), "бригади"),
+    (re.compile(r"\bбргади?\b", re.IGNORECASE), "бригади"),
+    # Описи у слові "механізована / механізованої"
+    (re.compile(r"\bмеханизоаної\b", re.IGNORECASE), "механізованої"),
+    (re.compile(r"\bмеханізоаної\b", re.IGNORECASE), "механізованої"),
+    (re.compile(r"\bмеханизованої\b", re.IGNORECASE), "механізованої"),
+    (re.compile(r"\bмеханизована\b", re.IGNORECASE), "механізована"),
+    # Описи у слові "військова частина / в/ч"
+    (re.compile(r"\bв\s*\\\s*ч\b", re.IGNORECASE), "в/ч"),
+    (re.compile(r"\bв\.?\s*ч\.?\b", re.IGNORECASE), "в/ч"),
+    (re.compile(r"\bзв[’'`ʻ]?язку\b", re.IGNORECASE), "зв'язку"),
+    (re.compile(r"\bсвязку\b", re.IGNORECASE), "зв'язку"),
+    # Описи у типі бригад
+    (re.compile(r"\bгірсько\s+штурмов\w*\b", re.IGNORECASE), "гірсько-штурмової"),
+    (re.compile(r"\bгірськоштурмов\w*\b", re.IGNORECASE), "гірсько-штурмової"),
+    (re.compile(r"\bдесантно\s+штурмов\w*\b", re.IGNORECASE), "десантно-штурмової"),
+    (re.compile(r"\bдесантноштурмов\w*\b", re.IGNORECASE), "десантно-штурмової"),
+]
+
+
+def _fix_military_typos(text: str) -> str:
+    """Нормалізує поширені описки та варіанти військових найменувань перед обробкою."""
+    if not text:
+        return ""
+    res = text
+    for pat, repl in _MILITARY_TYPO_DICTIONARY:
+        res = pat.sub(repl, res)
+    return res
+
+
 def _stem_ukrainian_word(word: str) -> str:
     """Видаляє закінчення українських відмінків та стійка до оддруків (БРИГДИ, БРИГАДИ, МЕХАНИЗОВАНОЇ)."""
     w = word.casefold().strip()
@@ -633,7 +667,19 @@ def map_military_units(
             "summary": "Порожній текст наказу",
         }
 
-    mapping_dict = mapping or {}
+    text = _fix_military_typos(text)
+    mapping_raw = mapping or {}
+    mapping_dict = {}
+    for k, v in mapping_raw.items():
+        clean_k = _fix_military_typos(str(k))
+        if isinstance(v, dict):
+            clean_v = dict(v)
+            if "open_name" in clean_v:
+                clean_v["open_name"] = _fix_military_typos(str(clean_v["open_name"]))
+            mapping_dict[clean_k] = clean_v
+        else:
+            mapping_dict[clean_k] = v
+
     lines = [line.rstrip() for line in text.splitlines()]
 
     # ── Визначаємо шапку наказу ────────────────────────────────────────────────
@@ -1314,7 +1360,19 @@ def generate_decision_order(
             "summary": "Порожній текст наказу",
         }
 
-    mapping_dict = mapping or {}
+    text = _fix_military_typos(text)
+    mapping_raw = mapping or {}
+    mapping_dict = {}
+    for k, v in mapping_raw.items():
+        clean_k = _fix_military_typos(str(k))
+        if isinstance(v, dict):
+            clean_v = dict(v)
+            if "open_name" in clean_v:
+                clean_v["open_name"] = _fix_military_typos(str(clean_v["open_name"]))
+            mapping_dict[clean_k] = clean_v
+        else:
+            mapping_dict[clean_k] = v
+
     lines = [line.rstrip() for line in text.splitlines()]
 
     # 1. Знаходимо початок змістовної частини (після шапки наказу)
