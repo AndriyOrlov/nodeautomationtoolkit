@@ -512,20 +512,28 @@ def map_military_units(
 
         if corps_col:
             corps_abbr = _extract_corps_abbr(corps_col)
-            unit_abbr_map[closed_code] = corps_abbr
-            unit_abbr_map[corps_col] = corps_abbr
-        elif abbreviation:
-            unit_abbr_map[closed_code] = abbreviation
+            # Перевіряємо чи сам корпус має свій закритий шифр в таблиці
+            corps_entry = mapping_dict.get(corps_col) or mapping_dict.get(corps_abbr)
+            if isinstance(corps_entry, dict) and corps_entry.get("cipher"):
+                corps_cipher = _short_closed_code(str(corps_entry["cipher"]))
+                sender_key = f"{corps_abbr} {corps_cipher}"
+            else:
+                sender_key = corps_abbr
+            unit_abbr_map[sender_key] = corps_abbr
+        else:
+            sender_key = closed_code
+            if abbreviation:
+                unit_abbr_map[sender_key] = abbreviation
 
         if fuzzy_match:
             pattern = _build_unit_fuzzy_pattern(open_name)
         else:
             pattern = re.compile(re.escape(open_name), re.IGNORECASE)
 
-        unit_patterns.append((open_name, closed_code, corps_col, pattern))
+        unit_patterns.append((open_name, closed_code, corps_col, sender_key, pattern))
         if abbreviation and abbreviation != open_name:
             abbr_pattern = _build_unit_fuzzy_pattern(abbreviation) if fuzzy_match else re.compile(re.escape(abbreviation), re.IGNORECASE)
-            unit_patterns.append((abbreviation, closed_code, corps_col, abbr_pattern))
+            unit_patterns.append((abbreviation, closed_code, corps_col, sender_key, abbr_pattern))
 
     # ── Парсимо тіло наказу у блоки (§-параграфи та пронумеровані пункти) ─────
     blocks = []
@@ -602,7 +610,7 @@ def map_military_units(
         matched_units_in_block: set[tuple[str, str]] = set()
 
         # 1. Зіставлення за патернами з колонок A (повна назва) та C (скорочення)
-        for open_name, closed_code, corps_col, pattern in unit_patterns:
+        for open_name, closed_code, corps_col, sender_key, pattern in unit_patterns:
             all_matches = pattern.findall(block_raw_text)
             if not all_matches:
                 continue
@@ -621,9 +629,7 @@ def map_military_units(
                     match_report_rows.append((open_name, found_form, closed_code, 1))
 
             block_replaced_lines = [pattern.sub(closed_code, ln) for ln in block_replaced_lines]
-            # Якщо колонка D (corps_col) вказана -> відправником є Корпус з D.
-            # Якщо колонка D порожня -> відправником є сама частина (не успадковує корпус з тексту)!
-            sender_key = closed_code
+            # Якщо частина у складі Корпусу -> отримувачем є сам Корпус (усі пункти об'єднуються у єдиний витяг)
             matched_units_in_block.add((sender_key, open_name))
 
         # 2. Якщо в таблиці немає відповідностей — перевіряємо ТЦК (районний/міський -> Область)
