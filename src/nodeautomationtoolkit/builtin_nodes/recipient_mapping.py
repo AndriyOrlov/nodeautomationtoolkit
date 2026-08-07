@@ -798,6 +798,10 @@ def map_military_units(
             or re.match(r"^\d+[\.\)]", clean)
             or "НАКАЗУЮ" in clean.upper()
             or "ПРИЗНАЧИТИ" in clean.upper()
+            or "НАПРАВИТИ" in clean.upper()
+            or "ВІДРЯДИТИ" in clean.upper()
+            or "ЗВІЛЬНИТИ" in clean.upper()
+            or "ВІЙСЬКОВОСЛУЖБОВЦІВ" in clean.upper()
         ):
             content_start_idx = idx
             break
@@ -909,9 +913,10 @@ def map_military_units(
             continue
 
         is_section_marker = clean.startswith("§") or (
-            ("Відповідно до" in clean or "Згідно з" in clean or clean.endswith(":"))
+            ("Відповідно до" in clean or "Згідно з" in clean or clean.endswith(":") or "ВІЙСЬКОВОСЛУЖБОВЦІВ" in clean.upper())
             and not re.match(r"^\d+[\.\d]*", clean)
             and not clean.startswith("Підстава")
+            and not clean.startswith("підстава")
         )
 
         is_new_item = (
@@ -1027,17 +1032,9 @@ def map_military_units(
         block_replaced_lines = list(block["lines"])
         matched_units_in_block: set[tuple[str, str]] = set()
 
-        # Якщо є активний заголовок розділу з ВЧ — пункти успадковують її, якщо у пункті немає явної вказівки переведення в ІНШУ ВЧ
+        # Якщо є активний заголовок розділу з ВЧ — пункти за замовчуванням мають її адресата
         if active_section_units:
-            match_item_kudy = re.search(
-                r"(?:направити\s+до|відрядити\s+до|у\s+розпорядження)\s+(?:військової\s+частини\s+)?([^\n\.,]+)",
-                block_raw_text,
-                re.IGNORECASE,
-            )
-            has_item_cipher = re.search(r"\bА\s*(\d{4})\b", block_raw_text, re.IGNORECASE)
-
-            if not match_item_kudy and not has_item_cipher:
-                matched_units_in_block = set(active_section_units)
+            matched_units_in_block = set(active_section_units)
 
         if not matched_units_in_block:
             # 1. Зіставлення за патернами з колонок A (повна назва) та C (скорочення)
@@ -1538,6 +1535,10 @@ def generate_decision_order(
             or re.match(r"^\d+[\.\)]", clean)
             or "НАКАЗУЮ" in clean.upper()
             or "ПРИЗНАЧИТИ" in clean.upper()
+            or "НАПРАВИТИ" in clean.upper()
+            or "ВІДРЯДИТИ" in clean.upper()
+            or "ЗВІЛЬНИТИ" in clean.upper()
+            or "ВІЙСЬКОВОСЛУЖБОВЦІВ" in clean.upper()
         ):
             content_start_idx = idx
             break
