@@ -578,11 +578,12 @@ def map_military_units(
     for closed_code, count in unit_counts.items():
         open_str = ", ".join(sorted(unit_open_names.get(closed_code, [])))
         entry = unit_data_map[closed_code]
-        p_labels = ", ".join(dict.fromkeys(item["label"] for item in entry["items"]))
+        raw_labels = [item.get("label", "").replace("Пункт ", "п. ") for item in entry["items"]]
+        p_labels = ", ".join(dict.fromkeys(l for l in raw_labels if l))
         table_rows.append((closed_code, open_str, p_labels, count))
 
     table = DataTable(
-        ("Закрита назва (ВЧ)", "Відкрита назва", "Пункти наказу", "Згадок"),
+        ("Закрита назва (ВЧ)", "Відкрита назва", "Номери пунктів витягу", "Кількість пунктів"),
         tuple(table_rows),
         "Розпізнані військові частини",
     )
@@ -603,8 +604,6 @@ def map_military_units(
         "match_report": match_report,
         "summary": summary,
     }
-
-
 
 
 @node(
@@ -637,7 +636,8 @@ def analyze_senders(
     for sender, data in units_map.items():
         if isinstance(data, dict) and "items" in data:
             items = [item["text"] for item in data["items"] if "text" in item]
-            p_labels = ", ".join(dict.fromkeys(item.get("label", "") for item in data["items"]))
+            raw_labels = [item.get("label", "").replace("Пункт ", "п. ") for item in data["items"]]
+            p_labels = ", ".join(dict.fromkeys(l for l in raw_labels if l))
         else:
             items = [str(data)]
             p_labels = "-"
@@ -645,9 +645,9 @@ def analyze_senders(
         table_rows.append((sender, p_labels, len(items)))
 
     table = DataTable(
-        ("Відправник / ВЧ", "Пункти наказу", "Кількість пунктів"),
+        ("Військова частина / Відправник", "Номери пунктів витягу", "Кількість пунктів"),
         tuple(table_rows),
-        "Аналіз відправників та пунктів",
+        "Аналіз відправників та пунктів витягу",
     )
     summary = f"Виявлено відправників: {len(sender_paragraphs)} · Опрацьовано пунктів: {sum(len(v) for v in sender_paragraphs.values())}"
     return {
@@ -668,6 +668,7 @@ def analyze_senders(
     type_id="builtin.order.split_by_senders",
     outputs={
         "blocks": "dict",
+        "table": "DataTable",
         "senders_count": "int",
         "summary": "str",
     },
@@ -681,6 +682,7 @@ def split_by_senders(
     res = map_military_units(text=text, mapping=mapping)
     units_map = res.get("unit_paragraphs", {})
     blocks: dict[str, str] = {}
+    table_rows = []
 
     for sender, data in units_map.items():
         header_text = header
@@ -688,14 +690,23 @@ def split_by_senders(
             header_text = "\n".join(data.get("header_lines", []))
 
         items_text = ""
+        p_labels = "-"
+        count = 0
         if isinstance(data, dict) and "items" in data:
             # Групуємо пункти під відповідними преамбулами/заголовками розділів (§ 1 або ЗВІЛЬНИТИ...)
             section_groups: dict[str, list[str]] = {}
+            raw_labels = []
             for item in data.get("items", []):
                 heading = item.get("parent_heading", "").strip()
                 item_text = item.get("text", "").strip()
+                label = item.get("label", "").replace("Пункт ", "п. ")
+                if label:
+                    raw_labels.append(label)
                 if item_text:
                     section_groups.setdefault(heading, []).append(item_text)
+
+            p_labels = ", ".join(dict.fromkeys(raw_labels))
+            count = len(data.get("items", []))
 
             body_sections = []
             for heading, item_texts in section_groups.items():
@@ -707,13 +718,21 @@ def split_by_senders(
             items_text = "\n\n".join(body_sections)
         elif isinstance(data, str):
             items_text = data
+            count = 1
 
         full_doc = f"{header_text}\n\n{items_text}".strip() if header_text else items_text.strip()
         blocks[sender] = full_doc
+        table_rows.append((sender, p_labels, count))
 
+    table = DataTable(
+        ("Військова частина (Адресат)", "Номери пунктів витягу", "Кількість пунктів"),
+        tuple(table_rows),
+        "Перелік відправників та пунктів витягу",
+    )
     summary = f"Створено витягів за відправниками: {len(blocks)}"
     return {
         "blocks": blocks,
+        "table": table,
         "senders_count": len(blocks),
         "summary": summary,
     }
