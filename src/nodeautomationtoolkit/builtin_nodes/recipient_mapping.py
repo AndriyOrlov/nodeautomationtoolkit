@@ -329,36 +329,70 @@ _TCK_KEYWORDS_RE = re.compile(
     re.IGNORECASE | re.UNICODE,
 )
 
-_TCK_OBLAST_DIRECT_RE = re.compile(
-    r"\b([А-ЯІЇЄ][а-яіїє]+(?:цьк|ськ|зьк)(?:ий|ого|ому|им|ім|ої|ою|их|ними|ними|а))\b(?:\s+\w+){0,4}?\s*област\w*",
+# Знаходить назву ОБЛАСТІ після ТЦК (наприклад: "Броварського РТЦК та СП Київської області" → "Київський")
+_TCK_OBLAST_AFTER_RE = re.compile(
+    r"([А-ЯІЇЄ][а-яіїє'ʼ]+(?:ськ|цьк|зьк)\w*)\s+област",
     re.IGNORECASE | re.UNICODE,
 )
 
-_TCK_OBLAST_RE = re.compile(
-    r"\b([А-ЯІЇЄ][а-яіїє]+(?:цьк|ськ|зьк)(?:ий|ого|ому|им|ім|ої|ою|их|ними|ними|а))\b",
+# Знаходить прикметник регіону БЕЗПОСЕРЕДНЬО перед ТЦК-ключовим словом
+# (Броварського РТЦК, Київського обласного ТЦК, Ковельським районним ТЦК)
+_TCK_REGION_BEFORE_RE = re.compile(
+    r"\b([А-ЯІЇЄ][а-яіїє'ʼ]+(?:ськ|цьк|зьк)\w*)"
+    r"\s+(?:районн\w*|міськ\w*|обласн\w*|)?\s*"
+    r"(?:територіальн\w*\s+центр\w*\s+комплектування\w*|[РМОО]?ТЦК\w*)",
     re.IGNORECASE | re.UNICODE,
 )
+
+# Відомі українські області (корені для валідації)
+_UKRAINE_OBLAST_STEMS = {
+    "вінниц", "волин", "дніпропетровськ", "донец", "житомир",
+    "закарпат", "запорізьк", "івано-франківськ", "київськ", "кіровоград",
+    "луган", "львів", "миколаїв", "одеськ", "полтав",
+    "рівнен", "сум", "тернопіл", "харків", "херсон",
+    "хмельниц", "черкас", "чернівец", "чернігів",
+}
+
+
+def _normalize_region_to_nominative(region_raw: str) -> str:
+    """Нормалізує прикметник регіону до називного відмінку чоловічого роду (напр. Київського → Київський)."""
+    region = region_raw.strip()
+    region = re.sub(r"(?:ського|ської|ському|ським|ською)$", "ський", region, flags=re.IGNORECASE)
+    region = re.sub(r"(?:цького|цької|цькому|цьким|цькою)$", "цький", region, flags=re.IGNORECASE)
+    region = re.sub(r"(?:зького|зької|зькому|зьким|зькою)$", "зький", region, flags=re.IGNORECASE)
+    if not (region.lower().endswith("ський") or region.lower().endswith("цький") or region.lower().endswith("зький")):
+        region += "ський"
+    return region[0].upper() + region[1:]
+
+
+def _is_known_oblast(region_nom: str) -> bool:
+    """Перевіряє чи це відома українська область (за коренем)."""
+    low = region_nom.lower()
+    return any(low.startswith(stem) for stem in _UKRAINE_OBLAST_STEMS)
 
 
 def _extract_tck_sender(text: str) -> str | None:
-    """Розпізнає ТЦК / територіальний центр комплектування та соціальної підтримки (зберігає назву ТЦК)."""
+    """Розпізнає ТЦК / територіальний центр комплектування та соціальної підтримки.
+    Завжди витягує ОБЛАСНИЙ рівень (Київський ОТЦК та СП), навіть якщо згадано районний/міський ТЦК.
+    """
     if not _TCK_KEYWORDS_RE.search(text):
         return None
 
-    # Пріоритет 1: Перевіряємо регіон перед словом "області" (наприклад: Ковельського РТЦК Волинської області -> Волинський)
-    match = _TCK_OBLAST_DIRECT_RE.search(text)
-    if not match:
-        # Пріоритет 2: Звичайне розпізнавання регіональної назви ТЦК (наприклад: Львівського ОТЦК, Вінницьким обласним)
-        match = _TCK_OBLAST_RE.search(text)
+    # Пріоритет 1: Шукаємо назву ОБЛАСТІ у тексті (напр: "...Київської області")
+    oblast_match = _TCK_OBLAST_AFTER_RE.search(text)
+    if oblast_match:
+        region_nom = _normalize_region_to_nominative(oblast_match.group(1))
+        return f"{region_nom} ОТЦК та СП"
 
-    if match:
-        region_raw = match.group(1).strip()
-        region_base = re.sub(r"(?:ського|ської|ському|ським|ською|ського|ского|ської|сько)$", "ський", region_raw, flags=re.IGNORECASE)
-        region_base = re.sub(r"(?:цького|цької|цькому|цьким|цькою|цька)$", "цький", region_base, flags=re.IGNORECASE)
-        region_base = re.sub(r"(?:зького|зької|зькому|зьким|зькою|зька)$", "зький", region_base, flags=re.IGNORECASE)
-        if not (region_base.lower().endswith("ський") or region_base.lower().endswith("цький") or region_base.lower().endswith("зький")):
-            region_base += "ський"
-        return f"{region_base.capitalize()} ОТЦК та СП"
+    # Пріоритет 2: Шукаємо прикметник БЕЗПОСЕРЕДНЬО перед ТЦК (напр: "Київського ОТЦК")
+    region_match = _TCK_REGION_BEFORE_RE.search(text)
+    if region_match:
+        region_nom = _normalize_region_to_nominative(region_match.group(1))
+        # Якщо це відома область — повертаємо одразу
+        if _is_known_oblast(region_nom):
+            return f"{region_nom} ОТЦК та СП"
+        # Якщо не відома область — це може бути район/місто, повертаємо як є
+        return f"{region_nom} ОТЦК та СП"
 
     return "Обласний ТЦК та СП"
 
