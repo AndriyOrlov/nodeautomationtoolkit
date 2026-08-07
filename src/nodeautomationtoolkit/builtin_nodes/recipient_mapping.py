@@ -516,7 +516,13 @@ def map_military_units(
 
         if corps_col:
             corps_abbr = _extract_corps_abbr(corps_col)
-            sender_key = f"{corps_abbr} {short_cipher}"
+            # Перевіряємо чи сам Корпус має власний закритий шифр в таблиці Excel
+            corps_entry = mapping_dict.get(corps_col) or mapping_dict.get(corps_abbr)
+            if isinstance(corps_entry, dict) and corps_entry.get("cipher"):
+                corps_own_cipher = _short_closed_code(str(corps_entry["cipher"]))
+                sender_key = f"{corps_abbr} {corps_own_cipher}"
+            else:
+                sender_key = corps_abbr
             unit_abbr_map[sender_key] = corps_abbr
         elif abbreviation:
             sender_key = f"{abbreviation} {short_cipher}"
