@@ -280,6 +280,9 @@ def _build_unit_fuzzy_pattern(open_name: str) -> re.Pattern:
     STOP_WORDS = {
         "та", "і", "й", "з", "зі", "із", "на", "в", "у", "до", "від", "по", "при", "за",
         "the", "of", "and", "а", "ім", "імені",
+        "командний", "командного", "командним", "командному", "пункт", "пункту", "пунктом", "пункті",
+        "передовий", "передового", "передовим", "передовому", "запасний", "запасного", "запасним", "запасному",
+        "зкп", "гкп", "ппу", "кп", "управління",
     }
 
     clean_name = re.sub(r"[^\w\s\d]", "'", open_name)
@@ -817,13 +820,21 @@ def map_military_units(
         if block["type"] != "item":
             continue
 
+        # Очищаємо варіанти префіксів командних пунктів для точного зіставлення
+        raw_text_clean = re.sub(
+            r"\b(?:передов\w*|запасн\w*|головн\w*|)?\s*"
+            r"(?:командн\w*\s+пункт\w*|пункт\w*\s+управління|ЗКП|ГКП|ППУ|КП)\s+",
+            "",
+            "\n".join(block["lines"]),
+            flags=re.IGNORECASE | re.UNICODE,
+        )
         block_raw_text = "\n".join(block["lines"])
         block_replaced_lines = list(block["lines"])
         matched_units_in_block: set[tuple[str, str]] = set()
 
         # 1. Зіставлення за патернами з колонок A (повна назва) та C (скорочення)
         for open_name, closed_code, corps_col, sender_key, pattern in unit_patterns:
-            all_matches = pattern.findall(block_raw_text)
+            all_matches = pattern.findall(block_raw_text) or pattern.findall(raw_text_clean)
             if not all_matches:
                 continue
 
