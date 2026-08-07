@@ -395,12 +395,12 @@ _TCK_KEYWORDS_RE = re.compile(
 )
 
 _TCK_OBLAST_EXPLICIT_RE = re.compile(
-    r"\b([А-ЯІЇЄ][а-яіїє'ʼ]+(?:ськ|цьк|зьк)\w*)\s+област",
+    r"\b([А-ЯІЇЄа-яіїє'ʼ-]+?(?:ськ|цьк|зьк)\w*)\s+област",
     re.IGNORECASE | re.UNICODE,
 )
 
 _TCK_REGION_BEFORE_RE = re.compile(
-    r"\b([А-ЯІЇЄ][а-яіїє'ʼ]+(?:ськ|цьк|зьк)\w*)"
+    r"\b([А-ЯІЇЄа-яіїє'ʼ-]+?(?:ськ|цьк|зьк)\w*)"
     r"\s+(?:районн\w*|міськ\w*|обласн\w*|)?\s*"
     r"(?:територіальн\w*\s+центр\w*\s+комплектування\w*|[РМОО]?ТЦК\w*)",
     re.IGNORECASE | re.UNICODE,
@@ -482,14 +482,18 @@ _UKRAINE_OBLAST_STEMS = {
 
 
 def _normalize_region_to_nominative(region_raw: str) -> str:
-    """Нормалізує прикметник регіону до називного відмінку чоловічого роду (напр. Київського → Київський)."""
-    region = region_raw.strip()
-    region = re.sub(r"(?:ського|ської|ському|ським|ською)$", "ський", region, flags=re.IGNORECASE)
-    region = re.sub(r"(?:цького|цької|цькому|цьким|цькою)$", "цький", region, flags=re.IGNORECASE)
-    region = re.sub(r"(?:зького|зької|зькому|зьким|зькою)$", "зький", region, flags=re.IGNORECASE)
-    if not (region.lower().endswith("ський") or region.lower().endswith("цький") or region.lower().endswith("зький")):
-        region += "ський"
-    return region[0].upper() + region[1:]
+    """Нормалізує прикметник регіону до називного відмінку чоловічого роду (напр. Камінь-Каширського → Камінь-Каширський)."""
+    parts = region_raw.strip().split("-")
+    norm_parts = []
+    for part in parts:
+        p = part.strip()
+        p = re.sub(r"(?:ського|ської|ському|ським|ською)$", "ський", p, flags=re.IGNORECASE)
+        p = re.sub(r"(?:цького|цької|цькому|цьким|цькою)$", "цький", p, flags=re.IGNORECASE)
+        p = re.sub(r"(?:зького|зької|зькому|зьким|зькою)$", "зький", p, flags=re.IGNORECASE)
+        if not (p.lower().endswith("ський") or p.lower().endswith("цький") or p.lower().endswith("зький") or p.lower().endswith("ін")):
+            p += "ський"
+        norm_parts.append(p[0].upper() + p[1:] if p else "")
+    return "-".join(norm_parts)
 
 
 
@@ -630,9 +634,7 @@ def _build_sender_key(closed_code: str, abbreviation: str, corps_col: str, corps
 
     abbr = str(abbreviation).strip()
     if not abbr or abbr.isdigit():
-        abbr = ""
-    if not abbr:
-        return short_cipher, ""
+        return short_cipher, short_cipher
 
     # Для ТЦК та СП — повертаємо скорочення як є
     if "ТЦК" in abbr.upper() or "ОТЦК" in abbr.upper() or "РТЦК" in abbr.upper() or "МТЦК" in abbr.upper():
@@ -836,7 +838,9 @@ def map_military_units(
             closed_code = str(mapped_val)
             abbreviation = ""
 
-        if isinstance(mapped_val, dict) and not abbreviation and not corps_col:
+        low_open = open_name.lower()
+        is_tck_entry = "тцк" in low_open or "територіальн" in low_open or "центр" in low_open
+        if isinstance(mapped_val, dict) and not abbreviation and not corps_col and not is_tck_entry:
             abbreviation = _auto_abbreviate_unit_name(open_name)
 
         short_cipher = _short_closed_code(closed_code)
@@ -857,7 +861,9 @@ def map_military_units(
 
 
 
-        if fuzzy_match:
+        low_open = open_name.lower()
+        is_tck_entry = "тцк" in low_open or "територіальн" in low_open or "центр" in low_open
+        if fuzzy_match or is_tck_entry:
             pattern = _build_unit_fuzzy_pattern(open_name)
         else:
             pattern = re.compile(re.escape(open_name), re.IGNORECASE)
@@ -960,7 +966,14 @@ def map_military_units(
                     m = pattern.search(kudy_text)
                     if m:
                         matched_str = m.group(0)
-                        target_name = corps_col if (corps_col and ("корпус" in matched_str.lower() or "ак" in matched_str.lower())) else open_name
+                        low_open = open_name.lower()
+                        is_tck_entry = "тцк" in low_open or "територіальн" in low_open or "центр" in low_open
+                        if is_tck_entry:
+                            target_name = sender_key
+                        elif corps_col and ("корпус" in matched_str.lower() or "ак" in matched_str.lower()):
+                            target_name = corps_col
+                        else:
+                            target_name = open_name
                         sec_units.add((sender_key, target_name))
                 if not sec_units:
                     sec_tck = _extract_tck_sender(kudy_text)
@@ -973,7 +986,14 @@ def map_military_units(
                     m = pattern.search(section_raw_text)
                     if m:
                         matched_str = m.group(0)
-                        target_name = corps_col if (corps_col and ("корпус" in matched_str.lower() or "ак" in matched_str.lower())) else open_name
+                        low_open = open_name.lower()
+                        is_tck_entry = "тцк" in low_open or "територіальн" in low_open or "центр" in low_open
+                        if is_tck_entry:
+                            target_name = sender_key
+                        elif corps_col and ("корпус" in matched_str.lower() or "ак" in matched_str.lower()):
+                            target_name = corps_col
+                        else:
+                            target_name = open_name
                         sec_units.add((sender_key, target_name))
                         break
                 if not sec_units:
@@ -1045,7 +1065,14 @@ def map_military_units(
 
                 block_replaced_lines = [pattern.sub(closed_code, ln) for ln in block_replaced_lines]
                 matched_str = str(all_matches[0]) if all_matches else ""
-                target_name = corps_col if (corps_col and ("корпус" in matched_str.lower() or "ак" in matched_str.lower())) else open_name
+                low_open = open_name.lower()
+                is_tck_entry = "тцк" in low_open or "територіальн" in low_open or "центр" in low_open
+                if is_tck_entry:
+                    target_name = sender_key
+                elif corps_col and ("корпус" in matched_str.lower() or "ак" in matched_str.lower()):
+                    target_name = corps_col
+                else:
+                    target_name = open_name
                 matched_units_in_block.add((sender_key, target_name))
 
 
