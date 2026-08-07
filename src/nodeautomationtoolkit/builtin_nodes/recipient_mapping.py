@@ -1107,6 +1107,17 @@ def map_military_units(
                 c_key = canonical_key_map.get(corps_name) or canonical_key_map.get(corps_abbr) or corps_abbr
                 item_destinations.add((c_key, corps_name))
 
+        # Якщо у тексті пункту є вказівка на внутрішнє переміщення ("цього самого батальйону", "цієї самої бригади", "цього ж полку") — цільова ВЧ = вихідна ВЧ
+        has_internal_ref = bool(
+            re.search(
+                r"\b(?:цього|цієї|того)\s+(?:самого|самої|ж)\b",
+                block_raw_text,
+                re.IGNORECASE,
+            )
+        )
+        if has_internal_ref:
+            item_destinations = set()
+
         # Формуємо підсумковий набір отримувачів пункту (Джерело ЗВІДКИ + Призначення КУДИ)
         base_source = active_section_units or ({header_zvidky_unit} if header_zvidky_unit else set())
         matched_units_in_block = set(base_source) | item_destinations
