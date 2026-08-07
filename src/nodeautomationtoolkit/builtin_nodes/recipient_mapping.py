@@ -496,6 +496,8 @@ def map_military_units(
     unit_patterns: list[tuple[str, str, str, re.Pattern]] = []
     unit_abbr_map: dict[str, str] = {}
 
+    canonical_key_map: dict[str, str] = {}
+
     for open_name, mapped_val in mapping_dict.items():
         corps_col = ""
         if isinstance(mapped_val, dict):
@@ -510,20 +512,28 @@ def map_military_units(
             closed_code = str(mapped_val)
             abbreviation = ""
 
+        short_cipher = _short_closed_code(closed_code)
+
         if corps_col:
             corps_abbr = _extract_corps_abbr(corps_col)
-            # Перевіряємо чи сам корпус має свій закритий шифр в таблиці
-            corps_entry = mapping_dict.get(corps_col) or mapping_dict.get(corps_abbr)
-            if isinstance(corps_entry, dict) and corps_entry.get("cipher"):
-                corps_cipher = _short_closed_code(str(corps_entry["cipher"]))
-                sender_key = f"{corps_abbr} {corps_cipher}"
-            else:
-                sender_key = corps_abbr
+            sender_key = f"{corps_abbr} {short_cipher}"
             unit_abbr_map[sender_key] = corps_abbr
+        elif abbreviation:
+            sender_key = f"{abbreviation} {short_cipher}"
+            unit_abbr_map[sender_key] = abbreviation
         else:
-            sender_key = closed_code
-            if abbreviation:
-                unit_abbr_map[sender_key] = abbreviation
+            sender_key = short_cipher
+
+        canonical_key_map[open_name] = sender_key
+        canonical_key_map[closed_code] = sender_key
+        canonical_key_map[f"в/ч {short_cipher}"] = sender_key
+        canonical_key_map[short_cipher] = sender_key
+        if abbreviation:
+            canonical_key_map[abbreviation] = sender_key
+        if corps_col:
+            corps_abbr = _extract_corps_abbr(corps_col)
+            canonical_key_map[corps_col] = sender_key
+            canonical_key_map[corps_abbr] = sender_key
 
         if fuzzy_match:
             pattern = _build_unit_fuzzy_pattern(open_name)
@@ -642,7 +652,9 @@ def map_military_units(
         if not matched_units_in_block:
             corps_name = _extract_army_corps(block_raw_text)
             if corps_name:
-                matched_units_in_block = {(corps_name, corps_name)}
+                corps_abbr = _extract_corps_abbr(corps_name)
+                c_key = canonical_key_map.get(corps_name) or canonical_key_map.get(corps_abbr) or corps_abbr
+                matched_units_in_block = {(c_key, corps_name)}
 
         if matched_units_in_block:
             full_item_text = "\n".join(block_replaced_lines).strip()

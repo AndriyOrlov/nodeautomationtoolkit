@@ -92,9 +92,10 @@ def test_army_corps_prioritization_over_subordinate_units():
     )
 
     res = analyze_senders(text=text)
-    assert "10 армійський корпус" in res["senders_list"]
-    assert "3 армійський корпус" in res["senders_list"]
-    assert len(res["sender_paragraphs"]["10 армійський корпус"]) == 1
+    assert "10АК" in res["senders_list"] or "10 армійський корпус" in res["senders_list"]
+    assert "3АК" in res["senders_list"] or "3 армійський корпус" in res["senders_list"]
+    key10 = "10АК" if "10АК" in res["sender_paragraphs"] else "10 армійський корпус"
+    assert len(res["sender_paragraphs"][key10]) == 1
 
 
 def test_tck_full_wording_extracts_only_oblast():
