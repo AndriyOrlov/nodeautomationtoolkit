@@ -255,54 +255,54 @@ def _normalize_unit_name(name: str) -> str:
     return re.sub(r"\s+", " ", name.strip().casefold())
 
 
+def _stem_ukrainian_word(word: str) -> str:
+    """Видаляє закінчення українських відмінків для гнучкого пошуку (полк/полку/полком, окремий/окремої)."""
+    w = word.casefold().strip()
+    w = re.sub(r"ін$", "он", w)
+    w = re.sub(r"іна$", "она", w)
+    endings = [
+        "ий", "ій", "ого", "ому", "им", "ім", "ої", "ою", "их", "ними", "ими",
+        "ами", "ям", "ями", "ях", "ах", "ом", "ем", "єм", "ів", "ев", "єв",
+        "и", "і", "а", "я", "у", "ю", "е", "є", "о"
+    ]
+    for end in sorted(endings, key=len, reverse=True):
+        if w.endswith(end) and len(w) - len(end) >= 2:
+            w = w[:-len(end)]
+            break
+    return w
+
+
 def _build_unit_fuzzy_pattern(open_name: str) -> re.Pattern:
     """
-    Будує нечіткий Regex-патерн для пошуку ВЧ у тексті наказу.
-
-    Принцип — мінімальна сигнатура з числа + перших 3 літер кожного значущого слова:
-
-        "160 окрема механізована бригада"
-        → [160] [окр...] [мех...] [бриг...]
-        → патерн:  160.{0,80}окр\\w*.{0,80}мех\\w*.{0,80}бриг\\w*
-
-    Це знаходить ВЧ у БУДЬ-ЯКОМУ відмінку та з будь-якими вставками між словами
-    (артиклі, дефіси, порядкові числівники тощо).
-
-    Прийменники (та, і, з, на, в, у, до, від) — пропускаються, не входять до сигнатури.
-    Абревіатури (ОМБр, ОТЦК) — беруть перші 3 літери так само.
-    Числа — обов'язковий якір, точний збіг.
-
-    Ручний короткий запис теж підтримується:
-        "160 окр"   → знайде "160 окремої механізованої бригади"
-        "167 мех"   → знайде "167 окрема механізована бригада"
+    Будує нечіткий регулярний вираз для пошуку назви військової частини у будь-яких відмінках.
+    Враховує відмінювання (полк, полку, полком, бригади, бригадою), апострофи та розширену відстань між словами.
     """
     STOP_WORDS = {
         "та", "і", "й", "з", "зі", "із", "на", "в", "у", "до", "від", "по", "при", "за",
-        "the", "of", "and", "а",
+        "the", "of", "and", "а", "ім", "імені",
     }
 
-    tokens = re.split(r"[\s\-–—,]+", open_name.strip())
+    clean_name = re.sub(r"[^\w\s\d]", "'", open_name)
+    tokens = [t for t in re.split(r"[^\w\d]+", clean_name) if t]
 
-    # Виокремлюємо значущі частини: числа + перші 3 букви слів
     anchors: list[str] = []
     for token in tokens:
         if not token:
             continue
-        # Числа → точний збіг (якір)
         if re.match(r"^\d+$", token):
             anchors.append(re.escape(token))
-        # Прийменники / сполучники → пропускаємо
         elif token.casefold() in STOP_WORDS:
             continue
-        # Будь-яке слово (в т.ч. абревіатуру) → беремо перші 3 символи + \w*
         elif len(token) >= 2:
-            prefix = re.escape(token[:3])
-            anchors.append(prefix + r"\w*")
+            stem = _stem_ukrainian_word(token)
+            escaped_stem = re.escape(stem).replace("\\'", r"[^\w\s]?").replace("'", r"[^\w\s]?")
+            pattern_part = escaped_stem + r"\w*"
+            anchors.append(pattern_part)
 
     if not anchors:
         return re.compile(re.escape(open_name), re.IGNORECASE)
 
-    pattern_str = r".{0,80}?".join(anchors)
+    pattern_str = r".{0,180}?".join(anchors)
     return re.compile(pattern_str, re.IGNORECASE | re.UNICODE | re.DOTALL)
 
 
@@ -329,30 +329,38 @@ _TCK_KEYWORDS_RE = re.compile(
     re.IGNORECASE | re.UNICODE,
 )
 
+_TCK_OBLAST_DIRECT_RE = re.compile(
+    r"\b([А-ЯІЇЄ][а-яіїє]+(?:цьк|ськ|зьк)(?:ий|ого|ому|им|ім|ої|ою|их|ними|ними|а))\b(?:\s+\w+){0,4}?\s*област\w*",
+    re.IGNORECASE | re.UNICODE,
+)
+
 _TCK_OBLAST_RE = re.compile(
-    r"([А-ЯІЇЄa-ua-z]+сько\w*)\s+област\w*",
+    r"\b([А-ЯІЇЄ][а-яіїє]+(?:цьк|ськ|зьк)(?:ий|ого|ому|им|ім|ої|ою|их|ними|ними|а))\b",
     re.IGNORECASE | re.UNICODE,
 )
 
 
 def _extract_tck_sender(text: str) -> str | None:
-    """
-    Розпізнає ТЦК / територіальний центр комплектування та соціальної підтримки.
-    Якщо у тексті згадується районний або міський ТЦК (наприклад, 'Ковельського районного територіального
-    центру комплектування та соціальної підтримки Волинської області'), район/місто відкидаються,
-    і у витяги успадковується ЛИШЕ ОБЛАСТЬ ('Волинський ОТЦК та СП').
-    """
+    """Розпізнає ТЦК / територіальний центр комплектування та соціальної підтримки (зберігає назву ТЦК)."""
     if not _TCK_KEYWORDS_RE.search(text):
         return None
 
-    match = _TCK_OBLAST_RE.search(text)
+    # Пріоритет 1: Перевіряємо регіон перед словом "області" (наприклад: Ковельського РТЦК Волинської області -> Волинський)
+    match = _TCK_OBLAST_DIRECT_RE.search(text)
+    if not match:
+        # Пріоритет 2: Звичайне розпізнавання регіональної назви ТЦК (наприклад: Львівського ОТЦК, Вінницьким обласним)
+        match = _TCK_OBLAST_RE.search(text)
+
     if match:
         region_raw = match.group(1).strip()
-        region_base = re.sub(r"ської$", "ський", region_raw, flags=re.IGNORECASE)
-        region_base = re.sub(r"скої$", "ський", region_base, flags=re.IGNORECASE)
-        region_base = re.sub(r"ої$", "ий", region_base, flags=re.IGNORECASE)
+        region_base = re.sub(r"(?:ського|ської|ському|ським|ською|ського|ского|ської|сько)$", "ський", region_raw, flags=re.IGNORECASE)
+        region_base = re.sub(r"(?:цького|цької|цькому|цьким|цькою|цька)$", "цький", region_base, flags=re.IGNORECASE)
+        region_base = re.sub(r"(?:зького|зької|зькому|зьким|зькою|зька)$", "зький", region_base, flags=re.IGNORECASE)
+        if not (region_base.lower().endswith("ський") or region_base.lower().endswith("цький") or region_base.lower().endswith("зький")):
+            region_base += "ський"
+        return f"{region_base.capitalize()} ОТЦК та СП"
 
-        return f"{region_base} ОТЦК та СП"
+    return "Обласний ТЦК та СП"
 
 def _short_closed_code(code: str, abbreviation: str = "") -> str:
     """Формує коротке закрите найменування частини з скороченням (напр. '15омбр А1500' або '10АК А1000')."""
