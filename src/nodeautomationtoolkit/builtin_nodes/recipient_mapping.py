@@ -953,7 +953,7 @@ def map_military_units(
             section_raw_text = "\n".join(block["lines"])
             sec_units: set[tuple[str, str]] = set()
 
-            # 1. Шукаємо напрямок КУДИ у шапці розділу ('призначити до...', 'направити до...')
+            # Шукаємо ЗВІДКИ (вихідна ВЧ) та КУДИ (цільова ВЧ) у шапці розділу
             match_kudy = re.search(
                 r"(?:призначити\s+до|направити\s+до|відрядити\s+до|у\s+розпорядження)\s+([^:\n\.]+)",
                 section_raw_text,
@@ -961,6 +961,8 @@ def map_military_units(
             )
             kudy_text = match_kudy.group(1).strip() if match_kudy else ""
 
+            # 1. Знаходимо ВЧ напрямку КУДИ
+            kudy_units: set[tuple[str, str]] = set()
             if kudy_text and "цього саг" not in kudy_text.lower() and "цієї саг" not in kudy_text.lower() and "того ж" not in kudy_text.lower():
                 for open_name, closed_code, corps_col, sender_key, pattern in unit_patterns:
                     m = pattern.search(kudy_text)
@@ -968,49 +970,28 @@ def map_military_units(
                         matched_str = m.group(0)
                         low_open = open_name.lower()
                         is_tck_entry = "тцк" in low_open or "територіальн" in low_open or "центр" in low_open
-                        if is_tck_entry:
-                            target_name = sender_key
-                        elif corps_col and ("корпус" in matched_str.lower() or "ак" in matched_str.lower()):
-                            target_name = corps_col
-                        else:
-                            target_name = open_name
-                        sec_units.add((sender_key, target_name))
-                if not sec_units:
+                        target_name = sender_key if is_tck_entry else (corps_col if (corps_col and ("корпус" in matched_str.lower() or "ак" in matched_str.lower())) else open_name)
+                        kudy_units.add((sender_key, target_name))
+                if not kudy_units:
                     sec_tck = _extract_tck_sender(kudy_text)
                     if sec_tck:
-                        sec_units.add((sec_tck, "ТЦК та СП"))
+                        kudy_units.add((sec_tck, "ТЦК та СП"))
 
-            # 2. Якщо окремого напрямку КУДИ немає або вказано 'до цього самого полку' — шукаємо по всій шапці
-            if not sec_units:
-                for open_name, closed_code, corps_col, sender_key, pattern in unit_patterns:
-                    m = pattern.search(section_raw_text)
-                    if m:
-                        matched_str = m.group(0)
-                        low_open = open_name.lower()
-                        is_tck_entry = "тцк" in low_open or "територіальн" in low_open or "центр" in low_open
-                        if is_tck_entry:
-                            target_name = sender_key
-                        elif corps_col and ("корпус" in matched_str.lower() or "ак" in matched_str.lower()):
-                            target_name = corps_col
-                        else:
-                            target_name = open_name
-                        sec_units.add((sender_key, target_name))
-                        break
-                if not sec_units:
-                    sec_ciphers = re.findall(r"\bА\s*(\d{4})\b", section_raw_text, re.IGNORECASE)
-                    for digit in sec_ciphers:
-                        if digit in cipher_digits_map:
-                            sec_units.add(cipher_digits_map[digit])
-                if not sec_units:
-                    sec_tck = _extract_tck_sender(section_raw_text)
-                    if sec_tck:
-                        sec_units.add((sec_tck, "ТЦК та СП"))
-                if not sec_units:
-                    sec_corps = _extract_army_corps(section_raw_text)
-                    if sec_corps:
-                        sec_corps_abbr = _extract_corps_abbr(sec_corps)
-                        c_key = canonical_key_map.get(sec_corps) or canonical_key_map.get(sec_corps_abbr) or sec_corps_abbr
-                        sec_units.add((c_key, sec_corps))
+            # 2. Знаходимо ВЧ напрямку ЗВІДКИ (або загальну ВЧ у шапці)
+            zvidky_units: set[tuple[str, str]] = set()
+            for open_name, closed_code, corps_col, sender_key, pattern in unit_patterns:
+                m = pattern.search(section_raw_text)
+                if m:
+                    matched_str = m.group(0)
+                    low_open = open_name.lower()
+                    is_tck_entry = "тцк" in low_open or "територіальн" in low_open or "центр" in low_open
+                    target_name = sender_key if is_tck_entry else (corps_col if (corps_col and ("корпус" in matched_str.lower() or "ак" in matched_str.lower())) else open_name)
+                    zvidky_units.add((sender_key, target_name))
+                    break
+
+            sec_units = (zvidky_units | kudy_units)
+            if len(sec_units) > 2:
+                sec_units = set(list(sec_units)[:2])
 
             if sec_units:
                 active_section_units = sec_units
@@ -1078,8 +1059,8 @@ def map_military_units(
 
 
 
-        if matched_units_in_block and len(matched_units_in_block) > 1:
-            matched_units_in_block = {next(iter(matched_units_in_block))}
+        if matched_units_in_block and len(matched_units_in_block) > 2:
+            matched_units_in_block = set(list(matched_units_in_block)[:2])
 
         # 2. Пошук за цифровими шифрами в/ч (наприклад: військової частини А2424 або А 2828)
         if not matched_units_in_block:
