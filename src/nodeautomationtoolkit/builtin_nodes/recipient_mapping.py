@@ -354,7 +354,61 @@ def _extract_tck_sender(text: str) -> str | None:
 
         return f"{region_base} ОТЦК та СП"
 
-    return "Обласний ТЦК та СП"
+def _short_closed_code(code: str) -> str:
+    """Очищає назву закритої частини до короткого шифру (напр. 'в/ч А1500' -> 'А1500')."""
+    clean = str(code).strip()
+    if clean.lower().startswith("в/ч "):
+        return clean[4:].strip()
+    if clean.lower().startswith("в/ч"):
+        return clean[3:].strip()
+    return clean
+
+
+def _format_item_numbers_range(labels: list[str]) -> str:
+    """Форматує перелік пунктів з використанням дефісів для послідовних діапазонів (напр. 1,3,4-7,9,10,11-25)."""
+    nums = set()
+    non_nums = []
+
+    for label in labels:
+        clean = str(label).strip()
+        matches = re.findall(r"\b\d+\b", clean)
+        if matches:
+            nums.add(int(matches[0]))
+        elif clean:
+            non_nums.append(clean)
+
+    sorted_nums = sorted(nums)
+    if not sorted_nums:
+        return ",".join(non_nums) if non_nums else "-"
+
+    ranges = []
+    start = sorted_nums[0]
+    end = sorted_nums[0]
+
+    for n in sorted_nums[1:]:
+        if n == end + 1:
+            end = n
+        else:
+            if end > start + 1:
+                ranges.append(f"{start}-{end}")
+            elif end == start + 1:
+                ranges.append(f"{start},{end}")
+            else:
+                ranges.append(f"{start}")
+            start = n
+            end = n
+
+    if end > start + 1:
+        ranges.append(f"{start}-{end}")
+    elif end == start + 1:
+        ranges.append(f"{start},{end}")
+    else:
+        ranges.append(f"{start}")
+
+    result_str = ",".join(ranges)
+    if non_nums:
+        result_str += "," + ",".join(non_nums)
+    return result_str
 
 
 
@@ -578,9 +632,10 @@ def map_military_units(
     for closed_code, count in unit_counts.items():
         open_str = ", ".join(sorted(unit_open_names.get(closed_code, [])))
         entry = unit_data_map[closed_code]
-        raw_labels = [item.get("label", "").replace("Пункт ", "п. ") for item in entry["items"]]
-        p_labels = ", ".join(dict.fromkeys(l for l in raw_labels if l))
-        table_rows.append((closed_code, open_str, p_labels, count))
+        raw_labels = [item.get("label", "") for item in entry["items"]]
+        range_labels = _format_item_numbers_range(raw_labels)
+        short_code = _short_closed_code(closed_code)
+        table_rows.append((short_code, open_str, range_labels, count))
 
     table = DataTable(
         ("Закрита назва (ВЧ)", "Відкрита назва", "Номери пунктів витягу", "Кількість пунктів"),
@@ -634,15 +689,16 @@ def analyze_senders(
     table_rows = []
 
     for sender, data in units_map.items():
+        short_sender = _short_closed_code(sender)
         if isinstance(data, dict) and "items" in data:
             items = [item["text"] for item in data["items"] if "text" in item]
-            raw_labels = [item.get("label", "").replace("Пункт ", "п. ") for item in data["items"]]
-            p_labels = ", ".join(dict.fromkeys(l for l in raw_labels if l))
+            raw_labels = [item.get("label", "") for item in data["items"]]
+            range_labels = _format_item_numbers_range(raw_labels)
         else:
             items = [str(data)]
-            p_labels = "-"
+            range_labels = "-"
         sender_paragraphs[sender] = items
-        table_rows.append((sender, p_labels, len(items)))
+        table_rows.append((short_sender, range_labels, len(items)))
 
     table = DataTable(
         ("Військова частина / Відправник", "Номери пунктів витягу", "Кількість пунктів"),
@@ -689,8 +745,9 @@ def split_by_senders(
         if not header_text and isinstance(data, dict):
             header_text = "\n".join(data.get("header_lines", []))
 
+        short_sender = _short_closed_code(sender)
         items_text = ""
-        p_labels = "-"
+        range_labels = "-"
         count = 0
         if isinstance(data, dict) and "items" in data:
             # Групуємо пункти під відповідними преамбулами/заголовками розділів (§ 1 або ЗВІЛЬНИТИ...)
@@ -699,13 +756,13 @@ def split_by_senders(
             for item in data.get("items", []):
                 heading = item.get("parent_heading", "").strip()
                 item_text = item.get("text", "").strip()
-                label = item.get("label", "").replace("Пункт ", "п. ")
+                label = item.get("label", "")
                 if label:
                     raw_labels.append(label)
                 if item_text:
                     section_groups.setdefault(heading, []).append(item_text)
 
-            p_labels = ", ".join(dict.fromkeys(raw_labels))
+            range_labels = _format_item_numbers_range(raw_labels)
             count = len(data.get("items", []))
 
             body_sections = []
@@ -722,7 +779,7 @@ def split_by_senders(
 
         full_doc = f"{header_text}\n\n{items_text}".strip() if header_text else items_text.strip()
         blocks[sender] = full_doc
-        table_rows.append((sender, p_labels, count))
+        table_rows.append((short_sender, range_labels, count))
 
     table = DataTable(
         ("Військова частина (Адресат)", "Номери пунктів витягу", "Кількість пунктів"),
@@ -1328,3 +1385,108 @@ def assemble_from_blocks(
 
     summary = f"Зібрано наказ з {len(block_texts)} блоків"
     return {"text": final_text, "count": len(block_texts), "summary": summary}
+
+
+@node(
+    name="Розрахунок витягів з наказів",
+    category="Наказ",
+    description=(
+        "Автоматично розраховує перелік витягів з наказу для кожної військової частини (ВЧ). "
+        "Приймає наказ та таблицю частин, формує закриті коди частин (А1500, А1400) та виводить готовий список пунктів із дефісами (напр. А1500 1,3  А1400 1-6)."
+    ),
+    type_id="builtin.order.calculate_extracts",
+    execution_inputs=("exec",),
+    execution_outputs=("then",),
+    outputs={
+        "summary_text": "str",
+        "table": "DataTable",
+        "extracts": "dict",
+        "count": "int",
+        "summary": "str",
+    },
+)
+def calculate_order_extracts(
+    text: str = "",
+    mapping: dict | None = None,
+    header: str = "",
+    rules: dict | list | str | None = None,
+) -> dict:
+    """Розпізнає частини у наказі та формує точний розрахунок витягів у форматі А1500 1,3 А1400 1-6."""
+    if not text.strip():
+        return {
+            "summary_text": "",
+            "table": DataTable(("Закрита ВЧ", "Відкрита назва", "Номери пунктів витягу", "Кількість пунктів"), ()),
+            "extracts": {},
+            "count": 0,
+            "summary": "Порожній текст наказу",
+        }
+
+    body_text = text
+    if rules:
+        body_text, _ = _apply_custom_rules(body_text, rules)
+
+    res = map_military_units(text=body_text, mapping=mapping)
+    units_map = res.get("unit_paragraphs", {})
+    extracts_dict: dict[str, str] = {}
+    table_rows = []
+    summary_lines = []
+
+    for sender, data in units_map.items():
+        header_text = header
+        if not header_text and isinstance(data, dict):
+            header_text = "\n".join(data.get("header_lines", []))
+
+        short_sender = _short_closed_code(sender)
+        open_names = ", ".join(sorted(res.get("unit_open_names", {}).get(sender, []))) if "unit_open_names" in res else ""
+
+        items_text = ""
+        range_labels = "-"
+        count = 0
+
+        if isinstance(data, dict) and "items" in data:
+            section_groups: dict[str, list[str]] = {}
+            raw_labels = []
+            for item in data.get("items", []):
+                heading = item.get("parent_heading", "").strip()
+                item_text = item.get("text", "").strip()
+                label = item.get("label", "")
+                if label:
+                    raw_labels.append(label)
+                if item_text:
+                    section_groups.setdefault(heading, []).append(item_text)
+
+            range_labels = _format_item_numbers_range(raw_labels)
+            count = len(data.get("items", []))
+
+            body_sections = []
+            for heading, item_texts in section_groups.items():
+                if heading:
+                    body_sections.append(f"{heading}\n\n" + "\n\n".join(item_texts))
+                else:
+                    body_sections.append("\n\n".join(item_texts))
+
+            items_text = "\n\n".join(body_sections)
+        elif isinstance(data, str):
+            items_text = data
+            count = 1
+
+        full_doc = f"{header_text}\n\n{items_text}".strip() if header_text else items_text.strip()
+        extracts_dict[short_sender] = full_doc
+        table_rows.append((short_sender, open_names or "—", range_labels, count))
+        summary_lines.append(f"{short_sender} {range_labels}")
+
+    table = DataTable(
+        ("Закрита ВЧ (Адресат)", "Відкрита назва ВЧ", "Номери пунктів витягу", "Кількість пунктів"),
+        tuple(table_rows),
+        "Розрахунок витягів з наказів",
+    )
+    summary_text = "\n".join(summary_lines)
+    summary = f"Розраховано витягів: {len(extracts_dict)}"
+
+    return {
+        "summary_text": summary_text,
+        "table": table,
+        "extracts": extracts_dict,
+        "count": len(extracts_dict),
+        "summary": summary,
+    }
