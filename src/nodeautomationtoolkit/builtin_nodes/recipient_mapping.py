@@ -362,6 +362,15 @@ def _extract_tck_sender(text: str) -> str | None:
 
     return "Обласний ТЦК та СП"
 
+def _extract_corps_abbr(corps_str: str) -> str:
+    """Витягує скорочену назву корпусу (напр. '25 армійський корпус' -> '25АК')."""
+    clean = str(corps_str).strip()
+    match = re.search(r"\b(\d{1,3})\s*(?:армійськ\w*\s+корпус\w*|АК)\b", clean, re.IGNORECASE)
+    if match:
+        return f"{match.group(1)}АК"
+    return clean
+
+
 def _short_closed_code(code: str, abbreviation: str = "") -> str:
     """Формує коротке закрите найменування частини з скороченням (напр. '15омбр А1500' або '10АК А1000')."""
     clean_code = str(code).strip()
@@ -501,10 +510,12 @@ def map_military_units(
             closed_code = str(mapped_val)
             abbreviation = ""
 
-        if abbreviation:
+        if corps_col:
+            corps_abbr = _extract_corps_abbr(corps_col)
+            unit_abbr_map[closed_code] = corps_abbr
+            unit_abbr_map[corps_col] = corps_abbr
+        elif abbreviation:
             unit_abbr_map[closed_code] = abbreviation
-            if corps_col:
-                unit_abbr_map[corps_col] = abbreviation
 
         if fuzzy_match:
             pattern = _build_unit_fuzzy_pattern(open_name)
@@ -612,7 +623,7 @@ def map_military_units(
             block_replaced_lines = [pattern.sub(closed_code, ln) for ln in block_replaced_lines]
             # Якщо колонка D (corps_col) вказана -> відправником є Корпус з D.
             # Якщо колонка D порожня -> відправником є сама частина (не успадковує корпус з тексту)!
-            sender_key = corps_col if corps_col else closed_code
+            sender_key = closed_code
             matched_units_in_block.add((sender_key, open_name))
 
         # 2. Якщо в таблиці немає відповідностей — перевіряємо ТЦК (районний/міський -> Область)
