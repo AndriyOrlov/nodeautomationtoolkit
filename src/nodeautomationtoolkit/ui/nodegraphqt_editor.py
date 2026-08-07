@@ -872,6 +872,28 @@ class NodeGraphQtEditor(QWidget):
                 self.message.emit(f"Додано ноду з швидкого пошуку: {node.name()}")
             self.graph_changed.emit()
 
+    def undo(self) -> None:
+        focus = QApplication.focusWidget()
+        if isinstance(focus, (QLineEdit, QPlainTextEdit, QTextEdit)):
+            if hasattr(focus, "undo"):
+                focus.undo()
+            return
+        if hasattr(self.graph, "undo_stack") and self.graph.undo_stack():
+            self.graph.undo_stack().undo()
+            self.graph_changed.emit()
+            self.message.emit("Скасовано останню дію (Undo)")
+
+    def redo(self) -> None:
+        focus = QApplication.focusWidget()
+        if isinstance(focus, (QLineEdit, QPlainTextEdit, QTextEdit)):
+            if hasattr(focus, "redo"):
+                focus.redo()
+            return
+        if hasattr(self.graph, "undo_stack") and self.graph.undo_stack():
+            self.graph.undo_stack().redo()
+            self.graph_changed.emit()
+            self.message.emit("Повторено скасовану дію (Redo)")
+
     def delete_selected_nodes(self) -> None:
         nodes = self.graph.selected_nodes()
         if not nodes:
@@ -1004,9 +1026,17 @@ class NodeGraphQtEditor(QWidget):
             return
         for node_id in result.order:
             if node_id in result.values:
-                self._show_node_outputs(node_id, result.values[node_id])
+                try:
+                    if self.graph.get_node_by_id(node_id) is not None:
+                        self._show_node_outputs(node_id, result.values[node_id])
+                except Exception:
+                    pass
         for node_id, error in result.errors.items():
-            self._set_node_state(node_id, "error", "ПОМИЛКА", error)
+            try:
+                if self.graph.get_node_by_id(node_id) is not None:
+                    self._set_node_state(node_id, "error", "ПОМИЛКА", error)
+            except Exception:
+                pass
         if result.errors:
             self.live_status.setText(f"LIVE · помилок: {len(result.errors)}")
             self.live_status.setStyleSheet("color: #f87171; padding: 0 8px;")

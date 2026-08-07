@@ -120,6 +120,8 @@ class MainWindow(QMainWindow):
             ("Відкрити", QKeySequence.StandardKey.Open, self.open_graph),
             ("Зберегти", QKeySequence.StandardKey.Save, self.save_graph),
             ("Зберегти як", QKeySequence.StandardKey.SaveAs, self.save_graph_as),
+            ("↩ Скасувати", QKeySequence.StandardKey.Undo, self.undo),
+            ("↪ Повторити", QKeySequence.StandardKey.Redo, self.redo),
             ("Запустити", "F5", self.run_graph),
             ("🔍 Аналіз відправників", "Ctrl+Shift+S", self.open_order_senders_preset),
             ("🔍 Аналіз наказу", "Ctrl+Shift+O", self.open_order_analysis),
@@ -210,6 +212,14 @@ class MainWindow(QMainWindow):
         QSettings().setValue("workspace/dirty", False)
         self._update_title()
         self.log.clear()
+
+    def undo(self) -> None:
+        if hasattr(self.blueprint, "undo"):
+            self.blueprint.undo()
+
+    def redo(self) -> None:
+        if hasattr(self.blueprint, "redo"):
+            self.blueprint.redo()
 
     def open_word_smoke_graph(self) -> None:
         if not self._confirm_discard():

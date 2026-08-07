@@ -686,9 +686,25 @@ def split_by_senders(
         header_text = header
         if not header_text and isinstance(data, dict):
             header_text = "\n".join(data.get("header_lines", []))
+
         items_text = ""
         if isinstance(data, dict) and "items" in data:
-            items_text = "\n\n".join(item.get("text", "") for item in data["items"])
+            # Групуємо пункти під відповідними преамбулами/заголовками розділів (§ 1 або ЗВІЛЬНИТИ...)
+            section_groups: dict[str, list[str]] = {}
+            for item in data.get("items", []):
+                heading = item.get("parent_heading", "").strip()
+                item_text = item.get("text", "").strip()
+                if item_text:
+                    section_groups.setdefault(heading, []).append(item_text)
+
+            body_sections = []
+            for heading, item_texts in section_groups.items():
+                if heading:
+                    body_sections.append(f"{heading}\n\n" + "\n\n".join(item_texts))
+                else:
+                    body_sections.append("\n\n".join(item_texts))
+
+            items_text = "\n\n".join(body_sections)
         elif isinstance(data, str):
             items_text = data
 
