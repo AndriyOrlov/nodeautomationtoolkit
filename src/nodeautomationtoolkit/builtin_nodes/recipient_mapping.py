@@ -354,14 +354,20 @@ def _extract_tck_sender(text: str) -> str | None:
 
         return f"{region_base} ОТЦК та СП"
 
-def _short_closed_code(code: str) -> str:
-    """Очищає назву закритої частини до короткого шифру (напр. 'в/ч А1500' -> 'А1500')."""
-    clean = str(code).strip()
-    if clean.lower().startswith("в/ч "):
-        return clean[4:].strip()
-    if clean.lower().startswith("в/ч"):
-        return clean[3:].strip()
-    return clean
+def _short_closed_code(code: str, abbreviation: str = "") -> str:
+    """Формує коротке закрите найменування частини з скороченням (напр. '15омбр А1500' або '10АК А1000')."""
+    clean_code = str(code).strip()
+    if clean_code.lower().startswith("в/ч "):
+        cipher = clean_code[4:].strip()
+    elif clean_code.lower().startswith("в/ч"):
+        cipher = clean_code[3:].strip()
+    else:
+        cipher = clean_code
+
+    abbr = str(abbreviation).strip()
+    if abbr and abbr != cipher and abbr.casefold() not in cipher.casefold():
+        return f"{abbr} {cipher}"
+    return cipher
 
 
 def _format_item_numbers_range(labels: list[str]) -> str:
@@ -471,6 +477,8 @@ def map_military_units(
 
     # ── Компілюємо патерни для кожної ВЧ ──────────────────────────────────────
     unit_patterns: list[tuple[str, str, str, re.Pattern]] = []
+    unit_abbr_map: dict[str, str] = {}
+
     for open_name, mapped_val in mapping_dict.items():
         corps_col = ""
         if isinstance(mapped_val, dict):
@@ -484,6 +492,11 @@ def map_military_units(
         else:
             closed_code = str(mapped_val)
             abbreviation = ""
+
+        if abbreviation:
+            unit_abbr_map[closed_code] = abbreviation
+            if corps_col:
+                unit_abbr_map[corps_col] = abbreviation
 
         if fuzzy_match:
             pattern = _build_unit_fuzzy_pattern(open_name)
@@ -613,10 +626,13 @@ def map_military_units(
                     closed_code,
                     {
                         "unit_code": closed_code,
+                        "abbreviation": unit_abbr_map.get(closed_code, ""),
                         "header_lines": header_lines,
                         "items": [],
                     },
                 )
+                if "abbreviation" not in unit_entry or not unit_entry["abbreviation"]:
+                    unit_entry["abbreviation"] = unit_abbr_map.get(closed_code, "")
                 unit_entry["items"].append(
                     {
                         "parent_heading": block["heading"],
@@ -634,7 +650,8 @@ def map_military_units(
         entry = unit_data_map[closed_code]
         raw_labels = [item.get("label", "") for item in entry["items"]]
         range_labels = _format_item_numbers_range(raw_labels)
-        short_code = _short_closed_code(closed_code)
+        abbr = unit_abbr_map.get(closed_code, "")
+        short_code = _short_closed_code(closed_code, abbreviation=abbr)
         table_rows.append((short_code, open_str, range_labels, count))
 
     table = DataTable(
@@ -656,6 +673,7 @@ def map_military_units(
         "units_table": table,
         "units_list": list(unit_counts.keys()),
         "unit_paragraphs": unit_data_map,
+        "unit_abbr_map": unit_abbr_map,
         "match_report": match_report,
         "summary": summary,
     }
@@ -685,11 +703,13 @@ def analyze_senders(
     """Аналізує відкритий наказ і формує відповідність [Відправник / ВЧ] -> [Список пунктів]."""
     res = map_military_units(text=text, mapping=mapping, default_prefix=default_sender_prefix)
     units_map = res.get("unit_paragraphs", {})
+    abbr_map = res.get("unit_abbr_map", {})
     sender_paragraphs: dict[str, list[str]] = {}
     table_rows = []
 
     for sender, data in units_map.items():
-        short_sender = _short_closed_code(sender)
+        abbr = data.get("abbreviation", "") if isinstance(data, dict) else abbr_map.get(sender, "")
+        short_sender = _short_closed_code(sender, abbreviation=abbr)
         if isinstance(data, dict) and "items" in data:
             items = [item["text"] for item in data["items"] if "text" in item]
             raw_labels = [item.get("label", "") for item in data["items"]]
@@ -737,6 +757,7 @@ def split_by_senders(
     """Розділяє відкритий наказ на окремі блоки / витяги за відправниками."""
     res = map_military_units(text=text, mapping=mapping)
     units_map = res.get("unit_paragraphs", {})
+    abbr_map = res.get("unit_abbr_map", {})
     blocks: dict[str, str] = {}
     table_rows = []
 
@@ -745,7 +766,8 @@ def split_by_senders(
         if not header_text and isinstance(data, dict):
             header_text = "\n".join(data.get("header_lines", []))
 
-        short_sender = _short_closed_code(sender)
+        abbr = data.get("abbreviation", "") if isinstance(data, dict) else abbr_map.get(sender, "")
+        short_sender = _short_closed_code(sender, abbreviation=abbr)
         items_text = ""
         range_labels = "-"
         count = 0
@@ -1427,6 +1449,7 @@ def calculate_order_extracts(
 
     res = map_military_units(text=body_text, mapping=mapping)
     units_map = res.get("unit_paragraphs", {})
+    abbr_map = res.get("unit_abbr_map", {})
     extracts_dict: dict[str, str] = {}
     table_rows = []
     summary_lines = []
@@ -1436,7 +1459,8 @@ def calculate_order_extracts(
         if not header_text and isinstance(data, dict):
             header_text = "\n".join(data.get("header_lines", []))
 
-        short_sender = _short_closed_code(sender)
+        abbr = data.get("abbreviation", "") if isinstance(data, dict) else abbr_map.get(sender, "")
+        short_sender = _short_closed_code(sender, abbreviation=abbr)
         open_names = ", ".join(sorted(res.get("unit_open_names", {}).get(sender, []))) if "unit_open_names" in res else ""
 
         items_text = ""
