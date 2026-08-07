@@ -371,6 +371,20 @@ def _extract_corps_abbr(corps_str: str) -> str:
     return clean
 
 
+def _normalize_key(raw_k: str, canonical_map: dict[str, str] | None = None) -> str:
+    k = str(raw_k).strip()
+    cmap = canonical_map or {}
+    if k in cmap:
+        return cmap[k]
+    short_k = _short_closed_code(k)
+    if short_k in cmap:
+        return cmap[short_k]
+    c_abbr = _extract_corps_abbr(k)
+    if c_abbr in cmap:
+        return cmap[c_abbr]
+    return k
+
+
 def _short_closed_code(code: str, abbreviation: str = "") -> str:
     """Формує коротке закрите найменування частини з скороченням (напр. '15омбр А1500' або '10АК А1000')."""
     clean_code = str(code).strip()
@@ -541,6 +555,13 @@ def map_military_units(
             canonical_key_map[corps_col] = sender_key
             canonical_key_map[corps_abbr] = sender_key
 
+        for variant in [open_name, closed_code, f"в/ч {short_cipher}", short_cipher, abbreviation, corps_col]:
+            if variant:
+                canonical_key_map[variant] = sender_key
+                if corps_col:
+                    corps_abbr = _extract_corps_abbr(corps_col)
+                    canonical_key_map[corps_abbr] = sender_key
+
         if fuzzy_match:
             pattern = _build_unit_fuzzy_pattern(open_name)
         else:
@@ -550,6 +571,14 @@ def map_military_units(
         if abbreviation and abbreviation != open_name:
             abbr_pattern = _build_unit_fuzzy_pattern(abbreviation) if fuzzy_match else re.compile(re.escape(abbreviation), re.IGNORECASE)
             unit_patterns.append((abbreviation, closed_code, corps_col, sender_key, abbr_pattern))
+
+        if closed_code and closed_code != open_name:
+            code_pattern = _build_unit_fuzzy_pattern(closed_code) if fuzzy_match else re.compile(re.escape(closed_code), re.IGNORECASE)
+            unit_patterns.append((closed_code, closed_code, corps_col, sender_key, code_pattern))
+
+        if short_cipher and short_cipher != open_name and short_cipher != closed_code:
+            short_pattern = re.compile(r"\b" + re.escape(short_cipher) + r"\b", re.IGNORECASE)
+            unit_patterns.append((short_cipher, closed_code, corps_col, sender_key, short_pattern))
 
     # ── Парсимо тіло наказу у блоки (§-параграфи та пронумеровані пункти) ─────
     blocks = []
@@ -664,18 +693,19 @@ def map_military_units(
 
         if matched_units_in_block:
             full_item_text = "\n".join(block_replaced_lines).strip()
-            for closed_code, open_name in matched_units_in_block:
+            for raw_code, open_name in matched_units_in_block:
+                norm_code = _normalize_key(raw_code, canonical_key_map)
                 unit_entry = unit_data_map.setdefault(
-                    closed_code,
+                    norm_code,
                     {
-                        "unit_code": closed_code,
-                        "abbreviation": unit_abbr_map.get(closed_code, ""),
+                        "unit_code": norm_code,
+                        "abbreviation": unit_abbr_map.get(norm_code, ""),
                         "header_lines": header_lines,
                         "items": [],
                     },
                 )
                 if "abbreviation" not in unit_entry or not unit_entry["abbreviation"]:
-                    unit_entry["abbreviation"] = unit_abbr_map.get(closed_code, "")
+                    unit_entry["abbreviation"] = unit_abbr_map.get(norm_code, "")
                 unit_entry["items"].append(
                     {
                         "parent_heading": block["heading"],
@@ -683,8 +713,8 @@ def map_military_units(
                         "text": full_item_text,
                     }
                 )
-                unit_counts[closed_code] = unit_counts.get(closed_code, 0) + 1
-                unit_open_names.setdefault(closed_code, set()).add(open_name)
+                unit_counts[norm_code] = unit_counts.get(norm_code, 0) + 1
+                unit_open_names.setdefault(norm_code, set()).add(open_name)
 
     # ── Будуємо вихідні таблиці ────────────────────────────────────────────────
     table_rows = []
