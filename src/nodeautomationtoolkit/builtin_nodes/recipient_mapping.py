@@ -585,7 +585,7 @@ def _auto_abbreviate_unit_name(open_name: str) -> str:
 
 
 def _short_closed_code(code: str, abbreviation: str = "") -> str:
-    """Формує коротке закрите найменування частини з скороченням (напр. '15омбр А1500' або '10АК А1000')."""
+    """Формує коротке закрите найменування частини або ТЦК (усуває дублювання довгих назв ТЦК)."""
     clean_code = str(code).strip()
     if clean_code.lower().startswith("в/ч "):
         cipher = clean_code[4:].strip()
@@ -595,6 +595,17 @@ def _short_closed_code(code: str, abbreviation: str = "") -> str:
         cipher = clean_code
 
     abbr = str(abbreviation).strip()
+
+    # Для ТЦК та СП — повертаємо лаконічну назву (напр. 'Київський ОТЦК та СП') без дублювання довгої назви
+    if "ТЦК" in abbr.upper() or "ТЦК" in cipher.upper() or "ТЕРИТОРІАЛЬН" in cipher.upper() or "ЦЕНТЕР" in cipher.upper() or "ЦЕНТР" in cipher.upper():
+        if abbr:
+            return abbr
+        reg = re.search(r"\b([А-ЯІЇЄ][а-яіїє'ʼ]+(?:ськ|цьк|зьк)\w*)\b", cipher, re.IGNORECASE)
+        if reg:
+            reg_nom = _normalize_region_to_nominative(reg.group(1))
+            return f"{reg_nom} ОТЦК та СП"
+        return "Обласний ТЦК та СП"
+
     if abbr and abbr != cipher and abbr.casefold() not in cipher.casefold():
         return f"{abbr} {cipher}"
     return cipher
