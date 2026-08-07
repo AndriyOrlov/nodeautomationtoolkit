@@ -1074,8 +1074,12 @@ def map_military_units(
                 else:
                     target_name = open_name
                 matched_units_in_block.add((sender_key, target_name))
+                break  # 1 ПУНКТ НАКАЗУ НАЛЕЖИТЬ МАКСИМУМ 1 ОДНОМУ АДРЕСАТУ!
 
 
+
+        if matched_units_in_block and len(matched_units_in_block) > 1:
+            matched_units_in_block = {next(iter(matched_units_in_block))}
 
         # 2. Пошук за цифровими шифрами в/ч (наприклад: військової частини А2424 або А 2828)
         if not matched_units_in_block:
