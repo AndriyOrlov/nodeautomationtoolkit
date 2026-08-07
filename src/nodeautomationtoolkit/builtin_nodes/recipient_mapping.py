@@ -821,7 +821,9 @@ def analyze_senders(
     table_rows = []
 
     for sender, data in units_map.items():
-        abbr = data.get("abbreviation", "") if isinstance(data, dict) else abbr_map.get(sender, "")
+        abbr = data.get("abbreviation", "") if isinstance(data, dict) else ""
+        if not abbr:
+            abbr = abbr_map.get(sender, "")
         short_sender = _short_closed_code(sender, abbreviation=abbr)
         if isinstance(data, dict) and "items" in data:
             items = [item["text"] for item in data["items"] if "text" in item]
@@ -879,7 +881,9 @@ def split_by_senders(
         if not header_text and isinstance(data, dict):
             header_text = "\n".join(data.get("header_lines", []))
 
-        abbr = data.get("abbreviation", "") if isinstance(data, dict) else abbr_map.get(sender, "")
+        abbr = data.get("abbreviation", "") if isinstance(data, dict) else ""
+        if not abbr:
+            abbr = abbr_map.get(sender, "")
         short_sender = _short_closed_code(sender, abbreviation=abbr)
         items_text = ""
         range_labels = "-"
@@ -1572,7 +1576,9 @@ def calculate_order_extracts(
         if not header_text and isinstance(data, dict):
             header_text = "\n".join(data.get("header_lines", []))
 
-        abbr = data.get("abbreviation", "") if isinstance(data, dict) else abbr_map.get(sender, "")
+        abbr = data.get("abbreviation", "") if isinstance(data, dict) else ""
+        if not abbr:
+            abbr = abbr_map.get(sender, "")
         short_sender = _short_closed_code(sender, abbreviation=abbr)
         open_names = ", ".join(sorted(res.get("unit_open_names", {}).get(sender, []))) if "unit_open_names" in res else ""
 
