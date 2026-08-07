@@ -723,6 +723,21 @@ def _format_item_numbers_range(labels: list[str]) -> str:
 
 
 
+def _get_item_main_text(lines: list[str]) -> str:
+    """
+    Витягує тільки основний абзац пункту (до опису року народження 'р.н.' або 'Підстава').
+    Рядки з р.н., РНОКПП та Підстава повністю ігноруються при визначенні ВЧ для витягів.
+    """
+    main_lines = []
+    for line in lines:
+        clean = line.strip()
+        low = clean.lower()
+        if "р.н." in low or "р. н." in low or "року народження" in low or clean.startswith("Підстава") or clean.startswith("підстава"):
+            break
+        main_lines.append(line)
+    return "\n".join(main_lines) if main_lines else "\n".join(lines)
+
+
 @node(
     name="Картування та пошук військових частин",
     category="Наказ",
@@ -1008,7 +1023,7 @@ def map_military_units(
             "\n".join(block["lines"]),
             flags=re.IGNORECASE | re.UNICODE,
         )
-        block_raw_text = "\n".join(block["lines"])
+        block_raw_text = _get_item_main_text(block["lines"])
         block_replaced_lines = list(block["lines"])
         matched_units_in_block: set[tuple[str, str]] = set()
 
