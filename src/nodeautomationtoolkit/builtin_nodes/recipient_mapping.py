@@ -576,12 +576,14 @@ def _auto_abbreviate_unit_name(open_name: str) -> str:
         type_abbr = "оібр"
     elif "автомобільн" in low or "оаб" in low:
         type_abbr = "оаб"
+    elif "центр рекрутинг" in low or "цр" in low:
+        type_abbr = "ЦР"
     elif "батальйон" in low:
-        type_abbr = "об"
+        type_abbr = "ОБ"
 
     if num_str and type_abbr:
         return f"{num_str}{type_abbr}"
-    return num_str or clean
+    return clean
 
 
 def _find_corps_entry(corps_col_val: str, corps_abbr_val: str, mapping_dict: dict) -> dict | None:
@@ -625,6 +627,8 @@ def _build_sender_key(closed_code: str, abbreviation: str, corps_col: str, corps
         return sender_key, corps_abbr
 
     abbr = str(abbreviation).strip()
+    if not abbr or abbr.isdigit():
+        abbr = ""
     if not abbr:
         return short_cipher, ""
 
@@ -964,6 +968,7 @@ def map_military_units(
                 for open_name, closed_code, corps_col, sender_key, pattern in unit_patterns:
                     if pattern.search(section_raw_text):
                         sec_units.add((sender_key, open_name))
+                        break
                 if not sec_units:
                     sec_ciphers = re.findall(r"\bА\s*(\d{4})\b", section_raw_text, re.IGNORECASE)
                     for digit in sec_ciphers:
