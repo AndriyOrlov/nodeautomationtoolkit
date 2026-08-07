@@ -1031,12 +1031,22 @@ def parse_to_blocks(text: str = "") -> dict:
     lines = [line.rstrip() for line in text.splitlines()]
     blocks = []
 
-    # 1. Знаходимо шапку наказу (до першого § або пункту або "НАКАЗУЮ")
+    order_action_keywords = (
+        "НАКАЗУЮ", "ПРИЗНАЧИТИ", "ЗВІЛЬНИТИ", "УКЛАСТИ", "ПРОДОВЖИТИ",
+        "ПРИСВОЇТИ", "ОГОЛОСИТИ", "ПРИЙНЯТИ", "ЗАРАХУВАТИ", "ВВАЖАТИ",
+        "НАПРАВИТИ", "ВІДРЯДИТИ", "ВИКЛЮЧИТИ", "ІМЕНУВАТИ", "СКАСУВАТИ", "ПОНОВИТИ"
+    )
+
+    # 1. Знаходимо шапку наказу (до першого § або пункту або дієслова-команди)
     content_start_idx = len(lines)
     header_lines = []
     for idx, line in enumerate(lines):
         clean = line.strip()
-        if clean.startswith("§") or re.match(r"^\d+[\.\)]", clean) or "НАКАЗУЮ" in clean.upper() or "ПРИЗНАЧИТИ" in clean.upper():
+        if (
+            clean.startswith("§")
+            or re.match(r"^\d+[\.\)]", clean)
+            or any(kw in clean.upper() for kw in order_action_keywords)
+        ):
             content_start_idx = idx
             break
         if clean:
