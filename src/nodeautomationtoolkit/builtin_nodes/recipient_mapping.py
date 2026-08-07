@@ -999,28 +999,41 @@ def map_military_units(
         block_replaced_lines = list(block["lines"])
         matched_units_in_block: set[tuple[str, str]] = set()
 
-        # 1. Зіставлення за патернами з колонок A (повна назва) та C (скорочення)
-        for open_name, closed_code, corps_col, sender_key, pattern in unit_patterns:
-            all_matches = pattern.findall(block_raw_text) or pattern.findall(raw_text_clean)
-            if not all_matches:
-                continue
+        # Якщо є активний заголовок розділу з ВЧ — пункти успадковують її, якщо у пункті немає явної вказівки переведення в ІНШУ ВЧ
+        if active_section_units:
+            match_item_kudy = re.search(
+                r"(?:направити\s+до|відрядити\s+до|у\s+розпорядження)\s+(?:військової\s+частини\s+)?([^\n\.,]+)",
+                block_raw_text,
+                re.IGNORECASE,
+            )
+            has_item_cipher = re.search(r"\bА\s*(\d{4})\b", block_raw_text, re.IGNORECASE)
 
-            for found_form in set(str(m) if isinstance(m, str) else str(m[0]) for m in all_matches):
-                existing = next(
-                    (r for r in match_report_rows if r[0] == open_name and r[1] == found_form),
-                    None,
-                )
-                if existing:
-                    idx = match_report_rows.index(existing)
-                    match_report_rows[idx] = (
-                        existing[0], existing[1], existing[2], existing[3] + 1
+            if not match_item_kudy and not has_item_cipher:
+                matched_units_in_block = set(active_section_units)
+
+        if not matched_units_in_block:
+            # 1. Зіставлення за патернами з колонок A (повна назва) та C (скорочення)
+            for open_name, closed_code, corps_col, sender_key, pattern in unit_patterns:
+                all_matches = pattern.findall(block_raw_text) or pattern.findall(raw_text_clean)
+                if not all_matches:
+                    continue
+
+                for found_form in set(str(m) if isinstance(m, str) else str(m[0]) for m in all_matches):
+                    existing = next(
+                        (r for r in match_report_rows if r[0] == open_name and r[1] == found_form),
+                        None,
                     )
-                else:
-                    match_report_rows.append((open_name, found_form, closed_code, 1))
+                    if existing:
+                        idx = match_report_rows.index(existing)
+                        match_report_rows[idx] = (
+                            existing[0], existing[1], existing[2], existing[3] + 1
+                        )
+                    else:
+                        match_report_rows.append((open_name, found_form, closed_code, 1))
 
-            block_replaced_lines = [pattern.sub(closed_code, ln) for ln in block_replaced_lines]
-            # Якщо частина у складі Корпусу -> отримувачем є сам Корпус (усі пункти об'єднуються у єдиний витяг)
-            matched_units_in_block.add((sender_key, open_name))
+                block_replaced_lines = [pattern.sub(closed_code, ln) for ln in block_replaced_lines]
+                # Якщо частина у складі Корпусу -> отримувачем є сам Корпус (усі пункти об'єднуються у єдиний витяг)
+                matched_units_in_block.add((sender_key, open_name))
 
 
 
