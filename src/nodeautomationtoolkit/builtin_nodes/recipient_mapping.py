@@ -536,7 +536,7 @@ def map_military_units(
                 corps_own_cipher = _short_closed_code(str(corps_entry["cipher"]))
                 sender_key = f"{corps_abbr} {corps_own_cipher}"
             else:
-                sender_key = f"{corps_abbr} {short_cipher}"
+                sender_key = corps_abbr
             unit_abbr_map[sender_key] = corps_abbr
         elif abbreviation:
             sender_key = f"{abbreviation} {short_cipher}"
@@ -555,13 +555,6 @@ def map_military_units(
         c_digits = re.findall(r"\d{4}", closed_code)
         if c_digits:
             cipher_digits_map[c_digits[0]] = (sender_key, open_name)
-
-        for variant in [open_name, closed_code, f"в/ч {short_cipher}", short_cipher, abbreviation, corps_col]:
-            if variant:
-                canonical_key_map[variant] = sender_key
-                if corps_col:
-                    corps_abbr = _extract_corps_abbr(corps_col)
-                    canonical_key_map[corps_abbr] = sender_key
 
         if fuzzy_match:
             pattern = _build_unit_fuzzy_pattern(open_name)
@@ -702,8 +695,13 @@ def map_military_units(
 
         if matched_units_in_block:
             full_item_text = "\n".join(block_replaced_lines).strip()
+            # Дедуплікація: один пункт наказу додається лише ОДИН раз на кожен унікальний norm_code
+            seen_norm_codes: set[str] = set()
             for raw_code, open_name in matched_units_in_block:
                 norm_code = _normalize_key(raw_code, canonical_key_map)
+                if norm_code in seen_norm_codes:
+                    continue
+                seen_norm_codes.add(norm_code)
                 unit_entry = unit_data_map.setdefault(
                     norm_code,
                     {
