@@ -941,20 +941,45 @@ def map_military_units(
         if block["type"] == "section":
             section_raw_text = "\n".join(block["lines"])
             sec_units: set[tuple[str, str]] = set()
-            for open_name, closed_code, corps_col, sender_key, pattern in unit_patterns:
-                if pattern.search(section_raw_text):
-                    sec_units.add((sender_key, open_name))
+
+            # 1. Шукаємо напрямок КУДИ у шапці розділу ('призначити до...', 'направити до...')
+            match_kudy = re.search(
+                r"(?:призначити\s+до|направити\s+до|відрядити\s+до|у\s+розпорядження)\s+([^:\n\.]+)",
+                section_raw_text,
+                re.IGNORECASE,
+            )
+            kudy_text = match_kudy.group(1).strip() if match_kudy else ""
+
+            if kudy_text and "цього саг" not in kudy_text.lower() and "цієї саг" not in kudy_text.lower() and "того ж" not in kudy_text.lower():
+                for open_name, closed_code, corps_col, sender_key, pattern in unit_patterns:
+                    if pattern.search(kudy_text):
+                        sec_units.add((sender_key, open_name))
+                if not sec_units:
+                    sec_tck = _extract_tck_sender(kudy_text)
+                    if sec_tck:
+                        sec_units.add((sec_tck, "ТЦК та СП"))
+
+            # 2. Якщо окремого напрямку КУДИ немає або вказано 'до цього самого полку' — шукаємо по всій шапці
             if not sec_units:
-                sec_ciphers = re.findall(r"\bА\s*(\d{4})\b", section_raw_text, re.IGNORECASE)
-                for digit in sec_ciphers:
-                    if digit in cipher_digits_map:
-                        sec_units.add(cipher_digits_map[digit])
-            if not sec_units:
-                sec_corps = _extract_army_corps(section_raw_text)
-                if sec_corps:
-                    sec_corps_abbr = _extract_corps_abbr(sec_corps)
-                    c_key = canonical_key_map.get(sec_corps) or canonical_key_map.get(sec_corps_abbr) or sec_corps_abbr
-                    sec_units.add((c_key, sec_corps))
+                for open_name, closed_code, corps_col, sender_key, pattern in unit_patterns:
+                    if pattern.search(section_raw_text):
+                        sec_units.add((sender_key, open_name))
+                if not sec_units:
+                    sec_ciphers = re.findall(r"\bА\s*(\d{4})\b", section_raw_text, re.IGNORECASE)
+                    for digit in sec_ciphers:
+                        if digit in cipher_digits_map:
+                            sec_units.add(cipher_digits_map[digit])
+                if not sec_units:
+                    sec_tck = _extract_tck_sender(section_raw_text)
+                    if sec_tck:
+                        sec_units.add((sec_tck, "ТЦК та СП"))
+                if not sec_units:
+                    sec_corps = _extract_army_corps(section_raw_text)
+                    if sec_corps:
+                        sec_corps_abbr = _extract_corps_abbr(sec_corps)
+                        c_key = canonical_key_map.get(sec_corps) or canonical_key_map.get(sec_corps_abbr) or sec_corps_abbr
+                        sec_units.add((c_key, sec_corps))
+
             if sec_units:
                 active_section_units = sec_units
             continue
