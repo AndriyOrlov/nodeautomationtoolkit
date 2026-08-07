@@ -584,6 +584,46 @@ def _auto_abbreviate_unit_name(open_name: str) -> str:
     return num_str or clean
 
 
+def _build_sender_key(closed_code: str, abbreviation: str, corps_col: str, corps_resolved_cipher: dict, mapping_dict: dict) -> tuple[str, str]:
+    """
+    Будує точний sender_key для ВЧ/Корпусу, повністю зберігаючи ТЕКСТ З КЛІТИНКИ СКОРОЧЕНОЇ НАЗВИ (колонка C).
+    Усуває дублювання шифрів та усуває дублі у підсумковому виводі.
+    """
+    short_cipher = _short_closed_code(closed_code)
+
+    if corps_col:
+        corps_abbr = _extract_corps_abbr(corps_col)
+        corps_cipher = corps_resolved_cipher.get(corps_abbr, short_cipher)
+        corps_entry = _find_corps_entry(corps_col, corps_abbr)
+        if corps_entry:
+            c_abbr = str(corps_entry.get("abbreviation") or corps_entry.get("abbr") or corps_abbr).strip()
+            if c_abbr:
+                if re.search(r"\bА\s*\d{4}\b", c_abbr, re.IGNORECASE) or corps_cipher.casefold() in c_abbr.casefold():
+                    sender_key = c_abbr
+                else:
+                    sender_key = f"{c_abbr} {corps_cipher}"
+            else:
+                sender_key = f"{corps_abbr} {corps_cipher}"
+        else:
+            sender_key = f"{corps_abbr} {corps_cipher}"
+        return sender_key, corps_abbr
+
+    abbr = str(abbreviation).strip()
+    if not abbr:
+        return short_cipher, ""
+
+    # Для ТЦК та СП — повертаємо скорочення як є
+    if "ТЦК" in abbr.upper() or "ОТЦК" in abbr.upper() or "РТЦК" in abbr.upper() or "МТЦК" in abbr.upper():
+        return abbr, abbr
+
+    # Якщо у клітинці скорочення (колонка C) ВЖЕ є шифр (напр. '24ОМБр А2424') — копіюємо ВСЕ з клітинки
+    if re.search(r"\bА\s*\d{4}\b", abbr, re.IGNORECASE) or (short_cipher and short_cipher.casefold() in abbr.casefold()):
+        return abbr, abbr
+
+    # Інакше додаємо шифр до скорочення з колонки C: '24ОМБр А2424'
+    return f"{abbr} {short_cipher}", abbr
+
+
 def _short_closed_code(code: str, abbreviation: str = "") -> str:
     """Формує коротке закрите найменування частини або ТЦК (усуває дублювання довгих назв ТЦК)."""
     clean_code = str(code).strip()
@@ -797,17 +837,8 @@ def map_military_units(
             abbreviation = _auto_abbreviate_unit_name(open_name)
 
         short_cipher = _short_closed_code(closed_code)
-
-        if corps_col:
-            corps_abbr = _extract_corps_abbr(corps_col)
-            corps_cipher = corps_resolved_cipher.get(corps_abbr, short_cipher)
-            sender_key = f"{corps_abbr} {corps_cipher}"
-            unit_abbr_map[sender_key] = corps_abbr
-        elif abbreviation:
-            sender_key = f"{abbreviation} {short_cipher}"
-            unit_abbr_map[sender_key] = abbreviation
-        else:
-            sender_key = short_cipher
+        sender_key, resolved_abbr = _build_sender_key(closed_code, abbreviation, corps_col, corps_resolved_cipher, mapping_dict)
+        unit_abbr_map[sender_key] = resolved_abbr or unit_abbr_map.get(sender_key, "")
 
         for variant in [open_name, closed_code, f"в/ч {short_cipher}", short_cipher, abbreviation, corps_col]:
             if variant:
@@ -1065,10 +1096,7 @@ def analyze_senders(
     table_rows = []
 
     for sender, data in units_map.items():
-        abbr = data.get("abbreviation", "") if isinstance(data, dict) else ""
-        if not abbr:
-            abbr = abbr_map.get(sender, "")
-        short_sender = _short_closed_code(sender, abbreviation=abbr)
+        short_sender = sender
         if isinstance(data, dict) and "items" in data:
             items = [item["text"] for item in data["items"] if "text" in item]
             raw_labels = [item.get("label", "") for item in data["items"]]
@@ -1125,10 +1153,7 @@ def split_by_senders(
         if not header_text and isinstance(data, dict):
             header_text = "\n".join(data.get("header_lines", []))
 
-        abbr = data.get("abbreviation", "") if isinstance(data, dict) else ""
-        if not abbr:
-            abbr = abbr_map.get(sender, "")
-        short_sender = _short_closed_code(sender, abbreviation=abbr)
+        short_sender = sender
         items_text = ""
         range_labels = "-"
         count = 0
@@ -1832,10 +1857,7 @@ def calculate_order_extracts(
         if not header_text and isinstance(data, dict):
             header_text = "\n".join(data.get("header_lines", []))
 
-        abbr = data.get("abbreviation", "") if isinstance(data, dict) else ""
-        if not abbr:
-            abbr = abbr_map.get(sender, "")
-        short_sender = _short_closed_code(sender, abbreviation=abbr)
+        short_sender = sender
         open_names = ", ".join(sorted(res.get("unit_open_names", {}).get(sender, []))) if "unit_open_names" in res else ""
 
         items_text = ""
