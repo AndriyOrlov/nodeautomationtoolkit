@@ -445,11 +445,6 @@ def _normalize_region_to_nominative(region_raw: str) -> str:
     return region[0].upper() + region[1:]
 
 
-_COMMAND_POST_NUMBER_RE = re.compile(
-    r"\b(\d{1,4})[-\s]*(?:-?й|-?го|-?му|-?м)?\s*(?:командн\w*\s+пункт\w*|пункт\w*\s+управління|КП|ЗКП|ГКП|ППУ)\b",
-    re.IGNORECASE | re.UNICODE,
-)
-
 
 def _extract_tck_sender(text: str) -> str | None:
     """Розпізнає ТЦК та СП і ЗАВЖДИ виводить ОБЛАСНИЙ рівень (напр: Броварський РТЦК Київської області -> Київський ОТЦК та СП)."""
@@ -666,7 +661,6 @@ def map_military_units(
 
     canonical_key_map: dict[str, str] = {}
     cipher_digits_map: dict[str, tuple[str, str]] = {}
-    unit_number_map: dict[str, tuple[str, str]] = {}
 
     # ── Прохід 1: визначаємо ЄДИНИЙ шифр для кожного Корпусу ─────────────────
     corps_resolved_cipher: dict[str, str] = {}  # corps_abbr -> шифр корпусу
@@ -754,10 +748,7 @@ def map_military_units(
         if c_digits:
             cipher_digits_map[c_digits[0]] = (sender_key, open_name)
 
-        # Реєструємо номер частини для командних пунктів (напр. '25 командного пункту' -> 25)
-        u_num = re.search(r"\b(\d{1,4})\b", open_name)
-        if u_num:
-            unit_number_map[u_num.group(1)] = (sender_key, open_name)
+
 
         if fuzzy_match:
             pattern = _build_unit_fuzzy_pattern(open_name)
@@ -882,14 +873,7 @@ def map_military_units(
             # Якщо частина у складі Корпусу -> отримувачем є сам Корпус (усі пункти об'єднуються у єдиний витяг)
             matched_units_in_block.add((sender_key, open_name))
 
-        # 1.5 Пошук за нумерованими командними пунктами (наприклад: '25 командного пункту' або '15 ЗКП')
-        if not matched_units_in_block:
-            cp_num_match = _COMMAND_POST_NUMBER_RE.search(block_raw_text)
-            if cp_num_match:
-                num_str = cp_num_match.group(1)
-                if num_str in unit_number_map:
-                    s_key, o_name = unit_number_map[num_str]
-                    matched_units_in_block.add((s_key, o_name))
+
 
         # 2. Пошук за цифровими шифрами в/ч (наприклад: військової частини А2424 або А 2828)
         if not matched_units_in_block:
