@@ -511,6 +511,7 @@ def map_military_units(
     unit_abbr_map: dict[str, str] = {}
 
     canonical_key_map: dict[str, str] = {}
+    cipher_digits_map: dict[str, tuple[str, str]] = {}
 
     for open_name, mapped_val in mapping_dict.items():
         corps_col = ""
@@ -530,13 +531,12 @@ def map_military_units(
 
         if corps_col:
             corps_abbr = _extract_corps_abbr(corps_col)
-            # Перевіряємо чи сам Корпус має власний закритий шифр в таблиці Excel
             corps_entry = mapping_dict.get(corps_col) or mapping_dict.get(corps_abbr)
             if isinstance(corps_entry, dict) and corps_entry.get("cipher"):
                 corps_own_cipher = _short_closed_code(str(corps_entry["cipher"]))
                 sender_key = f"{corps_abbr} {corps_own_cipher}"
             else:
-                sender_key = corps_abbr
+                sender_key = f"{corps_abbr} {short_cipher}"
             unit_abbr_map[sender_key] = corps_abbr
         elif abbreviation:
             sender_key = f"{abbreviation} {short_cipher}"
@@ -544,16 +544,17 @@ def map_military_units(
         else:
             sender_key = short_cipher
 
-        canonical_key_map[open_name] = sender_key
-        canonical_key_map[closed_code] = sender_key
-        canonical_key_map[f"в/ч {short_cipher}"] = sender_key
-        canonical_key_map[short_cipher] = sender_key
-        if abbreviation:
-            canonical_key_map[abbreviation] = sender_key
-        if corps_col:
-            corps_abbr = _extract_corps_abbr(corps_col)
-            canonical_key_map[corps_col] = sender_key
-            canonical_key_map[corps_abbr] = sender_key
+        for variant in [open_name, closed_code, f"в/ч {short_cipher}", short_cipher, abbreviation, corps_col]:
+            if variant:
+                canonical_key_map[variant] = sender_key
+                if corps_col:
+                    corps_abbr = _extract_corps_abbr(corps_col)
+                    canonical_key_map[corps_abbr] = sender_key
+
+        # Реєструємо 4-значні цифри шифру для миттєвого пошуку прямо за шифром в/ч у тексті
+        c_digits = re.findall(r"\d{4}", closed_code)
+        if c_digits:
+            cipher_digits_map[c_digits[0]] = (sender_key, open_name)
 
         for variant in [open_name, closed_code, f"в/ч {short_cipher}", short_cipher, abbreviation, corps_col]:
             if variant:
@@ -677,13 +678,21 @@ def map_military_units(
             # Якщо частина у складі Корпусу -> отримувачем є сам Корпус (усі пункти об'єднуються у єдиний витяг)
             matched_units_in_block.add((sender_key, open_name))
 
-        # 2. Якщо в таблиці немає відповідностей — перевіряємо ТЦК (районний/міський -> Область)
+        # 2. Пошук за цифровими шифрами в/ч (наприклад: військової частини А2424 або А 2828)
+        if not matched_units_in_block:
+            found_ciphers = re.findall(r"\bА\s*(\d{4})\b", block_raw_text, re.IGNORECASE)
+            for digit in found_ciphers:
+                if digit in cipher_digits_map:
+                    s_key, o_name = cipher_digits_map[digit]
+                    matched_units_in_block.add((s_key, o_name))
+
+        # 3. Якщо в таблиці немає відповідностей — перевіряємо ТЦК (районний/міський -> Область)
         if not matched_units_in_block:
             tck_sender = _extract_tck_sender(block_raw_text)
             if tck_sender:
                 matched_units_in_block = {(tck_sender, "ТЦК та СП (Область)")}
 
-        # 3. Якщо в таблиці немає відповідностей — перевіряємо чи в тексті явно є АК
+        # 4. Якщо в таблиці немає відповідностей — перевіряємо чи в тексті явно є АК
         if not matched_units_in_block:
             corps_name = _extract_army_corps(block_raw_text)
             if corps_name:
