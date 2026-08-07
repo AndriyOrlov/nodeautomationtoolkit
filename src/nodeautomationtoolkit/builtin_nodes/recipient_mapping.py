@@ -725,17 +725,24 @@ def _format_item_numbers_range(labels: list[str]) -> str:
 
 def _get_item_main_text(lines: list[str]) -> str:
     """
-    Витягує тільки основний абзац пункту (до опису року народження 'р.н.' або 'Підстава').
-    Рядки з р.н., РНОКПП та Підстава повністю ігноруються при визначенні ВЧ для витягів.
+    Витягує основні рядки пункту (включаючи назву ТЦК з рядків обліку 'Перебуває на обліку / Підлягає направленню').
+    Рядки з документообігом 'Підстава: ...' повністю ігноруються.
     """
-    main_lines = []
+    selected_lines = []
     for line in lines:
         clean = line.strip()
         low = clean.lower()
-        if "р.н." in low or "р. н." in low or "року народження" in low or clean.startswith("Підстава") or clean.startswith("підстава"):
-            break
-        main_lines.append(line)
-    return "\n".join(main_lines) if main_lines else "\n".join(lines)
+        if clean.startswith("Підстава") or clean.startswith("підстава"):
+            continue
+        # Якщо в рядку є опис обліку в ТЦК — обов'язково зберігаємо його
+        if ("перебуває" in low or "підлягає" in low or "облік" in low or "тцк" in low or "ртцк" in low or "отцк" in low):
+            selected_lines.append(line)
+            continue
+        # Чисто біографічні рядки з р.н. без ТЦК пропускаємо
+        if ("р.н." in low or "р. н." in low or "року народження" in low or "рнокопп" in low):
+            continue
+        selected_lines.append(line)
+    return "\n".join(selected_lines) if selected_lines else "\n".join(lines)
 
 
 @node(
@@ -900,6 +907,21 @@ def map_military_units(
             short_pattern = re.compile(r"\b" + re.escape(short_cipher) + r"\b", re.IGNORECASE)
             unit_patterns.append((short_cipher, closed_code, corps_col, sender_key, short_pattern))
 
+    # Шукаємо вихідну ВЧ у заголовочній шапці наказу (HEADER)
+    header_text = "\n".join(header_lines)
+    header_zvidky_unit: tuple[str, str] | None = None
+    for open_name, closed_code, corps_col, sender_key, pattern in unit_patterns:
+        m = pattern.search(header_text)
+        if m:
+            header_zvidky_unit = (sender_key, open_name)
+            break
+    if not header_zvidky_unit:
+        h_ciphers = re.findall(r"\bА\s*(\d{4})\b", header_text, re.IGNORECASE)
+        for digit in h_ciphers:
+            if digit in cipher_digits_map:
+                header_zvidky_unit = cipher_digits_map[digit]
+                break
+
     # ── Парсимо тіло наказу у блоки (§-параграфи та пронумеровані пункти) ─────
     blocks = []
     current_parent_heading = ""
@@ -1032,73 +1054,64 @@ def map_military_units(
         block_replaced_lines = list(block["lines"])
         matched_units_in_block: set[tuple[str, str]] = set()
 
-        # Якщо є активний заголовок розділу з ВЧ — пункти за замовчуванням мають її адресата
-        if active_section_units:
-            matched_units_in_block = set(active_section_units)
+            # Якщо у базі є вихідна ВЧ із шапки наказу
+        item_destinations: set[tuple[str, str]] = set()
 
-        if not matched_units_in_block:
-            # 1. Зіставлення за патернами з колонок A (повна назва) та C (скорочення)
-            for open_name, closed_code, corps_col, sender_key, pattern in unit_patterns:
-                all_matches = pattern.findall(block_raw_text) or pattern.findall(raw_text_clean)
-                if not all_matches:
-                    continue
+        # 1. Зіставлення за патернами з колонок A (повна назва) та C (скорочення)
+        for open_name, closed_code, corps_col, sender_key, pattern in unit_patterns:
+            all_matches = pattern.findall(block_raw_text) or pattern.findall(raw_text_clean)
+            if not all_matches:
+                continue
 
-                for found_form in set(str(m) if isinstance(m, str) else str(m[0]) for m in all_matches):
-                    existing = next(
-                        (r for r in match_report_rows if r[0] == open_name and r[1] == found_form),
-                        None,
+            for found_form in set(str(m) if isinstance(m, str) else str(m[0]) for m in all_matches):
+                existing = next(
+                    (r for r in match_report_rows if r[0] == open_name and r[1] == found_form),
+                    None,
+                )
+                if existing:
+                    idx = match_report_rows.index(existing)
+                    match_report_rows[idx] = (
+                        existing[0], existing[1], existing[2], existing[3] + 1
                     )
-                    if existing:
-                        idx = match_report_rows.index(existing)
-                        match_report_rows[idx] = (
-                            existing[0], existing[1], existing[2], existing[3] + 1
-                        )
-                    else:
-                        match_report_rows.append((open_name, found_form, closed_code, 1))
-
-                block_replaced_lines = [pattern.sub(closed_code, ln) for ln in block_replaced_lines]
-                matched_str = str(all_matches[0]) if all_matches else ""
-                low_open = open_name.lower()
-                is_tck_entry = "тцк" in low_open or "територіальн" in low_open or "центр" in low_open
-                if is_tck_entry:
-                    target_name = sender_key
-                elif corps_col and ("корпус" in matched_str.lower() or "ак" in matched_str.lower()):
-                    target_name = corps_col
                 else:
-                    target_name = open_name
-                matched_units_in_block.add((sender_key, target_name))
-                break  # 1 ПУНКТ НАКАЗУ НАЛЕЖИТЬ МАКСИМУМ 1 ОДНОМУ АДРЕСАТУ!
+                    match_report_rows.append((open_name, found_form, closed_code, 1))
 
-
-
-        if matched_units_in_block and len(matched_units_in_block) > 2:
-            matched_units_in_block = set(list(matched_units_in_block)[:2])
+            block_replaced_lines = [pattern.sub(closed_code, ln) for ln in block_replaced_lines]
+            matched_str = str(all_matches[0]) if all_matches else ""
+            low_open = open_name.lower()
+            is_tck_entry = "тцк" in low_open or "територіальн" in low_open or "центр" in low_open
+            target_name = sender_key if is_tck_entry else (corps_col if (corps_col and ("корпус" in matched_str.lower() or "ак" in matched_str.lower())) else open_name)
+            item_destinations.add((sender_key, target_name))
+            break
 
         # 2. Пошук за цифровими шифрами в/ч (наприклад: військової частини А2424 або А 2828)
-        if not matched_units_in_block:
+        if not item_destinations:
             found_ciphers = re.findall(r"\bА\s*(\d{4})\b", block_raw_text, re.IGNORECASE)
             for digit in found_ciphers:
                 if digit in cipher_digits_map:
                     s_key, o_name = cipher_digits_map[digit]
-                    matched_units_in_block.add((s_key, o_name))
+                    item_destinations.add((s_key, o_name))
+                    break
 
         # 3. Якщо в таблиці немає відповідностей — перевіряємо ТЦК (районний/міський -> Область)
-        if not matched_units_in_block:
+        if not item_destinations:
             tck_sender = _extract_tck_sender(block_raw_text)
             if tck_sender:
-                matched_units_in_block = {(tck_sender, "ТЦК та СП (Область)")}
+                item_destinations.add((tck_sender, "ТЦК та СП"))
 
         # 4. Якщо в таблиці немає відповідностей — перевіряємо чи в тексті явно є АК
-        if not matched_units_in_block:
+        if not item_destinations:
             corps_name = _extract_army_corps(block_raw_text)
             if corps_name:
                 corps_abbr = _extract_corps_abbr(corps_name)
                 c_key = canonical_key_map.get(corps_name) or canonical_key_map.get(corps_abbr) or corps_abbr
-                matched_units_in_block = {(c_key, corps_name)}
+                item_destinations.add((c_key, corps_name))
 
-        # 5. Унаслідування адресата з активного заголовка розділу/шапки (§), якщо у пункті немає власної ВЧ
-        if not matched_units_in_block and active_section_units:
-            matched_units_in_block = set(active_section_units)
+        # Формуємо підсумковий набір отримувачів пункту (Джерело ЗВІДКИ + Призначення КУДИ)
+        base_source = active_section_units or ({header_zvidky_unit} if header_zvidky_unit else set())
+        matched_units_in_block = set(base_source) | item_destinations
+        if len(matched_units_in_block) > 2:
+            matched_units_in_block = set(list(matched_units_in_block)[:2])
 
         if matched_units_in_block:
             full_item_text = "\n".join(block_replaced_lines).strip()
