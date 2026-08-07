@@ -584,6 +584,22 @@ def _auto_abbreviate_unit_name(open_name: str) -> str:
     return num_str or clean
 
 
+def _find_corps_entry(corps_col_val: str, corps_abbr_val: str, mapping_dict: dict) -> dict | None:
+    """Шукає рядок корпусу у таблиці за ключем, скороченням або повною назвою."""
+    entry = mapping_dict.get(corps_col_val) or mapping_dict.get(corps_abbr_val)
+    if isinstance(entry, dict) and entry.get("cipher"):
+        return entry
+    for _name, _val in mapping_dict.items():
+        if not isinstance(_val, dict):
+            continue
+        abbr = str(_val.get("abbreviation") or _val.get("abbr") or "").strip()
+        if abbr and _extract_corps_abbr(abbr) == corps_abbr_val and _val.get("cipher"):
+            return _val
+        if _extract_corps_abbr(_name) == corps_abbr_val and _val.get("cipher"):
+            return _val
+    return None
+
+
 def _build_sender_key(closed_code: str, abbreviation: str, corps_col: str, corps_resolved_cipher: dict, mapping_dict: dict) -> tuple[str, str]:
     """
     Будує точний sender_key для ВЧ/Корпусу, повністю зберігаючи ТЕКСТ З КЛІТИНКИ СКОРОЧЕНОЇ НАЗВИ (колонка C).
@@ -594,7 +610,7 @@ def _build_sender_key(closed_code: str, abbreviation: str, corps_col: str, corps
     if corps_col:
         corps_abbr = _extract_corps_abbr(corps_col)
         corps_cipher = corps_resolved_cipher.get(corps_abbr, short_cipher)
-        corps_entry = _find_corps_entry(corps_col, corps_abbr)
+        corps_entry = _find_corps_entry(corps_col, corps_abbr, mapping_dict)
         if corps_entry:
             c_abbr = str(corps_entry.get("abbreviation") or corps_entry.get("abbr") or corps_abbr).strip()
             if c_abbr:
@@ -778,24 +794,6 @@ def map_military_units(
     # ── Прохід 1: визначаємо ЄДИНИЙ шифр для кожного Корпусу ─────────────────
     corps_resolved_cipher: dict[str, str] = {}  # corps_abbr -> шифр корпусу
 
-    def _find_corps_entry(corps_col_val: str, corps_abbr_val: str) -> dict | None:
-        """Шукає рядок корпусу у таблиці за ключем, скороченням або повною назвою."""
-        # 1) Прямий пошук за ключем словника
-        entry = mapping_dict.get(corps_col_val) or mapping_dict.get(corps_abbr_val)
-        if isinstance(entry, dict) and entry.get("cipher"):
-            return entry
-        # 2) Пошук за полем abbreviation серед усіх записів
-        for _name, _val in mapping_dict.items():
-            if not isinstance(_val, dict):
-                continue
-            abbr = str(_val.get("abbreviation", "")).strip()
-            if abbr and _extract_corps_abbr(abbr) == corps_abbr_val and _val.get("cipher"):
-                return _val
-            # 3) Пошук за open_name якщо містить номер корпусу
-            if _extract_corps_abbr(_name) == corps_abbr_val and _val.get("cipher"):
-                return _val
-        return None
-
     for open_name, mapped_val in mapping_dict.items():
         if not isinstance(mapped_val, dict):
             continue
@@ -803,7 +801,7 @@ def map_military_units(
         if corps_col:
             corps_abbr = _extract_corps_abbr(corps_col)
             if corps_abbr not in corps_resolved_cipher:
-                corps_entry = _find_corps_entry(corps_col, corps_abbr)
+                corps_entry = _find_corps_entry(corps_col, corps_abbr, mapping_dict)
                 if corps_entry:
                     corps_resolved_cipher[corps_abbr] = _short_closed_code(str(corps_entry["cipher"]))
                 else:
@@ -937,8 +935,30 @@ def map_military_units(
     match_report_rows = []
 
     processed_lines = list(lines)
+    active_section_units: set[tuple[str, str]] = set()
 
     for block in blocks:
+        if block["type"] == "section":
+            section_raw_text = "\n".join(block["lines"])
+            sec_units: set[tuple[str, str]] = set()
+            for open_name, closed_code, corps_col, sender_key, pattern in unit_patterns:
+                if pattern.search(section_raw_text):
+                    sec_units.add((sender_key, open_name))
+            if not sec_units:
+                sec_ciphers = re.findall(r"\bА\s*(\d{4})\b", section_raw_text, re.IGNORECASE)
+                for digit in sec_ciphers:
+                    if digit in cipher_digits_map:
+                        sec_units.add(cipher_digits_map[digit])
+            if not sec_units:
+                sec_corps = _extract_army_corps(section_raw_text)
+                if sec_corps:
+                    sec_corps_abbr = _extract_corps_abbr(sec_corps)
+                    c_key = canonical_key_map.get(sec_corps) or canonical_key_map.get(sec_corps_abbr) or sec_corps_abbr
+                    sec_units.add((c_key, sec_corps))
+            if sec_units:
+                active_section_units = sec_units
+            continue
+
         if block["type"] != "item":
             continue
 
@@ -1000,6 +1020,10 @@ def map_military_units(
                 corps_abbr = _extract_corps_abbr(corps_name)
                 c_key = canonical_key_map.get(corps_name) or canonical_key_map.get(corps_abbr) or corps_abbr
                 matched_units_in_block = {(c_key, corps_name)}
+
+        # 5. Унаслідування адресата з активного заголовка розділу/шапки (§), якщо у пункті немає власної ВЧ
+        if not matched_units_in_block and active_section_units:
+            matched_units_in_block = set(active_section_units)
 
         if matched_units_in_block:
             full_item_text = "\n".join(block_replaced_lines).strip()
