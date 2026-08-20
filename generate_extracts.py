@@ -2318,17 +2318,34 @@ class App:
                 body_start = index
                 break
 
-        # Перший службовий блок ПІСЛЯ тіла наказу. Саме перший, а не останній:
-        # між таблицями розсилки та «Згідно з оригіналом» ще стоять інші блоки.
-        service_start = total + 1
-        for index in range(body_start, total + 1):
-            clean = texts[index - 1].casefold()
-            if not clean:
-                continue
-            if any(
+        def is_service_marker(value: str) -> bool:
+            clean = value.casefold()
+            return bool(clean) and any(
                 clean.startswith(marker) or clean == marker
                 for marker in _DISTRIBUTION_CUTOFF_MARKERS
-            ):
+            )
+
+        # Порядок пошуку той самий, що у витягах: спершу з кінця знаходимо
+        # службову частину, потім перед нею — підписанта.
+        last_marker = total + 1
+        for index in range(total, body_start - 1, -1):
+            if is_service_marker(texts[index - 1]):
+                last_marker = index
+                break
+
+        signer_start = None
+        for index in range(last_marker - 1, body_start - 1, -1):
+            clean = texts[index - 1]
+            if clean and _ORDER_SIGNER_START_RE.match(clean):
+                signer_start = index
+                break
+
+        # Службовий блок шукаємо ПІСЛЯ підписанта. Якщо шукати від початку
+        # тіла, випадковий маркер у пунктах обрізав би наказ разом зі
+        # званням і прізвищем підписанта.
+        service_start = total + 1
+        for index in range(signer_start or body_start, total + 1):
+            if is_service_marker(texts[index - 1]):
                 service_start = index
                 break
 
@@ -4056,19 +4073,31 @@ class App:
 
                     # Засвідчувач («Згідно з оригіналом») — ті самі поля, що
                     # й у витягах, щоб дані не розходились між вкладками.
-                    if self.certifier_position.get().strip():
-                        cert_pos = _slash_to_lines(self.certifier_position.get().strip())
+                    cert_pos = _slash_to_lines(self.certifier_position.get().strip())
+                    cert_rank = self.certifier_rank.get().strip()
+                    cert_name = self.certifier_name.get().strip()
+                    if cert_pos:
                         values["{{засвідчувач_посада}}"] = cert_pos
                         values["{{згідно_з_оригіналом_посада}}"] = cert_pos
-                    if self.certifier_rank.get().strip():
-                        cert_rank = self.certifier_rank.get().strip()
+                    if cert_rank:
                         values["{{засвідчувач_звання}}"] = cert_rank
                         values["{{згідно_з_оригіналом_звання}}"] = cert_rank
-                    if self.certifier_name.get().strip():
-                        cert_name = self.certifier_name.get().strip()
+                    if cert_name:
                         values["{{засвідчувач_піб}}"] = cert_name
                         values["{{згідно_з_оригіналом_піб}}"] = cert_name
                         values["{{засвідчувач}}"] = cert_name
+
+                    # Тег «Згідно з оригіналом» розгортається в СУЦІЛЬНИЙ блок
+                    # без порожніх абзаців: заголовок, посада, а останнім
+                    # рядком — звання та прізвище.
+                    certifier_block = ["Згідно з оригіналом"]
+                    if cert_pos:
+                        certifier_block.append(cert_pos)
+                    signature_line = " ".join(part for part in (cert_rank, cert_name) if part)
+                    if signature_line:
+                        certifier_block.append(signature_line)
+                    values["{{згідно_з_оригіналом}}"] = "\r".join(certifier_block)
+                    values["{{засвідчення}}"] = values["{{згідно_з_оригіналом}}"]
 
                     # Заготовка може бути у форматі Word 97-2003, тож робоча
                     # копія зберігає реальне розширення, а .docx дає SaveAs2.

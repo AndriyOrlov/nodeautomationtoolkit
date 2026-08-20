@@ -173,6 +173,32 @@ def test_span_survives_table_inside_the_order():
     assert last == 8
 
 
+def test_marker_word_inside_an_item_does_not_cut_the_signer():
+    """Службовий блок шукається ПІСЛЯ підписанта.
+
+    Якщо шукати від початку тіла, слово-маркер у тексті пункту обрізало
+    наказ разом зі званням і прізвищем підписанта.
+    """
+    doc = _FakeDoc(
+        [
+            "§ 2\r",                                     # 1
+            "11. Пункт із фразою розсилка: усередині\r",  # 2 ← пастка
+            "\r",
+            "Тимчасово виконуючий обов'язки\r",           # 4 підписант
+            "командувача військ\r",                       # 5
+            "полковник   І. ПЕТРЕНКО\r",                  # 6 ← звання + прізвище
+            "\r",
+            "Розрахунок розсилки витягів із наказу:\r",   # 8
+            "Згідно з оригіналом\r",                      # 9
+        ]
+    )
+
+    first, last = generator.App._order_body_span(doc)
+
+    assert first == 1
+    assert last == 6
+
+
 def test_span_stops_before_first_service_block():
     doc = _FakeDoc(
         [

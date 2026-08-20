@@ -354,6 +354,31 @@ def remove_trailing_empty_page(doc) -> bool:
     return removed
 
 
+def format_certifier_block(doc) -> bool:
+    """Форматує блок засвідчувача, що починається з «Згідно з оригіналом».
+
+    Блок суцільний — порожніх абзаців усередині немає, тому його кінцем є
+    перший порожній абзац. Останній рядок (звання та прізвище) підкреслюється
+    повністю, а прізвище відсувається до правого краю.
+    """
+    finder = doc.Content.Find
+    finder.Text = "Згідно з оригіналом"
+    if not finder.Execute():
+        return False
+
+    start_index = doc.Range(0, finder.Parent.Start).Paragraphs.Count
+    total = doc.Paragraphs.Count
+    last_index = start_index
+
+    for index in range(start_index, total + 1):
+        if not (doc.Paragraphs(index).Range.Text or "").strip("\r\x07 \t"):
+            break
+        last_index = index
+
+    format_signature_line(doc, doc.Paragraphs(last_index).Range, underline=True)
+    return True
+
+
 def replace_tags(doc, values: dict[str, str]) -> None:
     """Підставляє значення тегів заготовки."""
     for tag, value in values.items():
@@ -436,15 +461,9 @@ def build_copy_document(
                 format_signature_line(doc, paragraph_range, underline=True)
                 break
 
-        # Прізвище засвідчувача теж має стояти під правим краєм.
-        for tag in ("{{згідно_з_оригіналом}}", "{{засвідчення}}"):
-            value = values.get(tag)
-            if not value:
-                continue
-            finder = doc.Content.Find
-            finder.Text = value
-            if finder.Execute():
-                format_signature_line(doc, finder.Parent.Paragraphs(1).Range, underline=False)
+        # Блок засвідчувача («Згідно з оригіналом» + посада + звання/прізвище)
+        # іде суцільно, без порожніх абзаців. Форматуємо його ОСТАННІЙ рядок.
+        format_certifier_block(doc)
 
         clear_headers_and_footers(doc)
 
