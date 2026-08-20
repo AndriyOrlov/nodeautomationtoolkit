@@ -235,10 +235,21 @@ def push_tail_to_right_edge(doc, paragraph_range, tail: str, limit: int = 400) -
 
 
 def format_signature_line(doc, paragraph_range, underline: bool) -> None:
-    """Ставить прізвище під правий край і за потреби підкреслює рядок."""
-    tail = find_signature_name_tail((paragraph_range.Text or "").rstrip("\r\x07"))
-    if tail:
-        push_tail_to_right_edge(doc, paragraph_range, tail)
+    """Ставить прізвище під правий край і за потреби підкреслює рядок.
+
+    У таблиці прізвище вже стоїть у своїй комірці, тому пробілами його не
+    відсуваємо — інакше текст поїхав би за межу комірки.
+    """
+    in_table = False
+    try:
+        in_table = bool(paragraph_range.Information(12))  # wdWithInTable
+    except Exception:
+        in_table = False
+
+    if not in_table:
+        tail = find_signature_name_tail((paragraph_range.Text or "").rstrip("\r\x07"))
+        if tail:
+            push_tail_to_right_edge(doc, paragraph_range, tail)
     if underline:
         paragraph_range.Font.Underline = _WD_UNDERLINE_SINGLE
 
@@ -313,15 +324,27 @@ def copy_order_body(doc, tag_range, source_doc, first_para: int, last_para: int)
     tag_range.Paragraphs(1).Range.Delete()
     content_start = insert_point
 
-    for index in range(first_para, last_para + 1):
-        source_range = source_doc.Paragraphs(index).Range.Duplicate
-        if "\x0c" in (source_range.Text or ""):
-            continue  # ручні розриви сторінок з наказу не переносимо
-        destination = doc.Range(insert_point, insert_point)
-        destination.FormattedText = source_range.FormattedText
-        insert_point = destination.End
+    # Копіюємо діапазон ОДНІЄЮ дією, а не абзац за абзацом: поабзацне
+    # копіювання не відтворює таблиці, і блок підписанта, оформлений
+    # таблицею (звання ліворуч, прізвище праворуч), втрачався. Заодно це
+    # один виклик COM замість сотень — Word менше навантажений.
+    source_range = source_doc.Range(
+        source_doc.Paragraphs(first_para).Range.Start,
+        source_doc.Paragraphs(last_para).Range.End,
+    )
+    destination = doc.Range(insert_point, insert_point)
+    destination.FormattedText = source_range.FormattedText
+    content_end = destination.End
 
-    return content_start, insert_point
+    # Ручні розриви сторінок з наказу у примірник не переносяться.
+    copied = doc.Range(content_start, content_end)
+    for index in range(1, copied.Paragraphs.Count + 1):
+        try:
+            copied.Paragraphs(index).Range.ParagraphFormat.PageBreakBefore = False
+        except Exception:
+            continue
+
+    return content_start, content_end
 
 
 def remove_trailing_empty_page(doc) -> bool:
@@ -367,9 +390,17 @@ def format_certifier_block(doc) -> bool:
         return False
 
     start_index = doc.Range(0, finder.Parent.Start).Paragraphs.Count
+
+    # Між підписантом і блоком засвідчувача порожніх абзаців бути не повинно.
+    while start_index > 1:
+        previous = doc.Paragraphs(start_index - 1).Range
+        if (previous.Text or "").strip("\r\x07 \t"):
+            break
+        previous.Delete()
+        start_index -= 1
+
     total = doc.Paragraphs.Count
     last_index = start_index
-
     for index in range(start_index, total + 1):
         if not (doc.Paragraphs(index).Range.Text or "").strip("\r\x07 \t"):
             break
@@ -436,7 +467,11 @@ def build_copy_document(
             raise ValueError("не вдалося визначити межі тіла наказу")
         if body_start > signer_index:
             raise ValueError("тіло наказу не знайдено перед підписантом")
-        note(f"  Тіло наказу: абзаци {body_start}–{signer_index} (останній — підписант).")
+        tail_preview = _paragraph_text(source_doc.Paragraphs(signer_index))[:40]
+        note(
+            f"  Тіло наказу: абзаци {body_start}–{signer_index}; "
+            f"останній рядок: «{tail_preview}…»"
+        )
 
         doc = word.Documents.Open(working_copy_path, ReadOnly=False)
         replace_tags(doc, values)
@@ -463,7 +498,10 @@ def build_copy_document(
 
         # Блок засвідчувача («Згідно з оригіналом» + посада + звання/прізвище)
         # іде суцільно, без порожніх абзаців. Форматуємо його ОСТАННІЙ рядок.
-        format_certifier_block(doc)
+        if format_certifier_block(doc):
+            note("  Блок «Згідно з оригіналом» оформлено.")
+        else:
+            note("  УВАГА: блок «Згідно з оригіналом» у документі не знайдено.")
 
         clear_headers_and_footers(doc)
 
