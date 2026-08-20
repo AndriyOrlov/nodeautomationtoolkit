@@ -612,10 +612,27 @@ def _find_entry_in_mapping(norm_code: str, open_name: str, mapping_dict: dict) -
     """Знаходить запис у таблиці відповідностей для військової частини або ТЦК."""
     if not mapping_dict:
         return None
-    # 1. Прямий пошук за ключем
-    for k in (norm_code, open_name, _short_closed_code(norm_code)):
+    # 1. Прямий пошук за ключем адресата (norm_code) — він має пріоритет над
+    # відкритою назвою: для частини, підпорядкованої корпусу, norm_code вказує
+    # на КОРПУС, і саме його «Кому»/«Куди» мають потрапити у витяг.
+    for k in (norm_code, _short_closed_code(norm_code)):
         if k and k in mapping_dict and isinstance(mapping_dict[k], dict):
             return mapping_dict[k]
+
+    # 1.1. Шифр із ключа адресата (напр. А5555 з «14 АК А5555»). Перевіряємо
+    # ДО відкритої назви, інакше знайшлася б сама частина, а не її корпус.
+    for c_digits in re.findall(r"[АA]\s*\d{4}", norm_code or ""):
+        clean_c = re.sub(r"\s+", "", c_digits).upper()
+        for val in mapping_dict.values():
+            if not isinstance(val, dict):
+                continue
+            entry_cipher = re.sub(r"\s+", "", str(val.get("cipher") or "")).upper()
+            if entry_cipher and clean_c == entry_cipher:
+                return val
+
+    # 1.2. Відкрита назва частини
+    if open_name and open_name in mapping_dict and isinstance(mapping_dict[open_name], dict):
+        return mapping_dict[open_name]
 
     # 2. Пошук за 4-значним шифром ВЧ (напр. А1234 з '72 омбр А1234')
     c_digits_list = re.findall(r"[АA]\s*\d{4}", f"{norm_code} {open_name}")
