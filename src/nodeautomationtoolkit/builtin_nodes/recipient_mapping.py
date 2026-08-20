@@ -218,8 +218,10 @@ def read_recipient_mapping(
 
         if not cipher and not abbreviation and not corps and not recipient_to and not destination_where:
             continue
+        # Стовпець A — єдине поле пошуку. Інші стовпці містять лише дані,
+        # які використовуються після того, як відповідний рядок уже знайдено.
         if not open_name:
-            open_name = abbreviation or cipher
+            continue
 
         destination = destination_where if destination_where else (recipient_to if recipient_to else (corps if corps else (cipher or open_name)))
 
@@ -235,8 +237,6 @@ def read_recipient_mapping(
         }
 
         mapping[open_name] = entry
-        if abbreviation and abbreviation != open_name:
-            mapping[abbreviation] = entry
 
         table_rows.append((open_name, cipher, abbreviation, corps, recipient_to, destination_where))
 
@@ -250,6 +250,11 @@ def read_recipient_mapping(
         "markers": list(mapping),
         "table": table,
         "count": len(table_rows),
+        # Доказ того, який саме файл був прочитаний у цьому запуску. Дані
+        # словника ніде не кешуються: кожен виклик знову читає цей файл з диска.
+        "source_path": str(source.resolve()),
+        "source_modified_ns": source.stat().st_mtime_ns,
+        "source_size": source.stat().st_size,
     }
 
 
@@ -609,71 +614,34 @@ _OBLAST_TO_CITY_MAP = {
 
 
 def _find_entry_in_mapping(norm_code: str, open_name: str, mapping_dict: dict) -> dict | None:
-    """Знаходить запис у таблиці відповідностей для військової частини або ТЦК."""
+    """Знаходить рядок таблиці виключно за його пошуковою назвою зі стовпця A."""
     if not mapping_dict:
         return None
-    # 1. Прямий пошук за ключем адресата (norm_code) — він має пріоритет над
-    # відкритою назвою: для частини, підпорядкованої корпусу, norm_code вказує
-    # на КОРПУС, і саме його «Кому»/«Куди» мають потрапити у витяг.
-    for k in (norm_code, _short_closed_code(norm_code)):
-        if k and k in mapping_dict and isinstance(mapping_dict[k], dict):
-            return mapping_dict[k]
-
-    # 1.1. Шифр із ключа адресата (напр. А5555 з «14 АК А5555»). Перевіряємо
-    # ДО відкритої назви, інакше знайшлася б сама частина, а не її корпус.
-    for c_digits in re.findall(r"[АA]\s*\d{4}", norm_code or ""):
-        clean_c = re.sub(r"\s+", "", c_digits).upper()
-        for val in mapping_dict.values():
-            if not isinstance(val, dict):
-                continue
-            entry_cipher = re.sub(r"\s+", "", str(val.get("cipher") or "")).upper()
-            if entry_cipher and clean_c == entry_cipher:
-                return val
-
-    # 1.2. Відкрита назва частини
-    if open_name and open_name in mapping_dict and isinstance(mapping_dict[open_name], dict):
-        return mapping_dict[open_name]
-
-    # 2. Пошук за 4-значним шифром ВЧ (напр. А1234 з '72 омбр А1234')
-    c_digits_list = re.findall(r"[АA]\s*\d{4}", f"{norm_code} {open_name}")
-    for c_digits in c_digits_list:
-        clean_c = re.sub(r"\s+", "", c_digits).upper()
-        for k, val in mapping_dict.items():
-            if not isinstance(val, dict):
-                continue
-            entry_cipher = re.sub(r"\s+", "", str(val.get("cipher") or "")).upper()
-            if clean_c in entry_cipher or entry_cipher in clean_c:
-                return val
-
-    # 3. Пошук за полями cipher, abbreviation, open_name (включаючи входження підрядків)
-    norm_low = (norm_code or "").lower()
-    open_low = (open_name or "").lower()
+    candidates = {
+        _normalize_unit_name(value)
+        for value in (norm_code, open_name)
+        if str(value or "").strip()
+    }
     for k, val in mapping_dict.items():
         if not isinstance(val, dict):
             continue
-        c = str(val.get("cipher") or "").strip().lower()
-        abbr = str(val.get("abbreviation") or "").strip().lower()
-        op = str(val.get("open_name") or k).strip().lower()
-        if (norm_low and (norm_low == c or norm_low == abbr or norm_low == op)) or (
-            open_low and (open_low == op or open_low == c or open_low == abbr)
-        ):
-            return val
-        if c and (c in norm_low or c in open_low):
-            return val
-        if abbr and len(abbr) >= 3 and (abbr in norm_low or abbr in open_low):
+        column_a = str(val.get("open_name") or k).strip()
+        if _normalize_unit_name(column_a) in candidates:
             return val
 
-    # 4. Спеціальний пошук для ТЦК (за збігом області)
+    # Районний/міський ТЦК зводиться до обласного, але сам рядок однаково
+    # вибирається лише за назвою зі стовпця A.
+    norm_low = (norm_code or "").casefold()
+    open_low = (open_name or "").casefold()
     if "тцк" in norm_low or "центр" in norm_low or "отцк" in norm_low or "тцк" in open_low:
         for k, val in mapping_dict.items():
             if not isinstance(val, dict):
                 continue
-            k_low = str(k).lower()
-            val_c = str(val.get("cipher") or "").lower()
-            val_op = str(val.get("open_name") or "").lower()
-            val_abbr = str(val.get("abbreviation") or "").lower()
+            column_a_low = str(val.get("open_name") or k).casefold()
             for stem in _UKRAINE_OBLAST_STEMS:
-                if (stem in norm_low or stem in open_low) and (stem in k_low or stem in val_c or stem in val_op or stem in val_abbr):
+                if (stem in norm_low or stem in open_low) and (
+                    stem in column_a_low
+                ):
                     return val
     return None
 
@@ -798,17 +766,15 @@ def _auto_abbreviate_unit_name(open_name: str) -> str:
 
 
 def _find_corps_entry(corps_col_val: str, corps_abbr_val: str, mapping_dict: dict) -> dict | None:
-    """Шукає рядок корпусу у таблиці за ключем, скороченням або повною назвою."""
+    """Шукає рядок корпусу лише за назвою зі стовпця A."""
     entry = mapping_dict.get(corps_col_val) or mapping_dict.get(corps_abbr_val)
     if isinstance(entry, dict) and entry.get("cipher"):
         return entry
     for _name, _val in mapping_dict.items():
         if not isinstance(_val, dict):
             continue
-        abbr = str(_val.get("abbreviation") or _val.get("abbr") or "").strip()
-        if abbr and _extract_corps_abbr(abbr) == corps_abbr_val and _val.get("cipher"):
-            return _val
-        if _extract_corps_abbr(_name) == corps_abbr_val and _val.get("cipher"):
+        column_a = str(_val.get("open_name") or _name).strip()
+        if _extract_corps_abbr(column_a) == corps_abbr_val and _val.get("cipher"):
             return _val
     return None
 
@@ -825,16 +791,17 @@ def _build_sender_key(closed_code: str, abbreviation: str, corps_col: str, corps
         corps_cipher = corps_resolved_cipher.get(corps_abbr, short_cipher)
         corps_entry = _find_corps_entry(corps_col, corps_abbr, mapping_dict)
         if corps_entry:
-            c_abbr = str(corps_entry.get("abbreviation") or corps_entry.get("abbr") or corps_abbr).strip()
-            if c_abbr:
-                if re.search(r"\bА\s*\d{4}\b", c_abbr, re.IGNORECASE) or (corps_cipher and corps_cipher.casefold() in c_abbr.casefold()):
-                    sender_key = c_abbr
-                elif corps_cipher:
-                    sender_key = f"{c_abbr} {corps_cipher}"
-                else:
-                    sender_key = c_abbr
-            else:
-                sender_key = f"{corps_abbr} {corps_cipher}".strip() if corps_cipher else corps_abbr
+            # Ключ корпусу будуємо ТИМИ САМИМИ правилами, що й для самого
+            # корпусу: інакше корпус із порожньою колонкою C отримував два
+            # різні ключі («14АК А5555» через частину і «А5555» напряму),
+            # і на один корпус створювалося два витяги.
+            sender_key, _ = _build_sender_key(
+                str(corps_entry.get("cipher") or corps_cipher),
+                str(corps_entry.get("abbreviation") or corps_entry.get("abbr") or "").strip(),
+                "",
+                corps_resolved_cipher,
+                mapping_dict,
+            )
         else:
             sender_key = f"{corps_abbr} {corps_cipher}".strip() if corps_cipher else corps_abbr
         return sender_key, corps_abbr
@@ -867,15 +834,11 @@ def _short_closed_code(code: str, abbreviation: str = "") -> str:
 
     abbr = str(abbreviation).strip()
 
-    # Для ТЦК та СП — повертаємо лаконічну назву (напр. 'Київський ОТЦК та СП') без дублювання довгої назви
+    # Для ТЦК та СП джерелом є виключно таблиця: точний текст колонки C,
+    # а якщо вона порожня — точний текст колонки B. Не нормалізуємо й не
+    # конструюємо назву з окремо знайденого прикметника.
     if "ТЦК" in abbr.upper() or "ТЦК" in cipher.upper() or "ТЕРИТОРІАЛЬН" in cipher.upper() or "ЦЕНТЕР" in cipher.upper() or "ЦЕНТР" in cipher.upper():
-        if abbr:
-            return abbr
-        reg = re.search(r"\b([А-ЯІЇЄ][а-яіїє'ʼ]+(?:ськ|цьк|зьк)\w*)\b", cipher, re.IGNORECASE)
-        if reg:
-            reg_nom = _normalize_region_to_nominative(reg.group(1))
-            return f"{reg_nom} ОТЦК та СП"
-        return "Обласний ТЦК та СП"
+        return abbr or cipher
 
     if abbr and abbr != cipher and abbr.casefold() not in cipher.casefold():
         return f"{abbr} {cipher}"
@@ -951,44 +914,68 @@ def _get_item_main_text(lines: list[str]) -> str:
     2. Біографічні та облікові рядки (р.н., освіта, ІПН/РНОКПП, ВОС, 'у ЗС із...',
        'призваний...', 'перебуває на обліку...', 'підлягає направленню на військовий облік...').
     """
+    hard_bio_markers = (
+        "народивс",
+        "народил",
+        "р.н.",
+        "р. н.",
+        "року народження",
+        "рнокпп",
+        "іпн",
+        "освіта",
+        "вос-",
+        "вос ",
+        "у зс",
+        "у зсу",
+        "призваний",
+        "призвана",
+    )
+    accounting_markers = (
+        "військовий облік",
+        "військовому обліку",
+        "військового обліку",
+        "підлягає",
+        "підлягають",
+        "направленню на",
+        "перебуває на",
+        "перебувають на",
+    )
     selected_lines = []
     for line in lines:
         clean = line.strip()
         low = clean.lower()
+        if not clean:
+            continue
         if clean.startswith("Підстава") or clean.startswith("підстава"):
             continue
-        # Біографічні та реєстраційно-облікові рядки не є призначенням пункту наказу!
-        if (
-            "народивс" in low
-            or "народил" in low
-            or "р.н." in low
-            or "р. н." in low
-            or "року народження" in low
-            or "рнокпп" in low
-            or "іпн" in low
-            or "освіта" in low
-            or "вос-" in low
-            or "вос " in low
-            or "у зс" in low
-            or "у зсу" in low
-            or "призваний" in low
-            or "призвана" in low
-            or "військовий облік" in low
-            or "військовому обліку" in low
-            or "військового обліку" in low
-            or "підлягає" in low
-            or "підлягають" in low
-            or "направленню на" in low
-            or "перебуває на" in low
-            or "перебувають на" in low
-            or "тцк" in low
-            or "ртцк" in low
-            or "отцк" in low
-            or "омтцк" in low
-        ):
+        # У частині наказів розпорядчий текст і біографічні відомості стоять
+        # в одному абзаці. Не відкидаємо весь абзац: залишаємо початок із
+        # адресатом зі стовпця A та відрізаємо лише біографічний хвіст.
+        cutoff_positions = [low.find(marker) for marker in hard_bio_markers if marker in low]
+        if cutoff_positions:
+            main_prefix = clean[: min(cutoff_positions)].rstrip(" ,;:–—-")
+            if main_prefix:
+                selected_lines.append(main_prefix)
             continue
+        accounting_positions = [low.find(marker) for marker in accounting_markers if marker in low]
+        if accounting_positions:
+            accounting_start = min(accounting_positions)
+            prefix = clean[:accounting_start]
+            has_item_label = bool(
+                re.match(r"^\s*\d{1,3}(?:\.\d{1,3})*[\.\)]\s*", clean)
+            )
+            prefix_without_label = re.sub(
+                r"^\s*\d{1,3}(?:\.\d{1,3})*[\.\)]\s*",
+                "",
+                prefix,
+            ).strip(" ,;:–—-")
+            # Окремий абзац військового обліку є біографічним. Якщо ж перед
+            # ним у тому самому абзаці є розпорядчий текст або це самостійний
+            # пронумерований пункт, не втрачаємо названий там маршрут ТЦК.
+            if not prefix_without_label and not has_item_label:
+                continue
         selected_lines.append(line)
-    return "\n".join(selected_lines) if selected_lines else "\n".join(lines[:1])
+    return "\n".join(selected_lines)
 
 
 @node(
@@ -1061,17 +1048,15 @@ def map_military_units(
         if clean:
             header_lines.append(line)
 
-    if not header_lines and lines:
-        header_lines = lines[:3]
-
     # ── Компілюємо патерни для кожної ВЧ ──────────────────────────────────────
     unit_patterns: list[tuple[str, str, str, re.Pattern]] = []
     unit_abbr_map: dict[str, str] = {}
 
     canonical_key_map: dict[str, str] = {}
-    cipher_digits_map: dict[str, tuple[str, str]] = {}
     corps_map: dict[str, str] = {}
     cipher_to_primary_key: dict[str, str] = {}
+    entry_routes_by_id: dict[int, tuple[str, str]] = {}
+    route_entries_by_sender_key: dict[str, dict] = {}
 
     # ── Прохід 1: визначаємо ЄДИНИЙ шифр для кожного Корпусу ─────────────────
     corps_resolved_cipher: dict[str, str] = {}  # corps_abbr -> шифр корпусу
@@ -1119,11 +1104,6 @@ def map_military_units(
             closed_code = str(mapped_val)
             abbreviation = ""
 
-        low_open = open_name.lower()
-        is_tck_entry = "тцк" in low_open or "територіальн" in low_open or "центр" in low_open
-        if isinstance(mapped_val, dict) and not abbreviation and not corps_col and not is_tck_entry:
-            abbreviation = _auto_abbreviate_unit_name(open_name)
-
         short_cipher = _short_closed_code(closed_code)
         sender_key, resolved_abbr = _build_sender_key(closed_code, abbreviation, corps_col, corps_resolved_cipher, mapping_dict)
 
@@ -1135,6 +1115,16 @@ def map_military_units(
             else:
                 cipher_to_primary_key[short_cipher] = sender_key
 
+        if isinstance(mapped_val, dict):
+            entry_routes_by_id[id(mapped_val)] = (sender_key, open_name)
+            route_entry = mapped_val
+            if corps_col:
+                corps_abbr = _extract_corps_abbr(corps_col)
+                corps_entry = _find_corps_entry(corps_col, corps_abbr, mapping_dict)
+                if isinstance(corps_entry, dict):
+                    route_entry = corps_entry
+            route_entries_by_sender_key[sender_key] = route_entry
+
         unit_abbr_map[sender_key] = resolved_abbr or unit_abbr_map.get(sender_key, "")
 
         for variant in [open_name, closed_code, f"в/ч {short_cipher}", short_cipher, abbreviation, corps_col]:
@@ -1143,11 +1133,6 @@ def map_military_units(
                 if corps_col:
                     corps_abbr = _extract_corps_abbr(corps_col)
                     canonical_key_map[corps_abbr] = sender_key
-
-        # Реєструємо 4-значні цифри шифру для миттєвого пошуку прямо за шифром в/ч у тексті
-        c_digits = re.findall(r"\d{4}", closed_code)
-        if c_digits:
-            cipher_digits_map[c_digits[0]] = (sender_key, open_name)
 
         clean_open = open_name.lstrip("#").strip()
         low_open = clean_open.lower()
@@ -1158,19 +1143,14 @@ def map_military_units(
             pattern = re.compile(re.escape(clean_open), re.IGNORECASE)
 
         unit_patterns.append((open_name, closed_code, corps_col, sender_key, pattern))
-        if abbreviation and abbreviation != open_name:
-            abbr_pattern = _build_unit_fuzzy_pattern(abbreviation) if fuzzy_match else re.compile(re.escape(abbreviation), re.IGNORECASE)
-            unit_patterns.append((abbreviation, closed_code, corps_col, sender_key, abbr_pattern))
-
-        if closed_code and closed_code != open_name:
-            code_pattern = _build_unit_fuzzy_pattern(closed_code) if fuzzy_match else re.compile(re.escape(closed_code), re.IGNORECASE)
-            unit_patterns.append((closed_code, closed_code, corps_col, sender_key, code_pattern))
-
-        if short_cipher and short_cipher != open_name and short_cipher != closed_code:
-            short_pattern = re.compile(r"\b" + re.escape(short_cipher) + r"\b", re.IGNORECASE)
-            unit_patterns.append((short_cipher, closed_code, corps_col, sender_key, short_pattern))
 
     unit_patterns.sort(key=lambda x: (not str(x[0]).startswith("#"), -len(str(x[0]))))
+
+    def route_from_current_table(entry: dict | None) -> tuple[str, str] | None:
+        """Повертає маршрут лише для рядка поточної Excel-таблиці."""
+        if not isinstance(entry, dict):
+            return None
+        return entry_routes_by_id.get(id(entry))
 
     # Шукаємо вихідну ВЧ у заголовочній шапці наказу (HEADER)
     header_text = "\n".join(header_lines)
@@ -1180,12 +1160,6 @@ def map_military_units(
         if m:
             header_zvidky_unit = (sender_key, open_name)
             break
-    if not header_zvidky_unit:
-        h_ciphers = re.findall(r"\bА\s*(\d{4})\b", header_text, re.IGNORECASE)
-        for digit in h_ciphers:
-            if digit in cipher_digits_map:
-                header_zvidky_unit = cipher_digits_map[digit]
-                break
 
     # ── Парсимо тіло наказу у блоки (§-параграфи та пронумеровані пункти) ─────
     blocks = []
@@ -1230,7 +1204,10 @@ def map_military_units(
 
         is_new_item = (
             not is_section_marker
-            and not ("р.н." in clean or "р. н." in clean or clean.startswith("Підстава"))
+            # Наявність «р.н.» наприкінці того самого абзацу не скасовує
+            # номер пункту на його початку. Раніше через це пункти 2/4/7/8
+            # приєднувалися до шапки й зовсім не потрапляли в маршрутизацію.
+            and not clean.startswith("Підстава")
             and bool(re.match(r"^\d{1,3}(?:\.\d{1,3})*[\.\)]\s+", clean))
         )
 
@@ -1321,6 +1298,12 @@ def map_military_units(
     unit_counts: dict[str, int] = {}
     unit_open_names: dict[str, set[str]] = {}
     match_report_rows = []
+    # Ці два списки є джерелом даних для вкладок і Excel-контролю
+    # генератора. Раніше ключі очікувалися в інтерфейсі, але не поверталися
+    # звідси, через що «Контроль пропущених пунктів» завжди був порожнім.
+    unmatched_items: list[dict] = []
+    skipped_items: list[dict] = []
+    routing_audit: list[dict] = []
 
     processed_lines = list(lines)
     active_section_units: set[tuple[str, str]] = set()
@@ -1352,7 +1335,10 @@ def map_military_units(
                 if not kudy_units:
                     sec_tck = _extract_tck_sender(kudy_text)
                     if sec_tck:
-                        kudy_units.add((sec_tck, "ТЦК та СП"))
+                        sec_tck_entry = _find_entry_in_mapping(sec_tck, sec_tck, mapping_dict)
+                        sec_tck_route = route_from_current_table(sec_tck_entry)
+                        if sec_tck_route:
+                            kudy_units.add(sec_tck_route)
 
             # 2. Знаходимо ВЧ напрямку ЗВІДКИ (або загальну ВЧ у шапці)
             zvidky_units: set[tuple[str, str]] = set()
@@ -1366,10 +1352,7 @@ def map_military_units(
                     zvidky_units.add((sender_key, target_name))
                     break
 
-            sec_units = (zvidky_units | kudy_units)
-            if len(sec_units) > 2:
-                sec_units = set(list(sec_units)[:2])
-
+            sec_units = zvidky_units | kudy_units
             active_section_units = sec_units if sec_units else ({header_zvidky_unit} if header_zvidky_unit else set())
             continue
 
@@ -1383,12 +1366,14 @@ def map_military_units(
             "\n".join(block["lines"]),
             flags=re.IGNORECASE | re.UNICODE,
         )
+        full_item_text = "\n".join(block["lines"]).strip()
         block_raw_text = _get_item_main_text(block["lines"])
         block_replaced_lines = list(block["lines"])
         matched_units_in_block: set[tuple[str, str]] = set()
         item_destinations: set[tuple[str, str]] = set()
+        matched_open_names_for_item: list[str] = []
 
-        # 1. Зіставлення за патернами з колонок A (повна назва) та C (скорочення)
+        # 1. Зіставлення виключно за пошуковими назвами зі стовпця A.
         matched_clean_names = set()
         for open_name, closed_code, corps_col, sender_key, pattern in unit_patterns:
             clean_name = open_name.lstrip("#").strip().lower()
@@ -1400,6 +1385,8 @@ def map_military_units(
                 continue
 
             matched_clean_names.add(clean_name)
+            if open_name not in matched_open_names_for_item:
+                matched_open_names_for_item.append(open_name)
 
             for found_form in set(str(m) if isinstance(m, str) else str(m[0]) for m in all_matches):
                 existing = next(
@@ -1420,32 +1407,76 @@ def map_military_units(
             is_tck_entry = "тцк" in low_open or "територіальн" in low_open or "центр" in low_open
             target_name = sender_key if is_tck_entry else (corps_col if (corps_col and ("корпус" in matched_str.lower() or "ак" in matched_str.lower())) else open_name)
             item_destinations.add((sender_key, target_name))
-            if len(item_destinations) >= 2:
-                break
 
-        # 2. Пошук за цифровими шифрами в/ч (наприклад: військової частини А2424 або А 2828)
-        if not item_destinations:
-            found_ciphers = re.findall(r"\bА\s*(\d{4})\b", block_raw_text, re.IGNORECASE)
-            for digit in found_ciphers:
-                if digit in cipher_digits_map:
-                    s_key, o_name = cipher_digits_map[digit]
-                    item_destinations.add((s_key, o_name))
-                    break
+        # 2. Центри рекрутингу: у словнику номер часто записано після назви
+        # («Центр рекрутингу № 7»), а в наказі — перед нею («7 центру
+        # рекрутингу»). Зіставляємо номер і ключові слова окремо, без
+        # прив'язки до конкретного номера та лише серед записів Excel.
+        recruiting_numbers = set(
+            re.findall(
+                r"\b(\d{1,3})[-\s]*(?:-?й|-?го|-?му|-?м)?\s*"
+                r"(?:центр\w*|цнтр\w*)\s+рекрутинг\w*\b",
+                block_raw_text,
+                re.IGNORECASE | re.UNICODE,
+            )
+        )
+        matched_recruiting_entries: set[str] = set()
+        for open_name, closed_code, corps_col, sender_key, pattern in unit_patterns:
+            entry_text = str(open_name).casefold()
+            if open_name in matched_recruiting_entries:
+                continue
+            matching_number = next(
+                (
+                    number
+                    for number in recruiting_numbers
+                    if re.search(rf"(?<!\d){re.escape(number)}(?!\d)", entry_text)
+                ),
+                None,
+            )
+            is_recruiting_entry = (
+                "центр" in entry_text and "рекрут" in entry_text
+            ) or bool(
+                matching_number
+                and re.search(
+                    rf"(?<!\d){re.escape(matching_number)}(?!\d)\s*цр\b",
+                    entry_text,
+                    re.IGNORECASE | re.UNICODE,
+                )
+            )
+            if (
+                not recruiting_numbers
+                or not matching_number
+                or not is_recruiting_entry
+            ):
+                continue
+            matched_recruiting_entries.add(open_name)
+            if open_name not in matched_open_names_for_item:
+                matched_open_names_for_item.append(open_name)
+            item_destinations.add((sender_key, sender_key))
 
         # 3. Якщо в тексті згадується ТЦК (районний/міський -> Область) — додаємо його
         tck_sender = _extract_tck_sender(block_raw_text)
         if tck_sender and tck_sender not in [s for s, _ in item_destinations]:
-            item_destinations.add((tck_sender, "ТЦК та СП"))
+            tck_entry = _find_entry_in_mapping(tck_sender, tck_sender, mapping_dict)
+            tck_route = route_from_current_table(tck_entry)
+            if tck_route and tck_route[0] not in [s for s, _ in item_destinations]:
+                item_destinations.add(tck_route)
 
         # 4. Якщо в таблиці немає відповідностей — перевіряємо чи в тексті явно є АК
         if not item_destinations:
             corps_name = _extract_army_corps(block_raw_text)
             if corps_name:
                 corps_abbr = _extract_corps_abbr(corps_name)
-                c_key = canonical_key_map.get(corps_name) or canonical_key_map.get(corps_abbr) or corps_abbr
-                item_destinations.add((c_key, corps_name))
+                corps_entry = _find_corps_entry(corps_name, corps_abbr, mapping_dict)
+                corps_route = route_from_current_table(corps_entry)
+                if corps_route:
+                    item_destinations.add(corps_route)
 
-        # Якщо у тексті пункту є вказівка на внутрішнє переміщення ("цього самого батальйону", "цієї самої бригади", "цього ж полку") — цільова ВЧ = вихідна ВЧ
+        # Якщо у тексті пункту є вказівка на внутрішнє переміщення ("цього самого батальйону", "цієї самої бригади", "цього ж полку"),
+        # адресат береться з контексту. Але явно названа в цьому ж пункті ВЧ
+        # або ТЦК є саме цим контекстом — її не можна відкидати. Через старе
+        # очищення тут губилися, зокрема, пункти «... обласного ТЦК ... цього
+        # самого центру».
         has_internal_ref = bool(
             re.search(
                 r"\b(?:цього|цієї|того)\s+(?:самого|самої|ж)\b",
@@ -1453,19 +1484,59 @@ def map_military_units(
                 re.IGNORECASE,
             )
         )
-        if has_internal_ref:
-            item_destinations = set()
 
         # Формуємо підсумковий набір отримувачів пункту (Джерело ЗВІДКИ + Призначення КУДИ)
         base_source = active_section_units or ({header_zvidky_unit} if header_zvidky_unit else set())
         matched_units_in_block = set(base_source) | item_destinations
-        if len(matched_units_in_block) > 2:
-            matched_units_in_block = set(list(matched_units_in_block)[:2])
+
+        def audit_recipient_names(recipient_pairs: set[tuple[str, str]]) -> list[str]:
+            return sorted(
+                {
+                    _normalize_key(raw_code, canonical_key_map) or str(open_name).strip()
+                    for raw_code, open_name in recipient_pairs
+                    if str(raw_code).strip() or str(open_name).strip()
+                }
+            )
+
+        item_recipient_names = audit_recipient_names(item_destinations)
+        context_recipient_names = audit_recipient_names(set(base_source))
+        final_recipient_names = audit_recipient_names(matched_units_in_block)
+        # Зміни на посади в управлінні не включаються до загального переліку
+        # витягів. Це окремий напрямок розсилки, який користувач обробляє поза
+        # цим генератором, тому такий пункт не є «пропущеним».
+        is_management_change = (
+            not final_recipient_names
+            # Перевіряємо повний текст пункту, а не тільки розпорядчу його
+            # частину: фільтр маршрутизації прибирає службові/облікові рядки,
+            # але слово «управління» може бути саме в такому рядку.
+            and bool(re.search(r"\bуправлінн\w*\b", full_item_text, re.IGNORECASE))
+        )
+        applied_rules = []
+        if context_recipient_names:
+            applied_rules.append("адресат із шапки розділу/наказу")
+        if item_recipient_names:
+            applied_rules.append("адресат знайдено в пункті")
+        if has_internal_ref:
+            applied_rules.append(
+                "внутрішнє переміщення: "
+                + ("підтверджено названим адресатом" if item_recipient_names else "адресат із контексту")
+            )
+        if is_management_change:
+            applied_rules.append("зміна до управління: витяг виключено із загального переліку")
+        routing_audit.append(
+            {
+                "label": block.get("label", ""),
+                "matched_entries": ", ".join(matched_open_names_for_item) or "—",
+                "applied_rules": "; ".join(applied_rules) or "адресата не знайдено",
+                "item_recipients": ", ".join(item_recipient_names) or "—",
+                "context_recipients": ", ".join(context_recipient_names) or "—",
+                "final_recipients": ", ".join(final_recipient_names) or "—",
+            }
+        )
 
         if matched_units_in_block:
             # Правило 4.1: text — завжди з відкритими назвами (для витягів)
             # text_cipher — з шифрами (для повідомлень/рішень)
-            full_item_text = "\n".join(block["lines"]).strip()
             full_item_text_cipher = "\n".join(block_replaced_lines).strip()
             # Дедуплікація: один пункт наказу додається лише ОДИН раз на кожен унікальний norm_code
             seen_norm_codes: set[str] = set()
@@ -1475,17 +1546,17 @@ def map_military_units(
                     continue
                 seen_norm_codes.add(norm_code)
 
-                mapping_entry = _find_entry_in_mapping(norm_code, open_name, mapping_dict)
+                # Пошук адресата вже завершено за стовпцем A. Тут лише беремо
+                # вихідні B–F саме з обраного рядка (для підпорядкованої
+                # частини — з уже визначеного рядка корпусу).
+                mapping_entry = route_entries_by_sender_key.get(norm_code)
+                if mapping_entry is None:
+                    mapping_entry = _find_entry_in_mapping(norm_code, open_name, mapping_dict)
                 rec_to = ""
                 dest_where = ""
                 if mapping_entry:
                     rec_to = str(mapping_entry.get("recipient_to") or "").strip()
                     dest_where = str(mapping_entry.get("destination_where") or mapping_entry.get("dislocation") or "").strip()
-
-                # Автоматичний фоллбек для Кому якщо не заповнено в Excel
-                low_n = norm_code.lower()
-                if not rec_to and ("тцк" in low_n or "отцк" in low_n or "центр" in low_n):
-                    rec_to = f"Начальнику {norm_code}"
 
                 # Якщо поле 'Куди' не заповнено в Excel — встановлюємо маркер 'КУДИ' для ручної правки (виділяється червоним)
                 if not dest_where:
@@ -1524,6 +1595,22 @@ def map_military_units(
                 )
                 unit_counts[norm_code] = unit_counts.get(norm_code, 0) + 1
                 unit_open_names.setdefault(norm_code, set()).add(open_name)
+        elif is_management_change:
+            skipped_items.append(
+                {
+                    "label": block.get("label", ""),
+                    "text": "\n".join(block.get("lines", [])).strip(),
+                    "reason": "Зміна до управління: витяг не створюється у загальному переліку.",
+                }
+            )
+        else:
+            unmatched_items.append(
+                {
+                    "label": block.get("label", ""),
+                    "text": "\n".join(block.get("lines", [])).strip(),
+                    "reason": "Не знайдено адресата ні в пункті, ні в контексті розділу/наказу.",
+                }
+            )
 
     # ── Будуємо вихідні таблиці ────────────────────────────────────────────────
     table_rows = []
@@ -1557,6 +1644,9 @@ def map_military_units(
         "unit_paragraphs": unit_data_map,
         "unit_abbr_map": unit_abbr_map,
         "match_report": match_report,
+        "unmatched_items": unmatched_items,
+        "skipped_items": skipped_items,
+        "routing_audit": routing_audit,
         "summary": summary,
     }
 
