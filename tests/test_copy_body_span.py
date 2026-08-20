@@ -199,6 +199,48 @@ def test_marker_word_inside_an_item_does_not_cut_the_signer():
     assert last == 6
 
 
+def test_signer_before_back_page_table_is_kept():
+    """Підписант стоїть у кінці сторінки ПЕРЕД таблицею-зворотом.
+
+    Звання і прізвище вирівняні пробілами, а не таблицею. Таблиця — зворот
+    останньої сторінки, її треба відсікти навіть без відомого маркера.
+    """
+    doc = _FakeDoc(
+        [
+            "§ 2\r",                                 # 1
+            "11. Пункт.\r",                          # 2
+            "\r",
+            "Тимчасово виконуючий обов'язки\r",      # 4
+            "командувача військ\r",                  # 5
+            "оперативного командування\r",           # 6
+            "майор                Петро ПЕТРЕНКО\r",  # 7 ← звання + ПІБ
+            "Комірка без маркера" + CELL_MARK,       # 8 ← таблиця-зворот
+            "Ще комірка" + CELL_MARK,                # 9
+        ]
+    )
+
+    first, last = generator.App._order_body_span(doc)
+
+    assert first == 1
+    assert last == 7
+
+
+def test_table_is_excluded_even_without_known_marker():
+    doc = _FakeDoc(
+        [
+            "§ 1\r",
+            "1. Пункт.\r",
+            "Командир\r",
+            "полковник       І. ПЕТРЕНКО\r",
+            "Будь-який текст у таблиці" + CELL_MARK,
+        ]
+    )
+
+    _, last = generator.App._order_body_span(doc)
+
+    assert last == 4
+
+
 def test_span_stops_before_first_service_block():
     doc = _FakeDoc(
         [

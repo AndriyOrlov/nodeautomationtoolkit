@@ -2299,11 +2299,14 @@ class App:
         if total < 1:
             raise ValueError("наказ порожній")
 
-        # chr(7) — службовий знак кінця комірки таблиці у Word.
-        texts = [
-            (source_doc.Paragraphs(index).Range.Text or "").replace(chr(7), "").strip()
-            for index in range(1, total + 1)
+        # chr(7) — службовий знак кінця комірки таблиці у Word. Його наявність
+        # у тексті абзацу означає, що абзац лежить у таблиці, тож визначити це
+        # можна без додаткових звернень до Word.
+        raw_texts = [
+            (source_doc.Paragraphs(index).Range.Text or "") for index in range(1, total + 1)
         ]
+        texts = [raw.replace(chr(7), "").strip() for raw in raw_texts]
+        in_table = [chr(7) in raw for raw in raw_texts]
 
         body_start = 1
         for index, clean in enumerate(texts, start=1):
@@ -2340,18 +2343,22 @@ class App:
                 signer_start = index
                 break
 
-        # Службовий блок шукаємо ПІСЛЯ підписанта. Якщо шукати від початку
-        # тіла, випадковий маркер у пунктах обрізав би наказ разом зі
-        # званням і прізвищем підписанта.
-        service_start = total + 1
+        # Межа копіювання — те, що трапиться раніше ПІСЛЯ підписанта:
+        #   • службовий блок («Розрахунок розсилки…» тощо), або
+        #   • початок таблиці — це зворот останньої сторінки, його ігноруємо.
+        # Таблицю відсікаємо саме за структурою, а не за текстом: у ній може
+        # не бути жодного знайомого маркера.
+        boundary = total + 1
         for index in range(signer_start or body_start, total + 1):
-            if is_service_marker(texts[index - 1]):
-                service_start = index
+            if in_table[index - 1] or is_service_marker(texts[index - 1]):
+                boundary = index
                 break
 
+        # Останній змістовний рядок перед межею — це рядок звання та прізвища
+        # підписанта. Абзаци всередині таблиці сюди потрапити не можуть.
         last_paragraph = body_start
-        for index in range(service_start - 1, body_start - 1, -1):
-            if texts[index - 1]:
+        for index in range(boundary - 1, body_start - 1, -1):
+            if texts[index - 1] and not in_table[index - 1]:
                 last_paragraph = index
                 break
         return body_start, last_paragraph
