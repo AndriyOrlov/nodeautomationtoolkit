@@ -430,7 +430,14 @@ def _build_unit_fuzzy_pattern(open_name: str) -> re.Pattern:
     if not anchors:
         return re.compile(re.escape(open_name), re.IGNORECASE)
 
-    pattern_str = r".{0,180}?".join(anchors)
+    # Проміжок між словами назви навмисно широкий — між ними стоять почесні
+    # найменування («ордена Богдана Хмельницького», «імені гетьмана …»).
+    # Але він НЕ МОЖЕ містити номер іншої частини: інакше назва «зшивалася»
+    # з уламків двох сусідніх частин у переліку, напр. шаблон
+    # «158 окрема бригада підтримки» хибно збігався з текстом
+    # «158 окремого батальйону зв'язку та 47 окремої бригади підтримки».
+    gap = r"(?:(?!\b\d{1,4}\b)[\s\S]){0,180}?"
+    pattern_str = gap.join(anchors)
     return re.compile(pattern_str, re.IGNORECASE | re.UNICODE | re.DOTALL)
 
 
