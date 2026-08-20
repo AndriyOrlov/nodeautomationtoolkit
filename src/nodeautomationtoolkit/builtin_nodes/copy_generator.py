@@ -450,13 +450,15 @@ def build_copy_document(
     try:
         source_doc = word.Documents.Open(order_path, ReadOnly=True)
 
+        signature_line = ""
         if resolve_span is not None:
             resolved = resolve_span(source_doc)
             if isinstance(resolved, dict):
                 # Розширений варіант: межі + теги, похідні від наказу
-                # (реквізити підписанта для заготовки).
+                # (блок підписанта та його реквізити для заготовки).
                 body_start, signer_index = resolved["span"]
                 values = {**values, **resolved.get("values", {})}
+                signature_line = resolved.get("signature_line", "")
             else:
                 body_start, signer_index = resolved
         else:
@@ -486,15 +488,24 @@ def build_copy_document(
         )
         apply_keep_together_rules(doc, content_start, content_end)
 
-        # Останній абзац змісту — підписант наказу: підкреслюємо його
-        # й відсуваємо прізвище до правого краю.
-        content_range = doc.Range(content_start, content_end)
-        paragraph_count = content_range.Paragraphs.Count
-        for i in range(paragraph_count, 0, -1):
-            paragraph_range = content_range.Paragraphs(i).Range
-            if (paragraph_range.Text or "").strip("\r\x07 \t"):
-                format_signature_line(doc, paragraph_range, underline=True)
-                break
+        if signature_line:
+            # Підписант підставлений окремим тегом — форматуємо його останній
+            # рядок (звання та прізвище), а не останній пункт наказу.
+            finder = doc.Content.Find
+            finder.Text = signature_line
+            if finder.Execute():
+                format_signature_line(doc, finder.Parent.Paragraphs(1).Range, underline=True)
+                note("  Рядок підписанта оформлено.")
+            else:
+                note("  УВАГА: рядок підписанта у документі не знайдено.")
+        else:
+            # Підписант — частина змісту: форматуємо його останній абзац.
+            content_range = doc.Range(content_start, content_end)
+            for i in range(content_range.Paragraphs.Count, 0, -1):
+                paragraph_range = content_range.Paragraphs(i).Range
+                if (paragraph_range.Text or "").strip("\r\x07 \t"):
+                    format_signature_line(doc, paragraph_range, underline=True)
+                    break
 
         # Блок засвідчувача («Згідно з оригіналом» + посада + звання/прізвище)
         # іде суцільно, без порожніх абзаців. Форматуємо його ОСТАННІЙ рядок.

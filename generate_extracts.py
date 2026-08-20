@@ -2265,35 +2265,62 @@ class App:
                 highlighted += 1
         return highlighted
 
-    def _order_body_context(self, source_doc) -> dict:
+    def _order_body_context(self, source_doc, signer_as_tag: bool = False) -> dict:
         """Межі тіла наказу + реквізити його підписанта для тегів заготовки.
 
-        Примірник має ті самі теги підписанта, що й витяг: якщо у заготовці
-        стоять `{{підписант_посада}}` тощо, вони мають заповнюватись.
+        `signer_as_tag=True` — у заготовці є окремий тег `{{підписант}}`, тож
+        блок підписанта підставляється в нього, а `{{зміст}}` завершується
+        перед підписантом, щоб не дублювати його.
         """
-        first_paragraph, last_paragraph = self._order_body_span(source_doc)
-        signer = _find_order_signer(source_doc.Content.Text) or {}
+        parts = self._analyze_order(source_doc)
+        body_start = parts["body_start"]
+        last_paragraph = parts["last_paragraph"]
+        signer_start = parts["signer_start"]
+        texts = parts["texts"]
+
+        signature_line = ""
         values: dict[str, str] = {}
+        signer = _find_order_signer(source_doc.Content.Text) or {}
         if signer.get("position"):
             values["{{підписант_посада}}"] = _slash_to_lines(signer["position"])
         if signer.get("rank"):
             values["{{підписант_звання}}"] = signer["rank"]
         if signer.get("name"):
             values["{{підписант_піб}}"] = signer["name"]
-        return {"span": (first_paragraph, last_paragraph), "values": values}
+
+        if signer_as_tag and signer_start and signer_start <= last_paragraph:
+            # Блок підписанта беремо з наказу ЯК Є: звання та прізвище в ньому
+            # вирівняні пробілами, тому текст переносимо без змін.
+            signer_lines = [
+                texts[index - 1] for index in range(signer_start, last_paragraph + 1)
+            ]
+            filled = [line for line in signer_lines if line]
+            values["{{підписант}}"] = "\r".join(filled)
+            # Останній рядок блоку (звання та прізвище) підкреслюється й
+            # притискається праворуч — його треба знайти вже в документі.
+            signature_line = filled[-1] if filled else ""
+
+            # Зміст завершується перед підписантом.
+            body_end = body_start
+            for index in range(signer_start - 1, body_start - 1, -1):
+                if texts[index - 1]:
+                    body_end = index
+                    break
+            last_paragraph = body_end
+
+        return {
+            "span": (body_start, last_paragraph),
+            "values": values,
+            "signature_line": signature_line,
+        }
 
     @staticmethod
-    def _order_body_span(source_doc) -> tuple[int, int]:
-        """Межі тіла наказу разом із підписантом, у номерах абзаців Word.
+    def _analyze_order(source_doc) -> dict:
+        """Розбирає наказ на межі тіла, підписанта та службової частини.
 
         Працюємо з АБЗАЦАМИ напряму, а не через зіставлення рядків тексту:
         `Content.Text` не розбиває комірки таблиці на окремі рядки, тоді як
-        `doc.Paragraphs` рахує кожну комірку окремо. На наказі з таблицями
-        нумерація зсувалася, і межа копіювання відрізала підписанта.
-
-        Текстові правила ті самі, що у витягах: початок тіла — `§`,
-        пронумерований пункт або розпорядче слово; кінець — перший службовий
-        блок (`Розрахунок розсилки…`, `Згідно з оригіналом` тощо).
+        `doc.Paragraphs` рахує кожну комірку окремо.
         """
         total = source_doc.Paragraphs.Count
         if total < 1:
@@ -2361,7 +2388,18 @@ class App:
             if texts[index - 1] and not in_table[index - 1]:
                 last_paragraph = index
                 break
-        return body_start, last_paragraph
+        return {
+            "body_start": body_start,
+            "last_paragraph": last_paragraph,
+            "signer_start": signer_start,
+            "texts": texts,
+        }
+
+    @staticmethod
+    def _order_body_span(source_doc) -> tuple[int, int]:
+        """Межі тіла наказу разом із підписантом, у номерах абзаців Word."""
+        parts = App._analyze_order(source_doc)
+        return parts["body_start"], parts["last_paragraph"]
 
     def _insert_plain_content(self, doc, tag_range, encrypted_content: str) -> int:
         """Запасний спосіб вставки змісту — простим текстом.
@@ -4030,6 +4068,16 @@ class App:
                 )
                 return
 
+            # Якщо у заготовці є окремий тег підписанта — блок підписанта йде
+            # в нього, а зміст завершується перед ним. Інакше підписант
+            # лишається частиною змісту (сумісність зі старими заготовками).
+            signer_tag_in_template = "{{підписант}}" in template_text
+            self.log_p2(
+                "  Підписант: окремий тег {{підписант}}."
+                if signer_tag_in_template
+                else "  Підписант: у складі {{зміст}} (тегу {{підписант}} у заготовці немає)."
+            )
+
             required_tags = tuple(back_page_tag_values("номер", "01.01.2000"))
             missing_tags = [tag for tag in required_tags if tag not in template_text]
             if missing_tags:
@@ -4120,7 +4168,9 @@ class App:
                             os.path.abspath(working_copy),
                             os.path.abspath(target_file),
                             values,
-                            resolve_span=self._order_body_context,
+                            resolve_span=lambda source: self._order_body_context(
+                                source, signer_as_tag=signer_tag_in_template
+                            ),
                             log=self.log_p2,
                         ),
                         log=self.log_p2,
