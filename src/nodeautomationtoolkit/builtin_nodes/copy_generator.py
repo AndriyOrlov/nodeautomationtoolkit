@@ -50,8 +50,13 @@ _ORDER_BODY_KEYWORDS = (
 # Гілка з ініціалами має допускати прізвище і ВЕЛИКИМИ, і малими літерами,
 # інакше «С.М.ПОПКО» обрізається до «ПОПКО».
 _SIGNATURE_NAME_RE = re.compile(
+    # два ініціали: «С.М.ПОПКО»
     r"(?:[А-ЯІЇЄҐ]\.\s?[А-ЯІЇЄҐ]\.\s?[А-ЯІЇЄҐ][А-Яа-яІіЇїЄєҐґ'’-]+"
+    # один ініціал: «І. ПЕТРЕНКО» — інакше ініціал лишався б за межами хвоста
+    r"|[А-ЯІЇЄҐ]\.\s?[А-ЯІЇЄҐ][А-Яа-яІіЇїЄєҐґ'’-]+"
+    # повне ім'я: «Петро ПЕТРЕНКО»
     r"|[А-ЯІЇЄҐ][а-яіїєґ'’-]+\s+[А-ЯІЇЄҐ][А-ЯІЇЄҐ'’-]+"
+    # саме лише прізвище
     r"|[А-ЯІЇЄҐ][А-ЯІЇЄҐ'’-]{2,})\s*$"
 )
 
@@ -247,8 +252,19 @@ def format_signature_line(doc, paragraph_range, underline: bool) -> None:
         in_table = False
 
     if not in_table:
-        tail = find_signature_name_tail((paragraph_range.Text or "").rstrip("\r\x07"))
+        text = (paragraph_range.Text or "").rstrip("\r\x07")
+        tail = find_signature_name_tail(text)
         if tail:
+            # У наказі звання та прізвище часто розділені табуляціями й
+            # крапками-заповнювачами. Замінюємо цей проміжок одним пробілом,
+            # інакше положення прізвища визначали б табуляції, а не пробіли.
+            position = text.rfind(tail)
+            head = text[:position].rstrip(" \t.·…_")
+            gap_start = paragraph_range.Start + len(head)
+            gap_end = paragraph_range.Start + position
+            if gap_end > gap_start:
+                doc.Range(gap_start, gap_end).Delete()
+                doc.Range(gap_start, gap_start).InsertBefore(" ")
             push_tail_to_right_edge(doc, paragraph_range, tail)
     if underline:
         paragraph_range.Font.Underline = _WD_UNDERLINE_SINGLE
@@ -407,6 +423,16 @@ def format_certifier_block(doc) -> bool:
         last_index = index
 
     format_signature_line(doc, doc.Paragraphs(last_index).Range, underline=True)
+
+    # Підписант і «Згідно з оригіналом» — один неподільний блок: інакше
+    # засвідчувач відривається на наступну сторінку (правило 5.4 AGENT.md).
+    chain_start = start_index
+    while chain_start > 1 and (doc.Paragraphs(chain_start - 1).Range.Text or "").strip("\r\x07 \t"):
+        chain_start -= 1
+    for index in range(chain_start, last_index + 1):
+        paragraph_format = doc.Paragraphs(index).Range.ParagraphFormat
+        paragraph_format.KeepTogether = True
+        paragraph_format.KeepWithNext = index < last_index
     return True
 
 
