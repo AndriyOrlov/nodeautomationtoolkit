@@ -117,6 +117,78 @@ def test_no_distribution_tables_reach_the_copy():
     assert not any("Згідно з оригіналом" in line for line in copied)
 
 
+CELL_MARK = chr(7)  # службовий знак кінця комірки таблиці у Word
+
+
+class _FakeRange:
+    def __init__(self, text):
+        self.Text = text
+
+
+class _FakeParagraph:
+    def __init__(self, text):
+        self.Range = _FakeRange(text)
+
+
+class _FakeParagraphs:
+    def __init__(self, texts):
+        self._items = [_FakeParagraph(t) for t in texts]
+        self.Count = len(self._items)
+
+    def __call__(self, index):
+        return self._items[index - 1]
+
+
+class _FakeDoc:
+    def __init__(self, texts):
+        self.Paragraphs = _FakeParagraphs(texts)
+
+
+def test_span_survives_table_inside_the_order():
+    """Раніше межі рахувались через зіставлення рядків тексту з абзацами.
+
+    `Content.Text` не розбиває комірки таблиці на рядки, а `doc.Paragraphs`
+    рахує кожну окремо — нумерація зсувалась і підписант відрізався.
+    """
+    doc = _FakeDoc(
+        [
+            "НАКАЗ\r",                                  # 1 шапка
+            "§ 1\r",                                     # 2 ← початок тіла
+            "1. Пункт.\r",                               # 3
+            "Комірка А" + CELL_MARK,                     # 4 таблиця
+            "Комірка Б" + CELL_MARK,                     # 5 таблиця
+            "\r",                                        # 6
+            "Командир частини\r",                        # 7 підписант
+            "полковник І. ПЕТРЕНКО\r",                   # 8 ← кінець копіювання
+            "\r",                                        # 9
+            "Розрахунок розсилки витягів із наказу:\r",  # 10 службовий блок
+            "1\r",                                       # 11
+            "Згідно з оригіналом\r",                     # 12
+        ]
+    )
+
+    first, last = generator.App._order_body_span(doc)
+
+    assert first == 2
+    assert last == 8
+
+
+def test_span_stops_before_first_service_block():
+    doc = _FakeDoc(
+        [
+            "§ 1\r",
+            "1. Пункт.\r",
+            "Командир\r",
+            "Розрахунок розсилки витягів із наказу:\r",
+            "Згідно з оригіналом\r",
+        ]
+    )
+
+    first, last = generator.App._order_body_span(doc)
+
+    assert (first, last) == (1, 3)
+
+
 def test_order_without_distribution_table_keeps_everything():
     text = "\n".join(["§ 1", "1. Пункт.", "", "Командир", "полковник   Іван ПЕТРЕНКО"])
     assert find_distribution_cutoff_line(text) == len(text.splitlines())

@@ -46,7 +46,11 @@ from nodeautomationtoolkit.builtin_nodes.message_order import (
     cipher_unit_names,
     find_content_start_line,
 )
-from nodeautomationtoolkit.builtin_nodes.copy_generator import build_copy_document
+from nodeautomationtoolkit.builtin_nodes.copy_generator import (
+    build_copy_document,
+    retry_on_busy_word,
+    _ORDER_BODY_KEYWORDS,
+)
 from nodeautomationtoolkit.builtin_nodes.compare_window import DocxCompareWindow
 
 
@@ -2282,36 +2286,58 @@ class App:
     def _order_body_span(source_doc) -> tuple[int, int]:
         """Межі тіла наказу разом із підписантом, у номерах абзаців Word.
 
-        Підписант визначається ТІЄЮ САМОЮ логікою, що й у витягах
-        (`_find_order_signer` / `find_distribution_cutoff_line`), а не окремим
-        алгоритмом — інакше результати двох режимів розходяться.
-        """
-        text = source_doc.Content.Text
+        Працюємо з АБЗАЦАМИ напряму, а не через зіставлення рядків тексту:
+        `Content.Text` не розбиває комірки таблиці на окремі рядки, тоді як
+        `doc.Paragraphs` рахує кожну комірку окремо. На наказі з таблицями
+        нумерація зсувалася, і межа копіювання відрізала підписанта.
 
-        # Відповідність рядків тексту абзацам Word — як у витягах.
-        line_to_paragraph: list[int] = []
-        for paragraph_index in range(1, source_doc.Paragraphs.Count + 1):
-            raw = source_doc.Paragraphs(paragraph_index).Range.Text
-            logical_lines = raw.rstrip("\r\x07").splitlines() or [""]
-            line_to_paragraph.extend([paragraph_index] * len(logical_lines))
-        if not line_to_paragraph:
+        Текстові правила ті самі, що у витягах: початок тіла — `§`,
+        пронумерований пункт або розпорядче слово; кінець — перший службовий
+        блок (`Розрахунок розсилки…`, `Згідно з оригіналом` тощо).
+        """
+        total = source_doc.Paragraphs.Count
+        if total < 1:
             raise ValueError("наказ порожній")
 
-        body_start_line = find_content_start_line(text)
-        signer = _find_order_signer(text)
+        # chr(7) — службовий знак кінця комірки таблиці у Word.
+        texts = [
+            (source_doc.Paragraphs(index).Range.Text or "").replace(chr(7), "").strip()
+            for index in range(1, total + 1)
+        ]
 
-        # Службові блоки («Розрахунок розсилки…», «Згідно з оригіналом» тощо)
-        # у примірник не переносяться. Шукаємо ПЕРШИЙ такий блок ПІСЛЯ
-        # підписанта: `find_distribution_cutoff_line` сканує з кінця й повертає
-        # ОСТАННІЙ маркер, через що проміжні таблиці розсилки лишались усередині.
-        search_from = (signer["start_line"] + 1) if signer else body_start_line
-        cutoff_line = find_service_block_line(text, search_from)
-        cutoff_line = min(cutoff_line, len(line_to_paragraph))
+        body_start = 1
+        for index, clean in enumerate(texts, start=1):
+            if not clean:
+                continue
+            upper = clean.upper()
+            if (
+                clean.startswith("§")
+                or re.match(r"^\d+[\.\)]", clean)
+                or any(keyword in upper for keyword in _ORDER_BODY_KEYWORDS)
+            ):
+                body_start = index
+                break
 
-        last_line = max(body_start_line, cutoff_line - 1)
-        first_paragraph = line_to_paragraph[min(body_start_line, len(line_to_paragraph) - 1)]
-        last_paragraph = line_to_paragraph[min(last_line, len(line_to_paragraph) - 1)]
-        return first_paragraph, last_paragraph
+        # Перший службовий блок ПІСЛЯ тіла наказу. Саме перший, а не останній:
+        # між таблицями розсилки та «Згідно з оригіналом» ще стоять інші блоки.
+        service_start = total + 1
+        for index in range(body_start, total + 1):
+            clean = texts[index - 1].casefold()
+            if not clean:
+                continue
+            if any(
+                clean.startswith(marker) or clean == marker
+                for marker in _DISTRIBUTION_CUTOFF_MARKERS
+            ):
+                service_start = index
+                break
+
+        last_paragraph = body_start
+        for index in range(service_start - 1, body_start - 1, -1):
+            if texts[index - 1]:
+                last_paragraph = index
+                break
+        return body_start, last_paragraph
 
     def _insert_plain_content(self, doc, tag_range, encrypted_content: str) -> int:
         """Запасний спосіб вставки змісту — простим текстом.
