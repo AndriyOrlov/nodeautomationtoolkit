@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import re
+import time
 
 # Коди констант Word, щоб не тягнути залежність від win32com.client.constants
 _WD_GO_TO_PAGE = 1
@@ -53,6 +54,47 @@ _SIGNATURE_NAME_RE = re.compile(
     r"|[А-ЯІЇЄҐ][а-яіїєґ'’-]+\s+[А-ЯІЇЄҐ][А-ЯІЇЄҐ'’-]+"
     r"|[А-ЯІЇЄҐ][А-ЯІЇЄҐ'’-]{2,})\s*$"
 )
+
+
+# Коди та ознаки тимчасової зайнятості Word. Такі збої не є помилкою даних —
+# Word просто не встиг обробити попередній виклик, тому їх варто повторити.
+_TRANSIENT_COM_CODES = (
+    -2147418111,  # RPC_E_CALL_REJECTED — «Call was rejected by callee»
+    -2147417846,  # RPC_E_SERVERCALL_RETRYLATER — сервер зайнятий
+)
+_TRANSIENT_COM_MARKERS = (
+    "call was rejected",
+    "rejected by callee",
+    "server is busy",
+    "retrylater",
+)
+
+
+def is_transient_word_error(error: Exception) -> bool:
+    """Чи є збій тимчасовою зайнятістю Word (можна повторити)."""
+    code = getattr(error, "hresult", None)
+    args = getattr(error, "args", ()) or ()
+    if code in _TRANSIENT_COM_CODES or (args and args[0] in _TRANSIENT_COM_CODES):
+        return True
+    text = str(error).casefold()
+    if any(marker in text for marker in _TRANSIENT_COM_MARKERS):
+        return True
+    # Коли Word відхиляє виклик, pywin32 інколи не встигає розібрати об'єкт
+    # і повідомляє про відсутній атрибут («Open.Content»).
+    return isinstance(error, AttributeError)
+
+
+def retry_on_busy_word(action, attempts: int = 3, delay: float = 1.5, log=None):
+    """Повторює дію, якщо Word тимчасово відхилив виклик."""
+    for attempt in range(1, attempts + 1):
+        try:
+            return action()
+        except Exception as error:
+            if attempt >= attempts or not is_transient_word_error(error):
+                raise
+            if log:
+                log(f"  Word зайнятий ({error}); повтор {attempt + 1} з {attempts}…")
+            time.sleep(delay * attempt)
 
 
 def _paragraph_text(paragraph) -> str:
@@ -145,10 +187,17 @@ def find_signature_name_tail(text: str) -> str:
 def push_tail_to_right_edge(doc, paragraph_range, tail: str, limit: int = 400) -> int:
     """Відсуває хвіст рядка (прізвище) до самого правого краю пробілами.
 
-    Таблицею цього зробити не вдається, тому пробіли додаються, доки рядок не
-    почне переноситись, після чого остання порція знімається. Кількість рядків
-    беремо з `ComputeStatistics`, а не з `Information`, яка в прихованому Word
-    кидає помилку.
+    Таблицею цього зробити не вдається, тому підбирається максимальна
+    кількість пробілів, за якої рядок ще не переноситься.
+
+    Пошук ДВІЙКОВИЙ, а не послідовний: кожне вимірювання — це звернення до
+    Word, і послідовне додавання по одному пробілу давало сотні звернень на
+    кожен підпис. За великого пакета Word від такого навантаження починав
+    відхиляти виклики («Call was rejected by callee»). Двійковий пошук
+    вкладається приблизно у 9 вимірювань.
+
+    Кількість рядків беремо з `ComputeStatistics`, а не з `Information`, яка
+    в прихованому Word кидає помилку.
 
     Повертає кількість доданих пробілів.
     """
@@ -159,17 +208,30 @@ def push_tail_to_right_edge(doc, paragraph_range, tail: str, limit: int = 400) -
 
     insert_at = paragraph_range.Start + position
     base_lines = paragraph_range.ComputeStatistics(_WD_STATISTIC_LINES)
-    added = 0
+    current = 0
 
-    for batch in (8, 1):
-        while added + batch <= limit:
-            doc.Range(insert_at, insert_at).InsertBefore(" " * batch)
-            added += batch
-            if paragraph_range.ComputeStatistics(_WD_STATISTIC_LINES) > base_lines:
-                doc.Range(insert_at, insert_at + batch).Delete()
-                added -= batch
-                break
-    return added
+    def set_spaces(count: int) -> int:
+        """Лишає рівно `count` пробілів перед хвостом і повертає кількість рядків."""
+        nonlocal current
+        if count > current:
+            doc.Range(insert_at, insert_at).InsertBefore(" " * (count - current))
+        elif count < current:
+            doc.Range(insert_at, insert_at + (current - count)).Delete()
+        current = count
+        return paragraph_range.ComputeStatistics(_WD_STATISTIC_LINES)
+
+    low, high, best = 0, limit, 0
+    while low <= high:
+        middle = (low + high) // 2
+        if set_spaces(middle) > base_lines:
+            high = middle - 1          # рядок уже перенісся — забагато
+        else:
+            best = middle
+            low = middle + 1
+
+    if current != best:
+        set_spaces(best)
+    return best
 
 
 def format_signature_line(doc, paragraph_range, underline: bool) -> None:
@@ -333,7 +395,14 @@ def build_copy_document(
         source_doc = word.Documents.Open(order_path, ReadOnly=True)
 
         if resolve_span is not None:
-            body_start, signer_index = resolve_span(source_doc)
+            resolved = resolve_span(source_doc)
+            if isinstance(resolved, dict):
+                # Розширений варіант: межі + теги, похідні від наказу
+                # (реквізити підписанта для заготовки).
+                body_start, signer_index = resolved["span"]
+                values = {**values, **resolved.get("values", {})}
+            else:
+                body_start, signer_index = resolved
         else:
             # Запасний варіант, якщо межі не передали.
             signer_index = find_signer_paragraph_index(source_doc)

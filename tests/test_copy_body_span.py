@@ -73,6 +73,50 @@ def test_span_excludes_distribution_but_keeps_signer():
     assert not any("Архів" in line for line in copied)
 
 
+ORDER_WITH_TWO_SERVICE_BLOCKS = "\n".join(
+    [
+        "§ 1",                                        # 0
+        "1. Пункт.",                                  # 1
+        "",                                           # 2
+        "Командир військової частини А0000",          # 3 ← підписант
+        "полковник            Іван ПЕТРЕНКО",         # 4
+        "",                                           # 5
+        "Розрахунок розсилки витягів із наказу:",     # 6 ← ПЕРШИЙ службовий блок
+        "1",
+        "Розрахунок розсилки електронних повідомлень",
+        "Згідно з оригіналом",                        # 9 ← ОСТАННІЙ маркер
+    ]
+)
+
+
+def test_cutoff_takes_first_service_block_not_the_last():
+    """Сканування з кінця повертало останній маркер, і таблиці розсилки
+    лишалися всередині примірника."""
+    signer = find_order_signer(ORDER_WITH_TWO_SERVICE_BLOCKS)
+    assert signer is not None
+
+    first_block = generator.find_service_block_line(
+        ORDER_WITH_TWO_SERVICE_BLOCKS, signer["start_line"] + 1
+    )
+    last_marker = find_distribution_cutoff_line(ORDER_WITH_TWO_SERVICE_BLOCKS)
+
+    assert first_block == 6
+    assert last_marker == 9
+    assert first_block < last_marker
+
+
+def test_no_distribution_tables_reach_the_copy():
+    signer = find_order_signer(ORDER_WITH_TWO_SERVICE_BLOCKS)
+    cutoff = generator.find_service_block_line(
+        ORDER_WITH_TWO_SERVICE_BLOCKS, signer["start_line"] + 1
+    )
+    copied = ORDER_WITH_TWO_SERVICE_BLOCKS.splitlines()[:cutoff]
+
+    assert any("ПЕТРЕНКО" in line for line in copied)
+    assert not any("Розрахунок розсилки" in line for line in copied)
+    assert not any("Згідно з оригіналом" in line for line in copied)
+
+
 def test_order_without_distribution_table_keeps_everything():
     text = "\n".join(["§ 1", "1. Пункт.", "", "Командир", "полковник   Іван ПЕТРЕНКО"])
     assert find_distribution_cutoff_line(text) == len(text.splitlines())

@@ -622,6 +622,25 @@ def find_distribution_cutoff_line(text: str) -> int:
     return len(lines)
 
 
+def find_service_block_line(text: str, start_line: int = 0) -> int:
+    """Номер рядка ПЕРШОГО службового блоку, починаючи з `start_line`.
+
+    На відміну від `find_distribution_cutoff_line`, яка сканує з кінця й
+    повертає ОСТАННІЙ маркер, ця функція йде вперед. Для примірника потрібен
+    саме перший блок після підписанта: інакше проміжні таблиці на кшталт
+    «Розрахунок розсилки витягів із наказу» лишалися всередині документа.
+    """
+    raw_lines = str(text or "").replace("\x07", "").splitlines()
+    lines = [re.sub(r"\s+", " ", line).strip().casefold() for line in raw_lines]
+    for index in range(max(0, start_line), len(lines)):
+        clean = lines[index]
+        if not clean:
+            continue
+        if any(clean.startswith(marker) or clean == marker for marker in _DISTRIBUTION_CUTOFF_MARKERS):
+            return index
+    return len(lines)
+
+
 def _find_order_signer(text: str) -> dict[str, str] | None:
     """Повертає реквізити й номер рядка початку підписанта (Командувача) в наказі, відсікаючи таблицю розсилки."""
     raw_lines = str(text or "").replace("\x07", "").splitlines()
@@ -2242,6 +2261,23 @@ class App:
                 highlighted += 1
         return highlighted
 
+    def _order_body_context(self, source_doc) -> dict:
+        """Межі тіла наказу + реквізити його підписанта для тегів заготовки.
+
+        Примірник має ті самі теги підписанта, що й витяг: якщо у заготовці
+        стоять `{{підписант_посада}}` тощо, вони мають заповнюватись.
+        """
+        first_paragraph, last_paragraph = self._order_body_span(source_doc)
+        signer = _find_order_signer(source_doc.Content.Text) or {}
+        values: dict[str, str] = {}
+        if signer.get("position"):
+            values["{{підписант_посада}}"] = _slash_to_lines(signer["position"])
+        if signer.get("rank"):
+            values["{{підписант_звання}}"] = signer["rank"]
+        if signer.get("name"):
+            values["{{підписант_піб}}"] = signer["name"]
+        return {"span": (first_paragraph, last_paragraph), "values": values}
+
     @staticmethod
     def _order_body_span(source_doc) -> tuple[int, int]:
         """Межі тіла наказу разом із підписантом, у номерах абзаців Word.
@@ -2262,12 +2298,15 @@ class App:
             raise ValueError("наказ порожній")
 
         body_start_line = find_content_start_line(text)
-        # Службова таблиця розсилки/відміток у примірник не переноситься.
-        cutoff_line = min(find_distribution_cutoff_line(text), len(line_to_paragraph))
-
         signer = _find_order_signer(text)
-        if signer and signer["start_line"] >= cutoff_line:
-            cutoff_line = min(signer["start_line"] + 1, len(line_to_paragraph))
+
+        # Службові блоки («Розрахунок розсилки…», «Згідно з оригіналом» тощо)
+        # у примірник не переносяться. Шукаємо ПЕРШИЙ такий блок ПІСЛЯ
+        # підписанта: `find_distribution_cutoff_line` сканує з кінця й повертає
+        # ОСТАННІЙ маркер, через що проміжні таблиці розсилки лишались усередині.
+        search_from = (signer["start_line"] + 1) if signer else body_start_line
+        cutoff_line = find_service_block_line(text, search_from)
+        cutoff_line = min(cutoff_line, len(line_to_paragraph))
 
         last_line = max(body_start_line, cutoff_line - 1)
         first_paragraph = line_to_paragraph[min(body_start_line, len(line_to_paragraph) - 1)]
@@ -4010,13 +4049,18 @@ class App:
                     working_copy = copy_template_for_editing(
                         back_page_abs, os.path.join(target_dir, "_nat_tmpl.docx")
                     )
-                    final_pages = build_copy_document(
-                        word,
-                        os.path.abspath(order_path),
-                        os.path.abspath(working_copy),
-                        os.path.abspath(target_file),
-                        values,
-                        resolve_span=self._order_body_span,
+                    # Під кінець великого пакета Word може тимчасово відхиляти
+                    # виклики — такий збій не є помилкою даних, тому повторюємо.
+                    final_pages = retry_on_busy_word(
+                        lambda: build_copy_document(
+                            word,
+                            os.path.abspath(order_path),
+                            os.path.abspath(working_copy),
+                            os.path.abspath(target_file),
+                            values,
+                            resolve_span=self._order_body_context,
+                            log=self.log_p2,
+                        ),
                         log=self.log_p2,
                     )
 
