@@ -18,11 +18,34 @@ def test_missing_or_invalid_date_is_not_replaced_with_current_date():
     assert format_ukr_date("") == ""
 
 
+def test_slash_becomes_new_line_for_certifier_and_executor():
+    """«/» у посаді розбиває її на абзаци — правило спільне для витягів і примірників."""
+    from generate_extracts import _slash_to_lines
+
+    assert _slash_to_lines("Начальник штабу / полковник") == "Начальник штабу\rполковник"
+    assert _slash_to_lines("") == ""
+
+
+def test_slash_rule_keeps_unit_codes_and_dates_intact():
+    """«в/ч» та числові дроби на кшталт «1/2» розбивати не можна."""
+    from generate_extracts import _slash_to_lines
+
+    assert _slash_to_lines("Командир в/ч А0000") == "Командир в/ч А0000"
+    assert _slash_to_lines("наказ 1/2") == "наказ 1/2"
+
+
+def test_order_number_tag_always_has_number_sign_without_space():
+    """`{{номер_наказу}}` має бути «№555» в усіх режимах — без пробілу."""
+    values = back_page_tag_values("555", "06.08.2026")
+    assert values["{{номер_наказу}}"] == "№555"
+    assert "№ " not in values["{{номер_наказу}}"]
+
+
 def test_back_page_tags_use_only_filename_metadata_and_copy_two_label():
     assert back_page_tag_values("396", "06.08.2026") == {
         "{{згідно_з_оригіналом}}": "Згідно з оригіналом",
         "{{примірник}}": "Примірник № 2",
-        "{{номер_наказу}}": "396",
+        "{{номер_наказу}}": "№396",
         "{{дата_наказу}}": "“06” серпня 2026 року",
     }
     assert back_page_tag_values("", "") == {

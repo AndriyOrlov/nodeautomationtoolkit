@@ -41,7 +41,12 @@ from nodeautomationtoolkit.builtin_nodes.recipient_mapping import (
     _format_full_closed_unit_text,
     _format_item_numbers_range,
 )
-from nodeautomationtoolkit.builtin_nodes.message_order import generate_decision_order
+from nodeautomationtoolkit.builtin_nodes.message_order import (
+    generate_decision_order,
+    cipher_unit_names,
+    find_content_start_line,
+)
+from nodeautomationtoolkit.builtin_nodes.copy_generator import build_copy_document
 from nodeautomationtoolkit.builtin_nodes.compare_window import DocxCompareWindow
 
 
@@ -77,6 +82,20 @@ def format_ukr_date(d_str: str) -> str:
     ]
     m_str = months[d.month - 1]
     return f"“{d.strftime('%d')}” {m_str} {d.year} року"
+
+
+def format_message_date(d_str: str) -> str:
+    """Форматує дату для ПОВІДОМЛЕНЬ: 20.05.2025 року.
+
+    У повідомленнях дата не розкривається словами: на відміну від витягів,
+    де діє військовий стандарт `“20” травня 2025 року` (`format_ukr_date`),
+    тут лишається числовий запис.
+    """
+    try:
+        d = datetime.strptime(str(d_str).strip(), "%d.%m.%Y")
+    except (AttributeError, ValueError):
+        return ""
+    return f"{d.strftime('%d.%m.%Y')} року"
 
 
 def extract_metadata_from_filename(filename: str):
@@ -141,6 +160,22 @@ def build_extracts_filename(order_num: str, order_date: str) -> str:
     return " ".join(parts) + ".docx"
 
 
+def _slash_to_lines(text_val: str) -> str:
+    """Конвертує слеші ' / ' або '/' (крім 'в/ч' та дат) у переноси рядків для Word.
+
+    Використовується і витягами, і примірниками, тому живе на рівні модуля:
+    як вкладена функція вона була видима лише всередині `run_extracts`.
+    """
+    if not text_val:
+        return ""
+    t = re.sub(r"\b([вВ])\s*/\s*([чЧ])\b", r"\1_SLASH_TEMP_\2", str(text_val))
+    t = re.sub(r"(\d)\s*/\s*(\d)", r"\1_NUMSLASH_TEMP_\2", t)
+    t = re.sub(r"\s*/\s*", "\r", t)
+    t = t.replace("_SLASH_TEMP_", "/")
+    t = t.replace("_NUMSLASH_TEMP_", "/")
+    return t.replace("\n", "\r")
+
+
 def back_page_tag_values(order_num: str, order_date: str) -> dict[str, str]:
     """Значення офіційних тегів односторінкової «задньої сторінки».
 
@@ -152,7 +187,9 @@ def back_page_tag_values(order_num: str, order_date: str) -> dict[str, str]:
         "{{примірник}}": "Примірник № 2",
     }
     if order_num:
-        values["{{номер_наказу}}"] = order_num
+        # Знак «№» є частиною значення — так само, як у витягах, інакше
+        # у примірнику лишалося б саме лише число.
+        values["{{номер_наказу}}"] = f"№{order_num}"
     if order_date:
         values["{{дата_наказу}}"] = format_ukr_date(order_date) or order_date
     return values
@@ -169,8 +206,16 @@ def build_copy_two_filename(order_num: str, order_date: str, source_filename: st
 
 def apply_ukrainian_typography(text: str) -> str:
     """Замінює пробіли після коротких прийменників, сполучників та скорочень на нерозривні (\u00A0)."""
+    result = text or ""
+    # Код ВОС має лишатися суцільним: «ВОС - 0602002» не можна розривати між
+    # рядками, інакше номер зависає під самим краєм сторінки.
+    result = re.sub(
+        r"(?i)\b(ВОС)\s*(-|–|—)\s*(\d+)",
+        lambda m: f"{m.group(1)} {m.group(2)} {m.group(3)}",
+        result,
+    )
     pattern = r"(?i)\b(з|із|зі|та|до|в|у|на|і|й|по|за|від|при|під|над|про|для|без|через|шпк|вос-?\d*|зс|р\.н\.|в/ч|в\.ч\.|№|п\.|пп\.|ст\.)\s+"
-    return re.sub(pattern, lambda m: f"{m.group(1)}\u00A0", text or "")
+    return re.sub(pattern, lambda m: f"{m.group(1)} ", result)
 
 
 def clean_duplicated_units(text: str) -> str:
@@ -262,12 +307,6 @@ _UNMATCHED_OPEN_UNIT_RE = re.compile(
     re.IGNORECASE | re.UNICODE,
 )
 
-_MESSAGE_OPEN_INFORMATION_LINES = (
-    "ВІДКРИТА ІНФОРМАЦІЯ",
-    "(Обмежено в розповсюдженні – лише для Збройних Сил України)",
-)
-
-
 def find_unmatched_open_unit_spans(text: str) -> list[tuple[int, int]]:
     """Повертає діапазони відкритих назв частин, які лишилися після шифрування.
     
@@ -285,8 +324,8 @@ def find_unmatched_open_unit_spans(text: str) -> list[tuple[int, int]]:
     return spans
 
 
-def build_message_recipient_list(mapping: dict, routes: dict) -> list[str]:
-    """Список для {{кому_список}} без втрати підпорядкування.
+def build_message_recipient_groups(mapping: dict, routes: dict) -> dict[str, list[str]]:
+    """Адресати повідомлення, згруповані за типом: `corps`, `units`, `tck`.
 
     Корпус і підпорядкована частина завжди є різними адресатами. Корпуси
     розміщуються першими, частини — після них, ТЦК/ОТЦК — наприкінці. Текст
@@ -468,7 +507,37 @@ def build_message_recipient_list(mapping: dict, routes: dict) -> list[str]:
         recipient = str(data.get("recipient_to") or unit_code).strip()
         if recipient and recipient not in tck_recipients:
             tck_recipients.append(recipient)
-    return corps_recipients + unit_recipients + tck_recipients
+    return {"corps": corps_recipients, "units": unit_recipients, "tck": tck_recipients}
+
+
+def build_message_recipient_list(mapping: dict, routes: dict) -> list[str]:
+    """Плоский список для {{кому_список}}: корпуси → частини → ТЦК."""
+    groups = build_message_recipient_groups(mapping, routes)
+    return groups["corps"] + groups["units"] + groups["tck"]
+
+
+def build_addressee_kind_text(groups: dict[str, list[str]]) -> str:
+    """Текст для тегу {{тцк чі вч}} — кому саме адресоване повідомлення.
+
+    Правило:
+    - лише військові частини (враховуючи корпуси) → «командирам військових частин»;
+    - лише ТЦК → «начальникам ТЦК»;
+    - і частини, і ТЦК → «командирам військових частин та начальникам ТЦК».
+    """
+    has_units = bool(groups.get("corps") or groups.get("units"))
+    has_tck = bool(groups.get("tck"))
+    if has_units and has_tck:
+        return "Командирам військових частин та Начальникам ТЦК"
+    if has_tck:
+        return "Начальникам ТЦК"
+    if has_units:
+        return "Командирам військових частин"
+    return ""
+
+
+# Написання тегу типу адресата, які розпізнаються в шаблонах повідомлень.
+# Пошук у Word не враховує регістр, тому достатньо варіантів написання «чі/чи».
+_MESSAGE_ADDRESSEE_KIND_TAGS = ("{{тцк чі вч}}", "{{тцк чи вч}}")
 
 
 _ORDER_SIGNER_START_RE = re.compile(
@@ -535,21 +604,30 @@ _DISTRIBUTION_CUTOFF_MARKERS = (
 )
 
 
+def find_distribution_cutoff_line(text: str) -> int:
+    """Номер рядка, з якого починається службова таблиця розсилки/відміток.
+
+    Усе до цього рядка — власне наказ разом із підписантом. Пошук іде з кінця
+    документа, щоб випадкове входження маркера в тілі пункту не обрізало наказ
+    передчасно.
+    """
+    raw_lines = str(text or "").replace("\x07", "").splitlines()
+    lines = [re.sub(r"\s+", " ", line).strip() for line in raw_lines]
+
+    scan_limit = max(0, len(lines) - 120)
+    for idx in range(len(lines) - 1, scan_limit - 1, -1):
+        line_lower = lines[idx].casefold().strip()
+        if any(line_lower.startswith(marker) or marker == line_lower for marker in _DISTRIBUTION_CUTOFF_MARKERS):
+            return idx
+    return len(lines)
+
+
 def _find_order_signer(text: str) -> dict[str, str] | None:
     """Повертає реквізити й номер рядка початку підписанта (Командувача) в наказі, відсікаючи таблицю розсилки."""
     raw_lines = str(text or "").replace("\x07", "").splitlines()
     lines = [re.sub(r"\s+", " ", line).strip() for line in raw_lines]
 
-    # Знаходимо межу відсікання службової таблиці/розсилки, шукаючи з кінця документа
-    # щоб не обрізати наказ передчасно на випадковому входженні маркера в тілі пункту
-    reference_index = len(lines)
-    scan_limit = max(0, len(lines) - 120)
-    for idx in range(len(lines) - 1, scan_limit - 1, -1):
-        line_lower = lines[idx].casefold().strip()
-        if any(line_lower.startswith(marker) or marker == line_lower for marker in _DISTRIBUTION_CUTOFF_MARKERS):
-            reference_index = idx
-            break
-
+    reference_index = find_distribution_cutoff_line(text)
     search_start = max(0, reference_index - 80)
 
     for start_index in range(reference_index - 1, search_start - 1, -1):
@@ -610,6 +688,62 @@ def text_before_order_signer(text: str) -> tuple[str, dict[str, str]]:
     start_line = signer["start_line"]
     clean_signer = {key: signer.get(key, "") for key in ("position", "rank", "name")}
     return "\n".join(raw_lines[:start_line]).rstrip(), clean_signer
+
+
+def detect_word_extension(path: str) -> str:
+    """Визначає справжній формат файлу Word за сигнатурою, а не за розширенням.
+
+    Word відмовляється відкривати файл, якщо його вміст не відповідає
+    розширенню («формат і розширення файлу не збігаються»). Це стається,
+    коли шаблон збережено у форматі Word 97-2003, а робоча копія отримує
+    розширення `.docx`. Тому робочу копію треба створювати з тим
+    розширенням, яке відповідає РЕАЛЬНОМУ вмісту файлу.
+    """
+    try:
+        with open(path, "rb") as handle:
+            signature = handle.read(8)
+    except OSError:
+        return os.path.splitext(path)[1] or ".docx"
+
+    if signature.startswith(b"PK\x03\x04"):
+        return ".docx"  # OOXML (zip-контейнер)
+    if signature.startswith(b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"):
+        return ".doc"   # OLE2, Word 97-2003
+    if signature.startswith(b"{\\rtf"):
+        return ".rtf"
+    return os.path.splitext(path)[1] or ".docx"
+
+
+def is_path_writable(path: str) -> bool:
+    """Чи можна створити або перезаписати файл за цим шляхом.
+
+    Повертає False, якщо файл тримає інший процес (найчастіше — відкритий
+    у Word). Це дозволяє показати зрозуміле повідомлення замість службової
+    помилки COM «Не вдається зберегти файл, якщо він використовується
+    іншим процесом».
+    """
+    if not os.path.exists(path):
+        return True
+    try:
+        with open(path, "ab"):
+            return True
+    except OSError:
+        return False
+
+
+def copy_template_for_editing(template_path: str, output_path: str) -> str:
+    """Створює робочу копію шаблону з коректним для його вмісту розширенням.
+
+    Повертає шлях робочої копії. Якщо він відрізняється від `output_path`,
+    викликач має після `SaveAs2` прибрати проміжний файл.
+    """
+    real_ext = detect_word_extension(template_path)
+    if real_ext.lower() == os.path.splitext(output_path)[1].lower():
+        working_path = output_path
+    else:
+        working_path = os.path.splitext(output_path)[0] + real_ext
+    shutil.copy2(template_path, working_path)
+    return working_path
 
 
 def force_quit_word(word, timeout: float = 5.0) -> None:
@@ -693,7 +827,13 @@ class App:
         self.p2_single_file = tk.StringVar()
         self.p2_back_page_path = tk.StringVar()
         self.p2_out_folder = tk.StringVar()
+        # Чи обрано папку результату вручну. Якщо ні — вона щоразу
+        # переобчислюється від поточного джерела, інакше примірники
+        # продовжували б писатись у папку попереднього наказу.
+        self.p2_out_folder_manual = tk.BooleanVar(value=False)
         self.p2_copy_title = tk.StringVar(value="Примірник № 2")
+        # Виконавець примірників. Порожнє поле = береться виконавець витягів.
+        self.p2_executor = tk.StringVar()
         self.last_copy_two_paths: list[str] = []
 
         # Конфігурація вкладки «Повідомлення».
@@ -823,8 +963,10 @@ class App:
                     self.p2_single_file.set(data.get("p2_single_file", ""))
                     self.p2_back_page_path.set(data.get("p2_back_page_path", ""))
                     self.p2_out_folder.set(data.get("p2_out_folder", ""))
+                    self.p2_out_folder_manual.set(bool(data.get("p2_out_folder_manual", False)))
                     # Правила для примірника № 3 ще не погоджені.
                     self.p2_copy_title.set("Примірник № 2")
+                    self.p2_executor.set(data.get("p2_executor", ""))
 
                     self.message_cover_template_path.set(data.get("message_cover_template_path", ""))
                     self.message_content_template_path.set(data.get("message_content_template_path", ""))
@@ -854,7 +996,9 @@ class App:
             "p2_single_file": self.p2_single_file.get(),
             "p2_back_page_path": self.p2_back_page_path.get(),
             "p2_out_folder": self.p2_out_folder.get(),
+            "p2_out_folder_manual": self.p2_out_folder_manual.get(),
             "p2_copy_title": self.p2_copy_title.get(),
+            "p2_executor": self.p2_executor.get(),
             "message_cover_template_path": self.message_cover_template_path.get(),
             "message_content_template_path": self.message_content_template_path.get(),
             "message_out_folder": self.message_out_folder.get(),
@@ -1225,8 +1369,31 @@ class App:
             row=4, column=2, padx=(6, 0), pady=3
         )
 
+        tb.Label(copies_card, text="Виконавець:").grid(row=5, column=0, sticky=W, padx=(0, 8), pady=3)
+        tb.Entry(copies_card, textvariable=self.p2_executor).grid(row=5, column=1, sticky="ew", pady=3)
+        tb.Label(
+            copies_card,
+            text="порожньо = з витягів",
+            bootstyle="secondary",
+        ).grid(row=5, column=2, sticky=W, padx=(6, 0), pady=3)
+
+        cert_p2 = tb.Labelframe(copies_card, text="Згідно з оригіналом (засвідчувач)", padding=8)
+        cert_p2.grid(row=6, column=0, columnspan=3, sticky="ew", pady=(8, 4))
+        cert_p2.columnconfigure(1, weight=1)
+        tb.Label(cert_p2, text="Посада:").grid(row=0, column=0, sticky=W, padx=(0, 8), pady=2)
+        tb.Entry(cert_p2, textvariable=self.certifier_position).grid(row=0, column=1, sticky="ew", pady=2)
+        tb.Label(cert_p2, text="Звання:").grid(row=1, column=0, sticky=W, padx=(0, 8), pady=2)
+        tb.Entry(cert_p2, textvariable=self.certifier_rank).grid(row=1, column=1, sticky="ew", pady=2)
+        tb.Label(cert_p2, text="ПІБ:").grid(row=2, column=0, sticky=W, padx=(0, 8), pady=2)
+        tb.Entry(cert_p2, textvariable=self.certifier_name).grid(row=2, column=1, sticky="ew", pady=2)
+        tb.Label(
+            cert_p2,
+            text="Спільні поля з вкладкою витягів — заповнюються один раз.",
+            bootstyle="secondary",
+        ).grid(row=3, column=0, columnspan=2, sticky=W, pady=(4, 0))
+
         copy_type_box = tb.Frame(copies_card)
-        copy_type_box.grid(row=5, column=0, columnspan=3, sticky=W, pady=(4, 0))
+        copy_type_box.grid(row=7, column=0, columnspan=3, sticky=W, pady=(4, 0))
         tb.Label(copy_type_box, text="Формується:", font=("Segoe UI", 10, "bold")).pack(side=LEFT, padx=(0, 8))
         tb.Label(copy_type_box, text="Примірник № 2", bootstyle="success").pack(side=LEFT, padx=(0, 10))
         tb.Label(
@@ -1240,7 +1407,7 @@ class App:
             text="💡 Перетягніть сюди папку з наказами, окремий наказ чи шаблон (Drag-and-Drop)",
             font=("Segoe UI", 9, "italic"),
             bootstyle="info",
-        ).grid(row=6, column=0, columnspan=3, sticky=W, pady=(4, 0))
+        ).grid(row=8, column=0, columnspan=3, sticky=W, pady=(4, 0))
 
         self._on_p2_source_mode_changed()
 
@@ -1417,7 +1584,8 @@ class App:
         tb.Label(
             card,
             text=(
-                "Стандартні теги: {{номер_наказу}}, {{дата_наказу}}, {{кому_список}}, {{куди}}, {{виконавець}}. "
+                "Стандартні теги: {{номер_наказу}}, {{дата_наказу}}, {{кому_список}}, {{куди}}, "
+                "{{тцк чі вч}}, {{виконавець}}. "
                 "Кожен {{кому_список}} у таблиці = один унікальний адресат. "
                 "У другому шаблоні: {{зміст_шифр}}. Невпізнані відкриті назви частин виділяються жовтим."
             ),
@@ -1704,14 +1872,20 @@ class App:
             "додає перед наступним блоком копії останнього рядка таблиці — штамп "
             "зсувається вниз і не перекривається. Порядок адресатів: корпуси, "
             "частини, лише обласні ТЦК.\n\n"
+            "{{тцк чі вч}} — тип адресата, визначається автоматично:\n"
+            "• лише військові частини → «командирам військових частин»;\n"
+            "• лише ТЦК → «начальникам ТЦК»;\n"
+            "• і те, і те → «командирам військових частин та начальникам ТЦК».\n\n"
             "У шаблоні зі змістом:\n"
             "{{зміст_шифр}} — пункти наказу із заміною відкритих назв частин "
             "на шифри з Excel. Назви, які лишилися без збігу, виділяються жовтим.\n\n"
-            "Після {{виконавець}} програма додає рядки «ВІДКРИТА ІНФОРМАЦІЯ» та "
-            "«(Обмежено в розповсюджені – лише для Збройних Сил України)»; весь "
-            "блок розміщується за 3 см від низу сторінки, якщо тег поза таблицею. "
-            "Будь-який текст шаблону після {{виконавець}} видаляється.\n\n"
-            "Номер і дата беруться лише з назви файла наказу."
+            "{{виконавець}} підставляється рівно так, як введено у формі, і "
+            "розміщується за 3 см від низу сторінки, якщо тег поза таблицею. "
+            "Службові рядки («ВІДКРИТА ІНФОРМАЦІЯ» тощо) програма НЕ додає — "
+            "їх треба прописати у самому зразку; текст шаблону після "
+            "{{виконавець}} зберігається без змін.\n\n"
+            "Номер наказу береться з назви файла, дата — теж, у вигляді "
+            "20.05.2025 року (без розкриття словами)."
         )
 
     @staticmethod
@@ -1725,17 +1899,14 @@ class App:
             while find_obj.Execute() and iterations < 100:
                 iterations += 1
                 replacement_start = find_obj.Parent.Start
+                # Виконавець підставляється рівно так, як його ввели.
+                # Рядки «ВІДКРИТА ІНФОРМАЦІЯ» та «(Обмежено в розповсюдженні…)»
+                # програма НЕ додає: вони прописані у самому зразку окремо.
                 replacement = value
-                if tag == "{{виконавець}}":
-                    replacement = "\r".join((value, *_MESSAGE_OPEN_INFORMATION_LINES))
                 find_obj.Parent.Text = replacement
                 if tag == "{{виконавець}}":
-                    # Блок виконавця є кінцем повідомлення. Прибираємо старий
-                    # дрібний службовий хвіст шаблону після нього.
-                    tail_start = replacement_start + len(replacement)
-                    tail_end = max(tail_start, document.Content.End - 1)
-                    if tail_end > tail_start:
-                        document.Range(tail_start, tail_end).Delete()
+                    # Текст шаблону після виконавця більше не видаляється:
+                    # там лежать службові рядки зразка, які мають зберігатися.
                     executor_blocks.append((replacement_start, replacement_start + len(replacement)))
                 find_obj = document.Content.Find
                 find_obj.Text = tag
@@ -1904,6 +2075,268 @@ class App:
             return slot_count, len(recipients) - slot_count
         return slot_count, 0
 
+    def _copy_order_content(self, doc, tag_range, content_source: dict) -> int:
+        """Переносить зміст наказу у повідомлення РАЗОМ ІЗ ФОРМАТУВАННЯМ.
+
+        Копіюється `FormattedText` кожного абзацу — точно так само, як у
+        витягах, тому стилі, вирівнювання та відступи лишаються такими ж, як
+        в оригіналі наказу. Шифрування виконується поабзацно вже ПІСЛЯ
+        копіювання, завдяки чому форматування абзацу зберігається (вставка
+        простим текстом його втрачала й «кривила» верстку).
+
+        Повертає кількість підсвічених невпізнаних назв частин.
+        """
+        source_doc = content_source["doc"]
+        first_para = int(content_source["first_para"])
+        last_para = int(content_source["last_para"])
+        mapping = content_source.get("mapping") or {}
+
+        # Валідація ДО будь-яких змін документа: якщо діапазон некоректний,
+        # викликач ще може безпечно перейти на запасний спосіб вставки.
+        total = source_doc.Paragraphs.Count
+        if not 1 <= first_para <= last_para <= total:
+            raise ValueError(
+                f"некоректний діапазон абзаців наказу {first_para}-{last_para} із {total}"
+            )
+
+        insert_point = tag_range.Paragraphs(1).Range.Start
+        tag_range.Paragraphs(1).Range.Delete()
+        content_start = insert_point
+        try:
+            for p_index in range(first_para, last_para + 1):
+                source_range = source_doc.Paragraphs(p_index).Range.Duplicate
+                if "\x0c" in (source_range.Text or ""):
+                    continue  # ручні розриви сторінок з наказу не переносимо
+                destination = doc.Range(insert_point, insert_point)
+                destination.FormattedText = source_range.FormattedText
+                insert_point = destination.End
+        except Exception as error:
+            # Частина абзаців уже вставлена — повертатись до простого тексту
+            # не можна, інакше зміст задвоївся б.
+            raise RuntimeError(f"збій копіювання абзацу наказу: {error}") from error
+
+        # Шифрування змінює довжину абзаців, тому межі змісту тримаємо
+        # закладкою — після правок вона вкаже актуальний діапазон.
+        bookmark_name = "nat_message_content"
+        try:
+            doc.Bookmarks.Add(bookmark_name, doc.Range(content_start, insert_point))
+        except Exception:
+            bookmark_name = ""
+
+        # У примірниках текст наказу лишається 1-в-1 (без шифрів), тому
+        # шифрування вмикається лише там, де воно справді потрібне.
+        highlighted = 0
+        if content_source.get("cipher", True):
+            highlighted = self._cipher_inserted_content(doc, content_start, insert_point, mapping)
+
+        if bookmark_name and doc.Bookmarks.Exists(bookmark_name):
+            content_range = doc.Bookmarks(bookmark_name).Range
+            try:
+                self._apply_message_layout_rules(doc, content_range.Start, content_range.End)
+            except Exception as layout_error:
+                self.log(f"УВАГА: не вдалося застосувати правила верстки змісту: {layout_error}")
+            try:
+                doc.Bookmarks(bookmark_name).Delete()
+            except Exception:
+                pass
+        return highlighted
+
+    def _apply_message_layout_rules(self, doc, content_start: int, content_end: int) -> None:
+        """Нерозривність блоків і заповнення сторінки — як у витягах.
+
+        1. Пункт разом зі своїм біографічним блоком (р.н., освіта, ІПН/РНОКПП,
+           ВОС, «Підлягає направленню…») лишається неподільним: він не може
+           розриватись між сторінками.
+        2. Шапки (§, «Відповідно до …:», «У ЗАПАС ЗА ПІДПУНКТОМ …:») зчеплені
+           з наступним пунктом.
+        3. Міжрядковий інтервал добирається в діапазоні 16 → 14 пт так, щоб
+           зміст займав якнайменше сторінок і не лишав напівпорожніх.
+        """
+        content_range = doc.Range(content_start, content_end)
+        spans = [
+            (content_range.Paragraphs(i).Range.Start, content_range.Paragraphs(i).Range.End)
+            for i in range(1, content_range.Paragraphs.Count + 1)
+        ]
+
+        def paragraph_kind(text: str) -> str:
+            clean = (text or "").strip()
+            if not clean:
+                return "blank"
+            if clean.startswith("§"):
+                return "heading"
+            if re.match(r"^\d{1,3}(?:\.\d{1,3})*[\.\)]\s", clean):
+                return "item"
+            if clean.endswith(":"):
+                return "heading"
+            return "continuation"
+
+        kinds = []
+        for start, end in spans:
+            kinds.append(paragraph_kind(doc.Range(start, end).Text))
+
+        # Останній абзац кожної групи «пункт + біографія» не тягне наступний.
+        for index, (start, end) in enumerate(spans):
+            if kinds[index] == "blank":
+                continue
+            paragraph_format = doc.Range(start, end).ParagraphFormat
+            paragraph_format.KeepTogether = True
+
+            next_meaningful = next(
+                (j for j in range(index + 1, len(kinds)) if kinds[j] != "blank"), None
+            )
+            if next_meaningful is None:
+                paragraph_format.KeepWithNext = False
+            elif kinds[index] == "heading":
+                paragraph_format.KeepWithNext = True
+            else:
+                # Пункт тримає свій біографічний блок; новий пункт або шапка
+                # починають окрему групу.
+                paragraph_format.KeepWithNext = kinds[next_meaningful] == "continuation"
+
+        # Заповнення сторінки: найбільший інтервал із діапазону, що дає
+        # найменшу кількість сторінок.
+        def set_spacing(points: float) -> None:
+            for start, end in spans:
+                fmt = doc.Range(start, end).ParagraphFormat
+                fmt.LineSpacingRule = 4  # wdLineSpaceExactly
+                fmt.LineSpacing = points
+
+        best_points = 16.0
+        best_pages = None
+        points = 16.0
+        while points >= 14.0 - 1e-6:
+            set_spacing(points)
+            doc.Repaginate()
+            pages = doc.ComputeStatistics(2)  # wdStatisticPages
+            if best_pages is None or pages < best_pages:
+                best_pages, best_points = pages, points
+            points -= 0.5
+        set_spacing(best_points)
+        doc.Repaginate()
+
+    @staticmethod
+    def _cipher_inserted_content(doc, content_start: int, content_end: int, mapping: dict) -> int:
+        """Шифрує вставлені абзаци поабзацно, зберігаючи їх форматування."""
+        content_range = doc.Range(content_start, content_end)
+        spans = [
+            (content_range.Paragraphs(i).Range.Start, content_range.Paragraphs(i).Range.End)
+            for i in range(1, content_range.Paragraphs.Count + 1)
+        ]
+
+        highlighted = 0
+        # Йдемо з кінця: правки не зсувають позиції попередніх абзаців.
+        for start, end in reversed(spans):
+            raw = doc.Range(start, end).Text or ""
+            core = raw.rstrip("\r\x07")
+            if not core.strip():
+                continue
+
+            ciphered, _, _ = cipher_unit_names(core, mapping)
+            ciphered = apply_ukrainian_typography(clean_duplicated_units(ciphered))
+            if ciphered != core:
+                doc.Range(start, start + len(core)).Text = ciphered
+
+            # Відкриті назви, які лишилися без шифру, підсвічуємо жовтим.
+            for span_start, span_end in find_unmatched_open_unit_spans(ciphered):
+                doc.Range(start + span_start, start + span_end).HighlightColorIndex = 7  # wdYellow
+                highlighted += 1
+        return highlighted
+
+    @staticmethod
+    def _order_body_span(source_doc) -> tuple[int, int]:
+        """Межі тіла наказу разом із підписантом, у номерах абзаців Word.
+
+        Підписант визначається ТІЄЮ САМОЮ логікою, що й у витягах
+        (`_find_order_signer` / `find_distribution_cutoff_line`), а не окремим
+        алгоритмом — інакше результати двох режимів розходяться.
+        """
+        text = source_doc.Content.Text
+
+        # Відповідність рядків тексту абзацам Word — як у витягах.
+        line_to_paragraph: list[int] = []
+        for paragraph_index in range(1, source_doc.Paragraphs.Count + 1):
+            raw = source_doc.Paragraphs(paragraph_index).Range.Text
+            logical_lines = raw.rstrip("\r\x07").splitlines() or [""]
+            line_to_paragraph.extend([paragraph_index] * len(logical_lines))
+        if not line_to_paragraph:
+            raise ValueError("наказ порожній")
+
+        body_start_line = find_content_start_line(text)
+        # Службова таблиця розсилки/відміток у примірник не переноситься.
+        cutoff_line = min(find_distribution_cutoff_line(text), len(line_to_paragraph))
+
+        signer = _find_order_signer(text)
+        if signer and signer["start_line"] >= cutoff_line:
+            cutoff_line = min(signer["start_line"] + 1, len(line_to_paragraph))
+
+        last_line = max(body_start_line, cutoff_line - 1)
+        first_paragraph = line_to_paragraph[min(body_start_line, len(line_to_paragraph) - 1)]
+        last_paragraph = line_to_paragraph[min(last_line, len(line_to_paragraph) - 1)]
+        return first_paragraph, last_paragraph
+
+    def _insert_plain_content(self, doc, tag_range, encrypted_content: str) -> int:
+        """Запасний спосіб вставки змісту — простим текстом.
+
+        Використовується ЛИШЕ тоді, коли перенести форматування з наказу не
+        вдалося. Форматування тут доводиться вгадувати за вмістом рядка, тому
+        воно менш точне, ніж копіювання з оригіналу.
+        """
+        if not encrypted_content:
+            return 0
+
+        content_start = tag_range.Start
+        cleaned_content = clean_duplicated_units(encrypted_content)
+        separated_content = ensure_blank_line_before_items(cleaned_content)
+        formatted_content = apply_ukrainian_typography(separated_content)
+        tag_range.Text = formatted_content
+        content_range = doc.Range(content_start, content_start + len(formatted_content))
+
+        for pi in range(1, content_range.Paragraphs.Count + 1):
+            paragraph = content_range.Paragraphs(pi)
+            p_text = paragraph.Range.Text.strip()
+            if not p_text:
+                continue
+            p_format = paragraph.Range.ParagraphFormat
+            if is_biographical_paragraph(p_text):
+                p_format.Alignment = 1  # wdAlignParagraphCenter
+                p_format.LeftIndent = 0
+                p_format.RightIndent = 0
+                p_format.FirstLineIndent = 0
+                p_format.SpaceBefore = 0
+                p_format.SpaceAfter = 0
+                p_format.LineSpacingRule = 0  # wdLineSpaceSingle
+            elif re.match(r"^\d{1,3}[\.\)]", p_text):
+                p_format.Alignment = 3  # wdAlignParagraphJustify
+                p_format.LeftIndent = 0
+                p_format.RightIndent = 0
+                p_format.FirstLineIndent = 35.45  # 1.25 см
+                p_format.SpaceBefore = 6
+                p_format.SpaceAfter = 0
+            elif (
+                p_text.startswith("Відповідно до")
+                or "ЗВІЛЬНИТИ" in p_text.upper()
+                or "ПРИЗНАЧИТИ:" in p_text.upper()
+            ):
+                p_format.Alignment = 3
+                p_format.LeftIndent = 0
+                p_format.RightIndent = 0
+                p_format.FirstLineIndent = 35.45
+                p_format.SpaceBefore = 6
+                p_format.SpaceAfter = 6
+            elif "Призначається на" in p_text or "шпк" in p_text.lower():
+                p_format.Alignment = 3
+                p_format.LeftIndent = 0
+                p_format.RightIndent = 0
+                p_format.FirstLineIndent = 35.45
+                p_format.SpaceBefore = 0
+                p_format.SpaceAfter = 6
+
+        highlighted = 0
+        for span_start, span_end in find_unmatched_open_unit_spans(formatted_content):
+            doc.Range(content_start + span_start, content_start + span_end).HighlightColorIndex = 7
+            highlighted += 1
+        return highlighted
+
     def _create_message_file(
         self,
         word,
@@ -1912,10 +2345,27 @@ class App:
         replacements: dict[str, str],
         encrypted_content: str = "",
         recipients: list[str] | None = None,
+        content_source: dict | None = None,
     ) -> tuple[int, int, int]:
-        # Створюємо копію шаблону за цільовим шляхом, щоб ніколи не відкривати і не змінювати оригінал шаблону
-        shutil.copy2(template_path, output_path)
-        doc = word.Documents.Open(os.path.abspath(output_path), ReadOnly=False)
+        # Якщо результат уже відкритий у Word, зберегти його неможливо.
+        # Перевіряємо це ДО всієї роботи й повідомляємо зрозуміло.
+        if not is_path_writable(output_path):
+            raise RuntimeError(
+                f"Файл «{os.path.basename(output_path)}» відкритий в іншій програмі "
+                "(найімовірніше у Word). Закрийте його та повторіть генерацію."
+            )
+
+        # Робоча копія шаблону створюється у тимчасовій папці, а не за
+        # кінцевим шляхом: так оригінал шаблону лишається недоторканим, а
+        # заблокований результат не зриває обробку. Розширення копії
+        # відповідає реальному вмісту шаблону (він може бути у форматі
+        # Word 97-2003), інакше Word відмовиться її відкрити.
+        temp_dir = os.path.join(os.path.dirname(os.path.abspath(output_path)), "_nat_temp")
+        os.makedirs(temp_dir, exist_ok=True)
+        working_path = copy_template_for_editing(
+            template_path, os.path.join(temp_dir, os.path.basename(output_path))
+        )
+        doc = word.Documents.Open(os.path.abspath(working_path), ReadOnly=False)
         try:
             executor_blocks = self._replace_message_tags(doc, replacements)
             executor_bookmarks = []
@@ -1927,64 +2377,32 @@ class App:
             if recipients is not None:
                 recipient_slots, recipient_overflow = self._fill_recipient_slots(doc, recipients)
             highlighted_count = 0
-            if encrypted_content:
+            if encrypted_content or content_source:
                 find_obj = doc.Content.Find
                 find_obj.Text = "{{зміст_шифр}}"
-                if find_obj.Execute():
-                    content_start = find_obj.Parent.Start
-                    # 1. Очищення дублікатів, ентери перед пунктами та застосування нерозривних пробілів (типографіка)
-                    cleaned_content = clean_duplicated_units(encrypted_content)
-                    separated_content = ensure_blank_line_before_items(cleaned_content)
-                    formatted_content = apply_ukrainian_typography(separated_content)
-                    find_obj.Parent.Text = formatted_content
-                    content_end = content_start + len(formatted_content)
-                    content_range = doc.Range(content_start, content_end)
-
-                    # 2. Форматування абзаців змісту
-                    for pi in range(1, content_range.Paragraphs.Count + 1):
-                        p = content_range.Paragraphs(pi)
-                        p_text = p.Range.Text.strip()
-                        if not p_text:
-                            continue
-                        p_format = p.Range.ParagraphFormat
-                        if is_biographical_paragraph(p_text):
-                            # Біографічні блоки (дата народження, освіта, служба, РНОКПП) — по середині аркуша
-                            p_format.Alignment = 1  # wdAlignParagraphCenter
-                            p_format.LeftIndent = 0
-                            p_format.RightIndent = 0
-                            p_format.FirstLineIndent = 0
-                            p_format.SpaceBefore = 0
-                            p_format.SpaceAfter = 0
-                            p_format.LineSpacingRule = 0  # wdLineSpaceSingle
-                        elif re.match(r"^\d{1,3}[\.\)]", p_text):
-                            # Пункти наказу — вирівнювання по ширині, абзацний відступ 1.25 см
-                            p_format.Alignment = 3  # wdAlignParagraphJustify
-                            p_format.LeftIndent = 0
-                            p_format.RightIndent = 0
-                            p_format.FirstLineIndent = 35.45  # 1.25 cm
-                            p_format.SpaceBefore = 6
-                            p_format.SpaceAfter = 0
-                        elif p_text.startswith("Відповідно до") or "ЗВІЛЬНИТИ" in p_text.upper() or "ПРИЗНАЧИТИ:" in p_text.upper():
-                            p_format.Alignment = 3  # wdAlignParagraphJustify
-                            p_format.LeftIndent = 0
-                            p_format.RightIndent = 0
-                            p_format.FirstLineIndent = 35.45
-                            p_format.SpaceBefore = 6
-                            p_format.SpaceAfter = 6
-                        elif "Призначається на" in p_text or "шпк" in p_text.lower():
-                            p_format.Alignment = 3  # wdAlignParagraphJustify
-                            p_format.LeftIndent = 0
-                            p_format.RightIndent = 0
-                            p_format.FirstLineIndent = 35.45
-                            p_format.SpaceBefore = 0
-                            p_format.SpaceAfter = 6
-
-                    # 3. Підсвічування відкритих назв ВЧ, які лишилися без шифрування
-                    for start, end in find_unmatched_open_unit_spans(formatted_content):
-                        doc.Range(content_start + start, content_start + end).HighlightColorIndex = 7  # wdYellow
-                        highlighted_count += 1
-                else:
+                if not find_obj.Execute():
                     self.log("УВАГА: у шаблоні зі змістом не знайдено тег {{зміст_шифр}}.")
+                else:
+                    # Основний шлях — перенос змісту РАЗОМ ІЗ ФОРМАТУВАННЯМ
+                    # наказу, точно як у витягах. Запасний шлях (простий текст)
+                    # лишається на випадок, коли діапазон абзаців визначити не вдалося.
+                    copied_with_formatting = False
+                    if content_source is not None:
+                        try:
+                            highlighted_count = self._copy_order_content(
+                                doc, find_obj.Parent, content_source
+                            )
+                            copied_with_formatting = True
+                        except ValueError as prepare_error:
+                            self.log(
+                                "УВАГА: зміст не вдалося перенести з форматуванням "
+                                f"({prepare_error}); вставляємо простим текстом."
+                            )
+
+                    if not copied_with_formatting:
+                        highlighted_count = self._insert_plain_content(
+                            doc, find_obj.Parent, encrypted_content
+                        )
             for bookmark_name in executor_bookmarks:
                 self._position_message_executor_at_page_bottom(doc, bookmark_name)
                 if doc.Bookmarks.Exists(bookmark_name):
@@ -1993,6 +2411,7 @@ class App:
             return highlighted_count, recipient_slots, recipient_overflow
         finally:
             doc.Close(False)
+            shutil.rmtree(temp_dir, ignore_errors=True)
 
     def run_generate_messages(self):
         self.save_config()
@@ -2024,15 +2443,30 @@ class App:
 
         self.btn_generate_messages.config(state=DISABLED)
         word = None
+        source_doc = None
         try:
             mapping = read_recipient_mapping(path=self.excel_path.get()).get("mapping", {})
-            source_text = self._read_word_text(order_path)
+
+            # Наказ відкриваємо в тому самому екземплярі Word, з якого потім
+            # копіюємо зміст із форматуванням, — інакше номери абзаців не
+            # відповідали б прочитаному тексту.
+            word = win32com.client.DispatchEx("Word.Application")
+            word.Visible = False
+            word.DisplayAlerts = 0  # wdAlertsNone: не показувати блокуючі діалоги
+            source_doc = word.Documents.Open(order_path, ReadOnly=True)
+
+            source_text = source_doc.Content.Text
             order_text, _ = text_before_order_signer(source_text)
             order_num, order_date = extract_metadata_from_filename(os.path.basename(order_path))
-            order_date_formatted = format_ukr_date(order_date)
+            # У повідомленнях дата не розкривається словами (на відміну від витягів).
+            order_date_formatted = format_message_date(order_date)
 
             routes = map_military_units(text=order_text, mapping=mapping)
-            recipients = build_message_recipient_list(mapping, routes)
+            recipient_groups = build_message_recipient_groups(mapping, routes)
+            recipients = (
+                recipient_groups["corps"] + recipient_groups["units"] + recipient_groups["tck"]
+            )
+            addressee_kind = build_addressee_kind_text(recipient_groups)
             destinations = []
             for data in routes.get("unit_paragraphs", {}).values():
                 destination = str(data.get("destination_where") or "").strip()
@@ -2041,24 +2475,53 @@ class App:
 
             replacements = {}
             if order_num:
-                replacements["{{номер_наказу}}"] = f"№ {order_num}"
+                replacements["{{номер_наказу}}"] = f"№{order_num}"
             if order_date_formatted:
                 replacements["{{дата_наказу}}"] = order_date_formatted
             if destinations:
                 replacements["{{куди}}"] = "\r".join(destinations)
+            # Тег типу адресата підставляється ДО {{виконавець}}: обробка
+            # виконавця видаляє весь службовий хвіст шаблону після себе.
+            if addressee_kind:
+                for kind_tag in _MESSAGE_ADDRESSEE_KIND_TAGS:
+                    replacements[kind_tag] = addressee_kind
+                self.log(f"Тип адресата ({{{{тцк чі вч}}}}): {addressee_kind}.")
             if self.message_executor.get().strip():
                 replacements["{{виконавець}}"] = self.message_executor.get().strip()
 
             decision = generate_decision_order(text=order_text, mapping=mapping, new_header="")
             encrypted_content = decision.get("decision_text", "")
+
+            # Відповідність рядків тексту абзацам Word — так само, як у витягах.
+            content_source = None
+            try:
+                source_line_to_para = []
+                for paragraph_index in range(1, source_doc.Paragraphs.Count + 1):
+                    raw = source_doc.Paragraphs(paragraph_index).Range.Text
+                    logical_lines = raw.rstrip("\r\x07").splitlines() or [""]
+                    source_line_to_para.extend([paragraph_index] * len(logical_lines))
+
+                order_lines = order_text.splitlines()
+                line_map = source_line_to_para[: len(order_lines)]
+                body_start_line = find_content_start_line(order_text)
+                if line_map and 0 <= body_start_line < len(line_map):
+                    content_source = {
+                        "doc": source_doc,
+                        "first_para": line_map[body_start_line],
+                        "last_para": line_map[-1],
+                        "mapping": mapping,
+                    }
+            except Exception as map_error:
+                self.log(
+                    f"УВАГА: не вдалося зіставити абзаци наказу ({map_error}); "
+                    "зміст буде вставлено простим текстом."
+                )
+
             safe_number = re.sub(r'[\\/:*?"<>|]', "_", order_num) if order_num else ""
             suffix = f"_№{safe_number}" if safe_number else ""
             cover_output = os.path.join(out_folder, f"Повідомлення_супровід{suffix}.docx")
             content_output = os.path.join(out_folder, f"Повідомлення_шифрований_зміст{suffix}.docx")
 
-            word = win32com.client.DispatchEx("Word.Application")
-            word.Visible = False
-            word.DisplayAlerts = 0  # wdAlertsNone: не показувати блокуючі діалоги (напр. "Зберегти зміни?")
             _, recipient_slots, recipient_overflow = self._create_message_file(
                 word,
                 self.message_cover_template_path.get(),
@@ -2072,6 +2535,7 @@ class App:
                 content_output,
                 replacements,
                 encrypted_content,
+                content_source=content_source,
             )
             if recipient_overflow:
                 self.log(
@@ -2094,6 +2558,11 @@ class App:
             self.log(f"ПОМИЛКА повідомлень: {error}")
             messagebox.showerror("Помилка повідомлень", str(error))
         finally:
+            if source_doc is not None:
+                try:
+                    source_doc.Close(False)
+                except Exception:
+                    pass
             if word:
                 force_quit_word(word)
             self.btn_generate_messages.config(state=NORMAL)
@@ -2115,7 +2584,9 @@ class App:
         path = filedialog.askdirectory()
         if path:
             self.p2_orders_folder.set(path)
-            if not self.p2_out_folder.get():
+            # Папку результату переобчислюємо під нове джерело, доки
+            # користувач не вибрав її вручну.
+            if not self.p2_out_folder_manual.get():
                 self.p2_out_folder.set(os.path.join(path, "Примірники_2"))
             self.save_config()
 
@@ -2123,7 +2594,7 @@ class App:
         path = filedialog.askopenfilename(filetypes=[("Word files", "*.docx *.doc")])
         if path:
             self.p2_single_file.set(path)
-            if not self.p2_out_folder.get():
+            if not self.p2_out_folder_manual.get():
                 self.p2_out_folder.set(os.path.join(os.path.dirname(path), "Примірники_2"))
             self.save_config()
 
@@ -2151,6 +2622,8 @@ class App:
         path = filedialog.askdirectory()
         if path:
             self.p2_out_folder.set(path)
+            # Явний вибір користувача — більше не переобчислюємо автоматично.
+            self.p2_out_folder_manual.set(True)
             self.save_config()
 
     def _read_word_text(self, doc_path: str) -> str:
@@ -2215,8 +2688,12 @@ class App:
         self.copy_two_tree.item(item, values=values)
         return "break"
 
-    def _selected_order_paths(self) -> list[str]:
-        """Повертає позначені примірники № 2 або вручну обраний наказ."""
+    def _selected_order_paths(self) -> tuple[list[str], bool]:
+        """Повертає `(шляхи, чи це примірники № 2)`.
+
+        Прапорець потрібен для вибору папки результату: для примірників,
+        створених пакетом, витяги кладемо поряд із ними у папку наказу.
+        """
         if self.last_copy_two_paths:
             paths = [
                 values[1]
@@ -2224,12 +2701,26 @@ class App:
                 if (values := self.copy_two_tree.item(item, "values"))
                 and len(values) == 2 and values[0] == "☑" and os.path.isfile(values[1])
             ]
-            return paths
-        return [self.doc_path.get()] if self.doc_path.get() and os.path.isfile(self.doc_path.get()) else []
+            if paths:
+                return paths, True
+            # Галочки зняті з усіх примірників — працюємо з наказом,
+            # обраним вручну, замість того щоб відмовляти користувачу.
+        manual_order = self.doc_path.get()
+        if manual_order and os.path.isfile(manual_order):
+            return [manual_order], False
+        return [], False
 
-    def _set_processing_order(self, doc_path: str):
+    def _set_processing_order(self, doc_path: str, alongside: bool = False):
+        """Готує наказ до обробки й визначає папку результату.
+
+        `alongside=True` — це примірник № 2 із пакетної обробки: витяги та
+        звіти розрахунку кладемо ПОРЯД із ним, у ту саму папку наказу.
+        Для вручну обраного наказу лишається окрема `Extracts_Output`,
+        щоб не засмічувати папку, де лежать самі накази.
+        """
         self.doc_path.set(doc_path)
-        self.out_folder.set(os.path.join(os.path.dirname(os.path.abspath(doc_path)), "Extracts_Output"))
+        order_dir = os.path.dirname(os.path.abspath(doc_path))
+        self.out_folder.set(order_dir if alongside else os.path.join(order_dir, "Extracts_Output"))
         os.makedirs(self.out_folder.get(), exist_ok=True)
 
     # =========================================================================
@@ -2237,7 +2728,7 @@ class App:
     # =========================================================================
     def run_rozrahunok_action(self):
         self.save_config()
-        order_paths = self._selected_order_paths()
+        order_paths, from_copies = self._selected_order_paths()
         if not self.excel_path.get() or not order_paths:
             messagebox.showwarning(
                 "Помилка",
@@ -2248,20 +2739,14 @@ class App:
         self.btn_calc.config(state=DISABLED)
         self.btn_extracts.config(state=DISABLED)
         try:
-            for index, order_path in enumerate(order_paths, start=1):
-                self._set_processing_order(order_path)
-                self.log(f"\n[{index}/{len(order_paths)}] Розрахунок для: {os.path.basename(order_path)}")
-                self.run_rozrahunok()
+            # Кожен наказ обробляється окремо: збій одного не має зривати
+            # решту пакета.
+            failures = self._run_batch(
+                order_paths, self.run_rozrahunok, "Розрахунок для", alongside=from_copies
+            )
             self.save_config()
-            messagebox.showinfo("Успіх", f"Розрахунок розсилки сформовано для {len(order_paths)} файл(ів).")
-        except Exception as e:
-            self.log(f"ПОМИЛКА: {str(e)}")
-            import traceback
-            tb_text = traceback.format_exc()
-            traceback.print_exc()
-            messagebox.showerror(
-                "Помилка розрахунку розсилки",
-                f"Під час розрахунку сталася помилка:\n\n{e}\n\n{tb_text[-1500:]}",
+            self._report_batch_result(
+                len(order_paths), failures, "Розрахунок розсилки", "розрахунок розсилки"
             )
         finally:
             self.btn_calc.config(state=NORMAL)
@@ -2269,7 +2754,7 @@ class App:
 
     def run_extracts_action(self):
         self.save_config()
-        order_paths = self._selected_order_paths()
+        order_paths, from_copies = self._selected_order_paths()
         if not self.excel_path.get() or not self.template_path.get() or not order_paths:
             messagebox.showwarning(
                 "Помилка",
@@ -2280,23 +2765,57 @@ class App:
         self.btn_calc.config(state=DISABLED)
         self.btn_extracts.config(state=DISABLED)
         try:
-            for index, order_path in enumerate(order_paths, start=1):
-                self._set_processing_order(order_path)
-                self.log(f"\n[{index}/{len(order_paths)}] Витяги для: {os.path.basename(order_path)}")
-                self.run_extracts()
+            failures = self._run_batch(
+                order_paths, self.run_extracts, "Витяги для", alongside=from_copies
+            )
             self.save_config()
-        except Exception as e:
-            self.log(f"ПОМИЛКА: {str(e)}")
-            import traceback
-            tb_text = traceback.format_exc()
-            traceback.print_exc()
-            messagebox.showerror(
-                "Помилка генерації витягів",
-                f"Під час генерації витягів сталася помилка:\n\n{e}\n\n{tb_text[-1500:]}",
+            self._report_batch_result(
+                len(order_paths), failures, "Генерація витягів", "генерацію витягів"
             )
         finally:
             self.btn_calc.config(state=NORMAL)
             self.btn_extracts.config(state=NORMAL)
+
+    def _run_batch(
+        self, order_paths: list[str], handler, stage_label: str, alongside: bool = False
+    ) -> list[tuple[str, str]]:
+        """Обробляє накази по черзі, не перериваючи пакет через збій одного.
+
+        Повертає перелік `(назва файлу, текст помилки)` для тих, що не вдалися.
+        """
+        import traceback
+
+        failures: list[tuple[str, str]] = []
+        for index, order_path in enumerate(order_paths, start=1):
+            name = os.path.basename(order_path)
+            self.log(f"\n[{index}/{len(order_paths)}] {stage_label}: {name}")
+            try:
+                self._set_processing_order(order_path, alongside=alongside)
+                handler()
+            except Exception as error:
+                traceback.print_exc()
+                self.log(f"  ПОМИЛКА ({name}): {error}")
+                failures.append((name, str(error)))
+        return failures
+
+    def _report_batch_result(
+        self, total: int, failures: list[tuple[str, str]], title: str, action_name: str
+    ) -> None:
+        """Показує підсумок пакета: скільки вдалося, а що саме — ні."""
+        succeeded = total - len(failures)
+        if not failures:
+            messagebox.showinfo("Успіх", f"{title}: успішно оброблено {succeeded} з {total} файл(ів).")
+            return
+
+        details = "\n".join(f"• {name}: {error}" for name, error in failures[:10])
+        if len(failures) > 10:
+            details += f"\n… ще {len(failures) - 10}"
+        self.log(f"\nНе вдалося виконати {action_name} для {len(failures)} файл(ів).")
+        messagebox.showwarning(
+            title,
+            f"Оброблено {succeeded} з {total} файл(ів).\n\n"
+            f"Не вдалося ({len(failures)}):\n{details}",
+        )
 
     def run_rozrahunok(self):
         self.log("\n=== РОЗРАХУНОК РОЗСИЛКИ ===")
@@ -2468,6 +2987,14 @@ class App:
             self.out_folder.get(), build_extracts_filename(order_num, order_date)
         )
         os.makedirs(self.out_folder.get(), exist_ok=True)
+        # Наприкінці генерації результат відкривається у Word, тому при
+        # повторному запуску він може бути ще зайнятий. Перевіряємо одразу,
+        # щоб не витрачати час на обробку й показати зрозумілу причину.
+        if not is_path_writable(out_file):
+            raise RuntimeError(
+                f"Файл «{os.path.basename(out_file)}» відкритий в іншій програмі "
+                "(найімовірніше у Word). Закрийте його та повторіть генерацію."
+            )
         temp_dir = os.path.join(self.out_folder.get(), "_nat_temp")
         os.makedirs(temp_dir, exist_ok=True)
 
@@ -2821,9 +3348,13 @@ class App:
                 # {{кому}}/{{куди}}, назва, дата/номер) — недоторкана шапка зразка.
                 content_start_pos = None
                 signer_start = None
-                temp_path = os.path.join(temp_dir, f"extract_{idx:04d}.docx")
-                # Робимо копію шаблону, щоб Word COM ніколи не відкривав і не змінював оригінальний файл шаблону
-                shutil.copy2(template_path, temp_path)
+                # Робимо копію шаблону, щоб Word COM ніколи не відкривав і не
+                # змінював оригінальний файл шаблону. Розширення копії має
+                # відповідати реальному вмісту шаблону (він може бути у форматі
+                # Word 97-2003), інакше Word відмовиться її відкрити.
+                temp_path = copy_template_for_editing(
+                    template_path, os.path.join(temp_dir, f"extract_{idx:04d}.docx")
+                )
                 doc = word.Documents.Open(os.path.abspath(temp_path), ReadOnly=False)
 
                 def replace_tag(tag, replacement_text, document=doc, collect_paragraphs=False, highlight_red=False):
@@ -2863,17 +3394,6 @@ class App:
                     replace_tag("{{дата_наказу}}", order_date_formatted)
                 if order_num:
                     replace_tag("{{номер_наказу}}", f"№{order_num}")
-
-                def _slash_to_lines(text_val: str) -> str:
-                    """Конвертує слеші ' / ' або '/' (крім 'в/ч' та дат) у переноси рядків для Word."""
-                    if not text_val:
-                        return ""
-                    t = re.sub(r"\b([вВ])\s*/\s*([чЧ])\b", r"\1_SLASH_TEMP_\2", str(text_val))
-                    t = re.sub(r"(\d)\s*/\s*(\d)", r"\1_NUMSLASH_TEMP_\2", t)
-                    t = re.sub(r"\s*/\s*", "\r", t)
-                    t = t.replace("_SLASH_TEMP_", "/")
-                    t = t.replace("_NUMSLASH_TEMP_", "/")
-                    return t.replace("\n", "\r")
 
                 # Підписант оригіналу наказу (Командувач/Командир)
                 if order_signer["position"]:
@@ -3210,7 +3730,11 @@ class App:
                     target_doc.Close(False)
                     self.log(f"Додано порожню сторінку для вирівнювання витягу {first_cipher} ({first_pages} стор.) під друк 2 на 1.")
                 else:
-                    shutil.copy2(first_path, out_file)
+                    # Через SaveAs2, а не копіюванням: тимчасовий файл може мати
+                    # формат шаблону (Word 97-2003), а результат завжди .docx.
+                    target_doc = word.Documents.Open(os.path.abspath(first_path))
+                    target_doc.SaveAs2(os.path.abspath(out_file), 16)
+                    target_doc.Close(False)
             else:
                 target_doc = word.Documents.Open(os.path.abspath(first_path))
                 current_doc_pages = first_pages
@@ -3363,8 +3887,14 @@ class App:
         back_page_abs = os.path.abspath(back_page)
 
         out_root = self.p2_out_folder.get()
-        if not out_root:
-            base_dir = self.p2_orders_folder.get() if self.p2_source_mode.get() == "folder" else os.path.dirname(order_files[0])
+        if not out_root or not self.p2_out_folder_manual.get():
+            # Поки папку не обрано вручну, вона завжди відповідає ПОТОЧНОМУ
+            # джерелу: інакше примірники писались би в папку попереднього наказу.
+            base_dir = (
+                self.p2_orders_folder.get()
+                if self.p2_source_mode.get() == "folder"
+                else os.path.dirname(order_files[0])
+            )
             out_root = os.path.join(base_dir, "Примірники_2")
             self.p2_out_folder.set(out_root)
         os.makedirs(out_root, exist_ok=True)
@@ -3377,7 +3907,10 @@ class App:
 
         self.log_p2(f"Початок пакетного формування примірників № 2: {len(order_files)} наказ(ів)...")
 
+        import traceback
+
         created_records = []
+        failed_orders: list[tuple[str, str]] = []
         word = win32com.client.DispatchEx("Word.Application")
         word.Visible = False
         word.DisplayAlerts = 0  # wdAlertsNone: не показувати блокуючі діалоги (напр. "Зберегти зміни?")
@@ -3385,18 +3918,26 @@ class App:
         try:
             # «Задня сторінка» завжди є окремим односторінковим шаблоном.
             test_tmpl = word.Documents.Open(back_page_abs, ReadOnly=True)
-            test_tmpl.Repaginate()
-            tmpl_pages = test_tmpl.ComputeStatistics(2)
-            template_text = test_tmpl.Content.Text
-            test_tmpl.Close(False)
+            try:
+                test_tmpl.Repaginate()
+                tmpl_pages = test_tmpl.ComputeStatistics(2)
+                template_text = test_tmpl.Content.Text
+            finally:
+                test_tmpl.Close(False)
 
+            # Заготовка більше не є «останньою сторінкою», яку підставляють у
+            # наказ: тепер це повноцінний шаблон примірника (шапка + теги +
+            # {{зміст}}), тому обмеження в 1 сторінку зняте.
             if tmpl_pages != 1:
-                self.log_p2(f"❌ ПОМИЛКА: Файл «Задня сторінка» має {tmpl_pages} стор. (повинна бути рівно 1 сторінка)!")
+                self.log_p2(f"  ℹ️ Заготовка займає {tmpl_pages} стор.")
+
+            if "{{зміст}}" not in template_text:
+                self.log_p2("❌ ПОМИЛКА: у заготовці примірника не знайдено тег {{зміст}}!")
                 messagebox.showerror(
                     "Помилка шаблону",
-                    f"Шаблон «Задня сторінка» містить {tmpl_pages} сторінок замість рівно 1 сторінки!\n\n"
+                    "У заготовці примірника не знайдено тег {{зміст}}.\n\n"
                     f"Файл: {os.path.basename(back_page_abs)}\n\n"
-                    "Для заміни останньої сторінки файл шаблону має займати рівно 1 сторінку."
+                    "Саме в це місце вставляються пункти наказу разом із підписантом.",
                 )
                 return
 
@@ -3413,60 +3954,102 @@ class App:
                 self.log_p2(f"\n[{idx}/{len(order_files)}] Обробка: {fname}")
                 order_num, order_date = extract_metadata_from_filename(fname)
 
-                sub_folder_name = f"Наказ № {order_num}" if order_num else os.path.splitext(fname)[0]
+                # Номер наказу може містити «/» (напр. «б/н», «123/45»), який
+                # ОС трактує як роздільник шляху й створює вкладені папки,
+                # тому назву папки треба чистити так само, як назву файлу.
+                sub_folder_name = (
+                    f"Наказ № {sanitize_filename(order_num)}"
+                    if order_num
+                    else sanitize_filename(os.path.splitext(fname)[0])
+                )
                 target_dir = os.path.join(out_root, sub_folder_name)
                 os.makedirs(target_dir, exist_ok=True)
 
                 out_copy_name = build_copy_two_filename(order_num, order_date, fname)
                 target_file = os.path.join(target_dir, out_copy_name)
 
-                self.log_p2("  Режим: повна копія наказу із заміною останньої сторінки.")
-                shutil.copy2(order_path, target_file)
-                doc = word.Documents.Open(os.path.abspath(target_file), ReadOnly=False)
-                doc.Repaginate()
-                total_pages = doc.ComputeStatistics(2)
-                self.log_p2(f"  Кількість сторінок оригіналу: {total_pages}")
-                last_start = doc.GoTo(1, 1, total_pages).Start
-                content_end = max(last_start, doc.Content.End - 1)
-                doc.Range(last_start, content_end).Delete()
-                insert_pos = max(0, min(last_start, doc.Content.End - 1))
-                doc.Range(insert_pos, insert_pos).InsertFile(back_page_abs)
+                doc = None
+                working_copy = ""
+                try:
+                    self.log_p2("  Режим: збірка примірника із заготовки (без колонтитулів).")
+                    values = back_page_tag_values(order_num, order_date)
+                    # Зворотна сумісність для вже створених шаблонів.
+                    if order_num:
+                        values["{{номер}}"] = order_num
+                    if order_date:
+                        values["{{дата}}"] = order_date
+                    values["{{примірник_номер}}"] = copy_title
+                    values["{{засвідчення}}"] = "Згідно з оригіналом"
 
-                values = back_page_tag_values(order_num, order_date)
-                # Зворотна сумісність для вже створених шаблонів.
-                if order_num:
-                    values["{{номер}}"] = order_num
-                if order_date:
-                    values["{{дата}}"] = order_date
-                values["{{примірник_номер}}"] = copy_title
-                values["{{засвідчення}}"] = "Згідно з оригіналом"
-                for tag, value in values.items():
-                    find_obj = doc.Content.Find
-                    find_obj.Text = tag
-                    while find_obj.Execute():
-                        find_obj.Parent.Text = value
-                        find_obj = doc.Content.Find
-                        find_obj.Text = tag
+                    # Виконавець примірників; якщо не заповнено — беремо
+                    # виконавця витягів, щоб не змушувати вводити двічі.
+                    executor_value = (
+                        self.p2_executor.get().strip() or self.executor.get().strip()
+                    )
+                    if executor_value:
+                        values["{{виконавець}}"] = _slash_to_lines(executor_value)
 
-                doc.Repaginate()
-                final_pages = doc.ComputeStatistics(2)
-                doc.Save()
-                doc.Close(False)
+                    # Засвідчувач («Згідно з оригіналом») — ті самі поля, що
+                    # й у витягах, щоб дані не розходились між вкладками.
+                    if self.certifier_position.get().strip():
+                        cert_pos = _slash_to_lines(self.certifier_position.get().strip())
+                        values["{{засвідчувач_посада}}"] = cert_pos
+                        values["{{згідно_з_оригіналом_посада}}"] = cert_pos
+                    if self.certifier_rank.get().strip():
+                        cert_rank = self.certifier_rank.get().strip()
+                        values["{{засвідчувач_звання}}"] = cert_rank
+                        values["{{згідно_з_оригіналом_звання}}"] = cert_rank
+                    if self.certifier_name.get().strip():
+                        cert_name = self.certifier_name.get().strip()
+                        values["{{засвідчувач_піб}}"] = cert_name
+                        values["{{згідно_з_оригіналом_піб}}"] = cert_name
+                        values["{{засвідчувач}}"] = cert_name
 
-                sheets_1_copy = (final_pages + 1) // 2
-                self.log_p2(
-                    f"  ✅ Створено: {out_copy_name} (сторінок: {final_pages} | "
-                    f"аркушів для двостороннього друку: {sheets_1_copy} арк.)"
-                )
-                created_records.append((
-                    idx,
-                    out_copy_name,
-                    order_num or "—",
-                    order_date or "—",
-                    final_pages,
-                    sheets_1_copy,
-                    target_file,
-                ))
+                    # Заготовка може бути у форматі Word 97-2003, тож робоча
+                    # копія зберігає реальне розширення, а .docx дає SaveAs2.
+                    working_copy = copy_template_for_editing(
+                        back_page_abs, os.path.join(target_dir, "_nat_tmpl.docx")
+                    )
+                    final_pages = build_copy_document(
+                        word,
+                        os.path.abspath(order_path),
+                        os.path.abspath(working_copy),
+                        os.path.abspath(target_file),
+                        values,
+                        resolve_span=self._order_body_span,
+                        log=self.log_p2,
+                    )
+
+                    sheets_1_copy = (final_pages + 1) // 2
+                    self.log_p2(
+                        f"  ✅ Створено: {out_copy_name} (сторінок: {final_pages} | "
+                        f"аркушів для двостороннього друку: {sheets_1_copy} арк.)"
+                    )
+                    created_records.append((
+                        idx,
+                        out_copy_name,
+                        order_num or "—",
+                        order_date or "—",
+                        final_pages,
+                        sheets_1_copy,
+                        target_file,
+                    ))
+                except Exception as order_error:
+                    # Збій одного наказу не має зривати весь пакет.
+                    traceback.print_exc()
+                    self.log_p2(f"  ПОМИЛКА ({fname}): {order_error}")
+                    failed_orders.append((fname, str(order_error)))
+                    try:
+                        if doc is not None:
+                            doc.Close(False)
+                    except Exception:
+                        pass
+                finally:
+                    if working_copy and os.path.exists(working_copy):
+                        try:
+                            os.remove(working_copy)
+                        except OSError:
+                            pass
 
             for rec in created_records:
                 self.p2_tree.insert("", tk.END, values=rec)
@@ -3485,12 +4068,38 @@ class App:
 
             self.log_p2(f"\n📊 СТАТИСТИКА ТА РОЗРАХУНОК ДРУКУ:\n{p2_stats_msg}")
             self.log_p2(f"\n🎉 Завершено! Успішно сформовано {total_orders} примірник(ів) № 2.")
-            messagebox.showinfo(
-                "Успіх",
-                f"Успішно сформовано {total_orders} примірник(ів) № 2!\n\n"
-                f"{p2_stats_msg}"
-            )
 
+            if failed_orders:
+                details = "\n".join(f"• {name}: {error}" for name, error in failed_orders[:10])
+                if len(failed_orders) > 10:
+                    details += f"\n… ще {len(failed_orders) - 10}"
+                self.log_p2(f"\nНе вдалося сформувати примірники: {len(failed_orders)} шт.")
+                messagebox.showwarning(
+                    "Примірники сформовано частково",
+                    f"Сформовано {total_orders} з {len(order_files)} примірник(ів).\n\n"
+                    f"Не вдалося ({len(failed_orders)}):\n{details}\n\n{p2_stats_msg}",
+                )
+            else:
+                messagebox.showinfo(
+                    "Успіх",
+                    f"Успішно сформовано {total_orders} примірник(ів) № 2!\n\n"
+                    f"{p2_stats_msg}"
+                )
+
+        except Exception as error:
+            # Раніше винятку не було де перехопити: таблиця лишалась порожньою,
+            # а користувач бачив лише traceback у консолі.
+            traceback.print_exc()
+            self.log_p2(f"\n❌ ПОМИЛКА пакетної генерації: {error}")
+            for rec in created_records:
+                self.p2_tree.insert("", tk.END, values=rec)
+            if created_records:
+                self._set_copy_two_sources([record[-1] for record in created_records])
+            messagebox.showerror(
+                "Помилка формування примірників",
+                f"Пакет перервано: {error}\n\n"
+                f"Встигли сформувати: {len(created_records)} примірник(ів).",
+            )
         finally:
             if word:
                 force_quit_word(word)
