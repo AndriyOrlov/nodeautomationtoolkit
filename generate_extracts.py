@@ -164,6 +164,23 @@ def build_extracts_filename(order_num: str, order_date: str) -> str:
     return " ".join(parts) + ".docx"
 
 
+def read_document_text(doc) -> str:
+    """Текст документа, зібраний З АБЗАЦІВ, а не з `Content.Text`.
+
+    `Content.Text` склеює цілий рядок таблиці в один рядок тексту, тоді як
+    `doc.Paragraphs` рахує кожну комірку окремим абзацом. Через це нумерація
+    рядків розходилася з нумерацією абзаців, і після будь-якої таблиці в тілі
+    наказу пункти зіставлялися не з тими абзацами — частина пунктів губилася.
+
+    Збираючи текст саме з абзаців, ми отримуємо відповідність «рядок ↔ абзац»
+    за побудовою: обидві сторони розбиваються однаково.
+    """
+    return "\n".join(
+        (doc.Paragraphs(index).Range.Text or "").rstrip("\r\x07")
+        for index in range(1, doc.Paragraphs.Count + 1)
+    )
+
+
 def _slash_to_lines(text_val: str) -> str:
     """Конвертує слеші ' / ' або '/' (крім 'в/ч' та дат) у переноси рядків для Word.
 
@@ -2761,8 +2778,7 @@ class App:
             word.Visible = False
             word.DisplayAlerts = 0  # wdAlertsNone: не показувати блокуючі діалоги (напр. "Зберегти зміни?")
             doc = word.Documents.Open(os.path.abspath(doc_path), ReadOnly=True)
-            text = doc.Content.Text
-            return text
+            return read_document_text(doc)
         finally:
             try:
                 if doc:
