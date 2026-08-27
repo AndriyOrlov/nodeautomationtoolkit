@@ -3,6 +3,7 @@ import sys
 import json
 import re
 import shutil
+import time
 from datetime import datetime
 from pathlib import Path
 import tkinter as tk
@@ -48,6 +49,8 @@ from nodeautomationtoolkit.builtin_nodes.message_order import (
     reflow_soft_breaks,
 )
 from nodeautomationtoolkit.builtin_nodes.copy_generator import (
+    PREVIEW_DEFAULT_DELAY,
+    PreviewSteps,
     build_copy_document,
     retry_on_busy_word,
     _ORDER_BODY_KEYWORDS,
@@ -1039,6 +1042,10 @@ class App:
         self.p2_copy_title = tk.StringVar(value="Примірник № 2")
         # Виконавець примірників. Порожнє поле = береться виконавець витягів.
         self.p2_executor = tk.StringVar()
+        # Режим превʼю: Word видимий, після кожного кроку пауза, у журналі —
+        # що саме робиться. Пауза рядком, бо це поле вводить користувач.
+        self.p2_preview = tk.BooleanVar(value=False)
+        self.p2_preview_delay = tk.StringVar(value=str(PREVIEW_DEFAULT_DELAY))
         self.last_copy_two_paths: list[str] = []
 
         # Конфігурація вкладки «Повідомлення».
@@ -1172,6 +1179,10 @@ class App:
                     # Правила для примірника № 3 ще не погоджені.
                     self.p2_copy_title.set("Примірник № 2")
                     self.p2_executor.set(data.get("p2_executor", ""))
+                    self.p2_preview.set(bool(data.get("p2_preview", False)))
+                    self.p2_preview_delay.set(
+                        str(data.get("p2_preview_delay", PREVIEW_DEFAULT_DELAY))
+                    )
 
                     self.message_cover_template_path.set(data.get("message_cover_template_path", ""))
                     self.message_content_template_path.set(data.get("message_content_template_path", ""))
@@ -1204,6 +1215,8 @@ class App:
             "p2_out_folder_manual": self.p2_out_folder_manual.get(),
             "p2_copy_title": self.p2_copy_title.get(),
             "p2_executor": self.p2_executor.get(),
+            "p2_preview": self.p2_preview.get(),
+            "p2_preview_delay": self.p2_preview_delay.get(),
             "message_cover_template_path": self.message_cover_template_path.get(),
             "message_content_template_path": self.message_content_template_path.get(),
             "message_out_folder": self.message_out_folder.get(),
@@ -1597,8 +1610,24 @@ class App:
             bootstyle="secondary",
         ).grid(row=3, column=0, columnspan=2, sticky=W, pady=(4, 0))
 
+        preview_box = tb.Frame(copies_card)
+        preview_box.grid(row=7, column=0, columnspan=3, sticky=W, pady=(6, 0))
+        tb.Checkbutton(
+            preview_box,
+            text="🐢 Режим превʼю (повільно, з видимим Word)",
+            variable=self.p2_preview,
+            bootstyle="info-round-toggle",
+        ).pack(side=LEFT, padx=(0, 10))
+        tb.Label(preview_box, text="пауза, сек:").pack(side=LEFT, padx=(0, 4))
+        tb.Entry(preview_box, textvariable=self.p2_preview_delay, width=6).pack(side=LEFT)
+        tb.Label(
+            preview_box,
+            text="Показує кожен крок у журналі. Для великого пакета — довго.",
+            bootstyle="secondary",
+        ).pack(side=LEFT, padx=(10, 0))
+
         copy_type_box = tb.Frame(copies_card)
-        copy_type_box.grid(row=7, column=0, columnspan=3, sticky=W, pady=(4, 0))
+        copy_type_box.grid(row=8, column=0, columnspan=3, sticky=W, pady=(4, 0))
         tb.Label(copy_type_box, text="Формується:", font=("Segoe UI", 10, "bold")).pack(side=LEFT, padx=(0, 8))
         tb.Label(copy_type_box, text="Примірник № 2", bootstyle="success").pack(side=LEFT, padx=(0, 10))
         tb.Label(
@@ -1612,7 +1641,7 @@ class App:
             text="💡 Перетягніть сюди папку з наказами, окремий наказ чи шаблон (Drag-and-Drop)",
             font=("Segoe UI", 9, "italic"),
             bootstyle="info",
-        ).grid(row=8, column=0, columnspan=3, sticky=W, pady=(4, 0))
+        ).grid(row=9, column=0, columnspan=3, sticky=W, pady=(4, 0))
 
         self._on_p2_source_mode_changed()
 
@@ -1971,6 +2000,23 @@ class App:
         self.p2_log_text.insert(tk.END, message + "\n")
         self.p2_log_text.see(tk.END)
         self.root.update_idletasks()
+
+    def _preview_pause(self, seconds: float) -> None:
+        """Пауза режиму превʼю, під час якої вікно лишається живим.
+
+        Звичайний `time.sleep` заморожує цикл подій Tk: журнал не гортається,
+        а вікно виглядає зависшим — тобто рівно протилежне до того, задля чого
+        режим і потрібен. Тому чекаємо короткими відрізками, а між ними даємо
+        Tk перемалюватись. Кнопку запуску на час прогону вимкнено, тож
+        повторного входу це не спричиняє.
+        """
+        deadline = time.monotonic() + max(0.0, seconds)
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            time.sleep(min(0.05, remaining))
+            self.root.update()
 
     def clear_log(self):
         self.log_text.delete(1.0, tk.END)
@@ -3390,8 +3436,17 @@ class App:
 
         temp_files = []
         layout_warnings = []
+        # У режимі превʼю Word показується — інакше дивитись нема на що.
+        preview_on = bool(self.p2_preview.get())
+        preview_delay = self.p2_preview_delay.get()
+        if preview_on:
+            self.log_p2(
+                f"🐢 Режим превʼю увімкнено: Word буде видимим, пауза після "
+                f"кожного кроку — {preview_delay} сек. Для великого пакета це довго."
+            )
+
         word = win32com.client.DispatchEx("Word.Application")
-        word.Visible = False
+        word.Visible = preview_on
         word.DisplayAlerts = 0  # wdAlertsNone: не показувати блокуючі діалоги (напр. "Зберегти зміни?")
 
         try:
@@ -4597,6 +4652,14 @@ class App:
                     )
                     # Під кінець великого пакета Word може тимчасово відхиляти
                     # виклики — такий збій не є помилкою даних, тому повторюємо.
+                    # Показник кроків СВІЙ на кожен наказ: інакше нумерація
+                    # «Крок N/8» тривала б наскрізно через увесь пакет.
+                    steps = PreviewSteps(
+                        log=self.log_p2,
+                        delay=preview_delay,
+                        enabled=preview_on,
+                        sleeper=self._preview_pause,
+                    )
                     final_pages = retry_on_busy_word(
                         lambda: build_copy_document(
                             word,
@@ -4608,6 +4671,7 @@ class App:
                                 source, signer_as_tag=signer_tag_in_template
                             ),
                             log=self.log_p2,
+                            preview=steps,
                         ),
                         log=self.log_p2,
                     )

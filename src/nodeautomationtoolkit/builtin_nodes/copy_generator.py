@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import re
 import time
 
@@ -89,6 +90,61 @@ _TRANSIENT_COM_MARKERS = (
     "server is busy",
     "retrylater",
 )
+
+
+# Скільки кроків має збірка одного примірника — щоб у журналі стояло
+# «Крок 3/8», а не просто «Крок 3».
+PREVIEW_TOTAL_STEPS = 8
+PREVIEW_DEFAULT_DELAY = 1.5
+
+
+class PreviewSteps:
+    """Покроковий показ роботи: назва кроку в журнал і пауза після нього.
+
+    Пауза стоїть **після** дії, а не перед: сенс режиму в тому, щоб побачити
+    у вікні Word РЕЗУЛЬТАТ кроку, а не встигнути прочитати напис.
+
+    Коли режим вимкнено, обидва методи не роблять нічого — у звичайному
+    прогоні жодних накладних витрат немає, тож окремої гілки коду для
+    «швидкого» режиму не потрібно.
+    """
+
+    def __init__(
+        self,
+        log=None,
+        delay: float = PREVIEW_DEFAULT_DELAY,
+        enabled: bool = False,
+        total: int = PREVIEW_TOTAL_STEPS,
+        sleeper=None,
+    ):
+        self._log = log
+        # Паузу можна віддати викликачеві: у GUI звичайний `time.sleep`
+        # заморожує цикл подій Tk, і вікно виглядає зависшим.
+        self._sleeper = sleeper or time.sleep
+        self._total = total
+        self._done = 0
+        self.enabled = bool(enabled)
+        try:
+            self.delay = max(0.0, float(delay))
+        except (TypeError, ValueError):
+            # Поле паузи вводить користувач, і воно може містити будь-що.
+            # Порожнє чи хибне значення не має зривати генерацію.
+            self.delay = PREVIEW_DEFAULT_DELAY
+
+    @contextlib.contextmanager
+    def step(self, title: str):
+        """Один крок: напис перед дією, пауза після неї."""
+        self._done += 1
+        if self.enabled and self._log:
+            self._log(f"  ▶ Крок {self._done}/{self._total}: {title}")
+        yield self
+        if self.enabled and self.delay:
+            self._sleeper(self.delay)
+
+    def detail(self, text: str) -> None:
+        """Уточнення до поточного кроку — цифри, знайдені межі тощо."""
+        if self.enabled and self._log:
+            self._log(f"     → {text}")
 
 
 def is_transient_word_error(error: Exception) -> bool:
@@ -705,6 +761,7 @@ def build_copy_document(
     values: dict[str, str],
     resolve_span=None,
     log=None,
+    preview=None,
 ) -> int:
     """Збирає примірник із заготовки та зберігає його у `target_file`.
 
@@ -713,94 +770,118 @@ def build_copy_document(
     тіла наказу разом із підписантом. Її передає викликач, щоб використати ту
     саму логіку пошуку підписанта, що й у витягах, а не дублювати її тут.
 
+    `preview` — `PreviewSteps` для повільного показу роботи. Коли не передано,
+    діє вимкнений показник, і поведінка нічим не відрізняється від звичайної.
+
     Повертає кількість сторінок готового примірника.
     """
     def note(message: str) -> None:
         if log:
             log(message)
 
+    steps = preview or PreviewSteps(log=log, enabled=False)
+
     source_doc = None
     doc = None
     try:
-        source_doc = word.Documents.Open(order_path, ReadOnly=True)
+        with steps.step("відкриваю наказ"):
+            source_doc = word.Documents.Open(order_path, ReadOnly=True)
 
         signature_line = ""
-        if resolve_span is not None:
-            resolved = resolve_span(source_doc)
-            if isinstance(resolved, dict):
-                # Розширений варіант: межі + теги, похідні від наказу
-                # (блок підписанта та його реквізити для заготовки).
-                body_start, signer_index = resolved["span"]
-                values = {**values, **resolved.get("values", {})}
-                signature_line = resolved.get("signature_line", "")
+        with steps.step("шукаю межі тіла та підписанта"):
+            if resolve_span is not None:
+                resolved = resolve_span(source_doc)
+                if isinstance(resolved, dict):
+                    # Розширений варіант: межі + теги, похідні від наказу
+                    # (блок підписанта та його реквізити для заготовки).
+                    body_start, signer_index = resolved["span"]
+                    values = {**values, **resolved.get("values", {})}
+                    signature_line = resolved.get("signature_line", "")
+                else:
+                    body_start, signer_index = resolved
             else:
-                body_start, signer_index = resolved
-        else:
-            # Запасний варіант, якщо межі не передали.
-            signer_index = find_signer_paragraph_index(source_doc)
-            body_start = find_body_start_paragraph_index(source_doc)
-        if not signer_index or not body_start:
-            raise ValueError("не вдалося визначити межі тіла наказу")
-        if body_start > signer_index:
-            raise ValueError("тіло наказу не знайдено перед підписантом")
-        tail_preview = _paragraph_text(source_doc.Paragraphs(signer_index))[:40]
-        note(
-            f"  Тіло наказу: абзаци {body_start}–{signer_index}; "
-            f"останній рядок: «{tail_preview}…»"
-        )
+                # Запасний варіант, якщо межі не передали.
+                signer_index = find_signer_paragraph_index(source_doc)
+                body_start = find_body_start_paragraph_index(source_doc)
+            if not signer_index or not body_start:
+                raise ValueError("не вдалося визначити межі тіла наказу")
+            if body_start > signer_index:
+                raise ValueError("тіло наказу не знайдено перед підписантом")
+            tail_preview = _paragraph_text(source_doc.Paragraphs(signer_index))[:40]
+            note(
+                f"  Тіло наказу: абзаци {body_start}–{signer_index}; "
+                f"останній рядок: «{tail_preview}…»"
+            )
+            steps.detail(f"абзаци {body_start}–{signer_index}")
 
-        doc = word.Documents.Open(working_copy_path, ReadOnly=False)
-        replace_tags(doc, values)
+        with steps.step("підставляю реквізити в заготовку"):
+            doc = word.Documents.Open(working_copy_path, ReadOnly=False)
+            if steps.enabled:
+                # У режимі превʼю саме примірник має бути переднім вікном —
+                # інакше користувач дивиться на наказ, а зміни йдуть у копію.
+                try:
+                    doc.Activate()
+                except Exception:
+                    pass
+            replace_tags(doc, values)
+            steps.detail(f"тегів підставлено: {len(values)}")
 
         find_obj = doc.Content.Find
         find_obj.Text = "{{зміст}}"
         if not find_obj.Execute():
             raise ValueError("у заготовці немає тегу {{зміст}}")
 
-        content_start, content_end = copy_order_body(
-            doc, find_obj.Parent, source_doc, body_start, signer_index
-        )
-        apply_keep_together_rules(doc, content_start, content_end)
+        with steps.step("переношу зміст у {{зміст}}"):
+            content_start, content_end = copy_order_body(
+                doc, find_obj.Parent, source_doc, body_start, signer_index
+            )
+            apply_keep_together_rules(doc, content_start, content_end)
+            steps.detail(f"скопійовано абзаців: {signer_index - body_start + 1}")
 
-        if signature_line:
-            # Підписант підставлений окремим тегом — форматуємо його останній
-            # рядок (звання та прізвище), а не останній пункт наказу.
-            finder = doc.Content.Find
-            finder.Text = signature_line
-            if finder.Execute():
-                format_signature_line(doc, finder.Parent.Paragraphs(1).Range, underline=True)
-                note("  Рядок підписанта оформлено.")
+        with steps.step("оформлюю підписанта"):
+            if signature_line:
+                # Підписант підставлений окремим тегом — форматуємо його останній
+                # рядок (звання та прізвище), а не останній пункт наказу.
+                finder = doc.Content.Find
+                finder.Text = signature_line
+                if finder.Execute():
+                    format_signature_line(doc, finder.Parent.Paragraphs(1).Range, underline=True)
+                    note("  Рядок підписанта оформлено.")
+                else:
+                    note("  УВАГА: рядок підписанта у документі не знайдено.")
             else:
-                note("  УВАГА: рядок підписанта у документі не знайдено.")
-        else:
-            # Підписант — частина змісту: форматуємо його останній абзац.
-            content_range = doc.Range(content_start, content_end)
-            for i in range(content_range.Paragraphs.Count, 0, -1):
-                paragraph_range = content_range.Paragraphs(i).Range
-                if (paragraph_range.Text or "").strip("\r\x07 \t"):
-                    format_signature_line(doc, paragraph_range, underline=True)
-                    break
+                # Підписант — частина змісту: форматуємо його останній абзац.
+                content_range = doc.Range(content_start, content_end)
+                for i in range(content_range.Paragraphs.Count, 0, -1):
+                    paragraph_range = content_range.Paragraphs(i).Range
+                    if (paragraph_range.Text or "").strip("\r\x07 \t"):
+                        format_signature_line(doc, paragraph_range, underline=True)
+                        break
 
-        # Блок засвідчувача («Згідно з оригіналом» + посада + звання/прізвище)
-        # іде суцільно, без порожніх абзаців. Форматуємо його ОСТАННІЙ рядок.
-        if format_certifier_block(doc):
-            note("  Блок «Згідно з оригіналом» оформлено.")
-        else:
-            note("  УВАГА: блок «Згідно з оригіналом» у документі не знайдено.")
+        with steps.step("блок «Згідно з оригіналом»"):
+            # Блок засвідчувача («Згідно з оригіналом» + посада + звання/прізвище)
+            # іде суцільно, без порожніх абзаців. Форматуємо його ОСТАННІЙ рядок.
+            if format_certifier_block(doc):
+                note("  Блок «Згідно з оригіналом» оформлено.")
+            else:
+                note("  УВАГА: блок «Згідно з оригіналом» у документі не знайдено.")
 
-        clear_headers_and_footers(doc)
+        with steps.step("колонтитули"):
+            clear_headers_and_footers(doc)
 
-        # Деякі накази мають порожню останню сторінку — у примірнику її не лишаємо.
-        if remove_trailing_empty_page(doc):
-            note("  Прибрано порожню останню сторінку.")
+            # Деякі накази мають порожню останню сторінку — у примірнику її не лишаємо.
+            if remove_trailing_empty_page(doc):
+                note("  Прибрано порожню останню сторінку.")
 
-        # ТІЛЬКИ ПІСЛЯ видалення порожньої сторінки: колонтитули залежать від
-        # того, яка сторінка є останньою, тож ставити їх раніше не можна.
-        apply_service_headers(doc, log=log)
+            # ТІЛЬКИ ПІСЛЯ видалення порожньої сторінки: колонтитули залежать від
+            # того, яка сторінка є останньою, тож ставити їх раніше не можна.
+            apply_service_headers(doc, log=log)
 
-        doc.Repaginate()
-        pages = doc.ComputeStatistics(_WD_STATISTIC_PAGES)
-        doc.SaveAs2(target_file, 16)  # wdFormatXMLDocument
+        with steps.step("зберігаю"):
+            doc.Repaginate()
+            pages = doc.ComputeStatistics(_WD_STATISTIC_PAGES)
+            doc.SaveAs2(target_file, 16)  # wdFormatXMLDocument
+            steps.detail(f"сторінок: {pages}")
         return pages
     finally:
         for document in (doc, source_doc):
