@@ -6,7 +6,8 @@
 витягах, копіюванням `FormattedText` кожного абзацу.
 
 Чому саме так: копіювання файлу наказу тягнуло за собою колонтитули та решту
-службового оформлення, а в примірниках колонтитулів бути не повинно.
+службового оформлення оригіналу. Колонтитули примірника будуються тут з нуля
+(`apply_service_headers`) — у заготовці їх немає.
 
 Модуль працює лише з об'єктами Word COM: шляхи, назви папок і обробку помилок
 тримає викликач.
@@ -23,6 +24,21 @@ _WD_GO_TO_ABSOLUTE = 1
 _WD_STATISTIC_LINES = 1
 _WD_STATISTIC_PAGES = 2
 _WD_UNDERLINE_SINGLE = 1
+_WD_COLOR_BLACK = 0
+_WD_ALIGN_PARAGRAPH_CENTER = 1
+_WD_LINE_SPACE_SINGLE = 0
+_WD_COLLAPSE_START = 1
+_WD_SECTION_BREAK_NEXT_PAGE = 2
+_WD_FIELD_PAGE = 33
+_WD_HEADER_FOOTER_PRIMARY = 1
+_WD_HEADER_FOOTER_FIRST_PAGE = 2
+_WD_PAGE_BREAK_CHARACTER = ""
+
+# Гриф обмеження доступу у колонтитулах примірника.
+SERVICE_MARK_TEXT = "ДЛЯ СЛУЖБОВОГО КОРИСТУВАННЯ"
+_SERVICE_MARK_SIZE = 14.0
+_PAGE_NUMBER_SIZE = 12.0
+_HEADER_FONT_NAME = "Times New Roman"
 
 # Початок службової таблиці розсилки/відміток — у примірник не переноситься.
 _DISTRIBUTION_MARKERS = (
@@ -172,7 +188,11 @@ def find_body_start_paragraph_index(doc) -> int:
 
 
 def clear_headers_and_footers(doc) -> None:
-    """Прибирає всі колонтитули: у примірниках їх бути не повинно."""
+    """Прибирає колонтитули, що прийшли із заготовки чи наказу.
+
+    Власні колонтитули примірника (номер сторінки та гриф) ставляться після
+    цього окремо — `apply_service_headers`.
+    """
     for section in doc.Sections:
         for collection in (section.Headers, section.Footers):
             for item in collection:
@@ -181,6 +201,234 @@ def clear_headers_and_footers(doc) -> None:
                         item.Range.Delete()
                 except Exception:
                     continue
+
+
+def _style_header_paragraph(paragraph_range, size: float) -> None:
+    """Приводить абзац колонтитула до потрібного вигляду.
+
+    Стиль `Header`/`Footer` у шаблоні може мати власне вирівнювання, відступи,
+    шрифт І КОЛІР, тому все виставляється ЯВНО — той самий підхід, що й у
+    правилі 5.2.1 для тіла документа.
+
+    Колір задається окремо й обов'язково: без нього колонтитул успадковував
+    колір стилю заготовки й виходив ЧЕРВОНИМ. Ані `Name`, ані `Size` цього не
+    перекривають — колір є самостійною властивістю шрифту.
+    """
+    font = paragraph_range.Font
+    font.Name = _HEADER_FONT_NAME
+    font.Size = size
+    font.Bold = False
+    font.Italic = False
+    font.Underline = 0
+    font.Color = _WD_COLOR_BLACK
+
+    fmt = paragraph_range.ParagraphFormat
+    fmt.Alignment = _WD_ALIGN_PARAGRAPH_CENTER
+    fmt.LeftIndent = 0
+    fmt.RightIndent = 0
+    fmt.FirstLineIndent = 0
+    fmt.SpaceBefore = 0
+    fmt.SpaceAfter = 0
+    fmt.LineSpacingRule = _WD_LINE_SPACE_SINGLE
+
+
+def _set_story_lines(story, lines) -> None:
+    """Робить у колонтитулі рівно стільки абзаців, скільки рядків у `lines`.
+
+    Останній абзац story Word видалити не дає, і точний результат присвоєння
+    `Range.Text` залежить від версії, тому кількість абзаців вирівнюється
+    окремо — вставкою або видаленням, із запобіжником від нескінченного циклу.
+    """
+    story.Range.Text = "\r".join(lines)
+
+    guard = len(lines) + 4
+    while story.Range.Paragraphs.Count > len(lines) and guard > 0:
+        guard -= 1
+        before = story.Range.Paragraphs.Count
+        try:
+            story.Range.Paragraphs(before).Range.Delete()
+        except Exception:
+            break  # останній абзац story Word видаляти не дає
+        if story.Range.Paragraphs.Count >= before:
+            break  # видалення нічого не змінило — далі не намагаємось
+    while story.Range.Paragraphs.Count < len(lines) and guard > 0:
+        guard -= 1
+        story.Range.InsertParagraphAfter()
+
+
+def _style_story(story, sizes: dict, default: float) -> None:
+    """Проходить УСІ наявні абзаци колонтитула й задає їм кегль.
+
+    `sizes` — розмір для конкретних номерів абзаців, решта отримує `default`.
+    Перебір іде за фактичною кількістю абзаців: звертатися до третього абзацу
+    наосліп не можна, бо точний результат присвоєння `Range.Text` залежить від
+    версії Word, а падіння тут коштувало б цілого примірника.
+    """
+    for number in range(1, story.Range.Paragraphs.Count + 1):
+        _style_header_paragraph(
+            story.Range.Paragraphs(number).Range, sizes.get(number, default)
+        )
+
+
+def _clear_story(item) -> None:
+    """Спорожняє колонтитул і відв'язує його від попереднього розділу."""
+    try:
+        item.LinkToPrevious = False
+    except Exception:
+        pass
+    item.Range.Text = ""
+
+
+def isolate_last_page_section(doc) -> bool:
+    """Виносить ОСТАННЮ сторінку в окремий розділ.
+
+    Word уміє «іншу першу сторінку» (`DifferentFirstPageHeaderFooter`), але
+    «іншої останньої» в ньому НЕМАЄ ЗОВСІМ. Єдиний спосіб лишити останню
+    сторінку без колонтитулів — зробити її самостійним розділом і відв'язати
+    його від попереднього.
+
+    Повертає `True`, якщо остання сторінка після виклику є окремим розділом.
+    """
+    doc.Repaginate()
+    pages = doc.ComputeStatistics(_WD_STATISTIC_PAGES)
+    if pages < 2:
+        return False
+
+    start = doc.GoTo(_WD_GO_TO_PAGE, _WD_GO_TO_ABSOLUTE, pages).Start
+    sections = doc.Sections
+    if sections.Count > 1 and sections(sections.Count).Range.Start >= start:
+        return True  # заготовка вже має окремий розділ на останню сторінку
+
+    # Якщо сторінка починається РУЧНИМ розривом сторінки, його треба ЗАМІНИТИ
+    # розривом розділу, а не додавати другий: два розриви підряд дають зайву
+    # порожню сторінку.
+    if start > 0:
+        previous = doc.Range(start - 1, start)
+        if (previous.Text or "") == _WD_PAGE_BREAK_CHARACTER:
+            previous.Delete()
+            start -= 1
+
+    doc.Range(start, start).InsertBreak(_WD_SECTION_BREAK_NEXT_PAGE)
+
+    # Розрив розділу вже переносить текст на нову сторінку. Якщо в абзаца ще й
+    # стоїть «з нової сторінки», сторінок стає дві — одна з них порожня.
+    sections = doc.Sections
+    if sections.Count > 1:
+        try:
+            sections(sections.Count).Range.Paragraphs(1).Format.PageBreakBefore = False
+        except Exception:
+            pass
+
+    doc.Repaginate()
+    return doc.Sections.Count > 1
+
+
+def apply_service_headers(doc, log=None) -> bool:
+    """Колонтитули примірника: номер сторінки та гриф обмеження доступу.
+
+    Розкладка (усе по центру, Times New Roman):
+
+    * **верхній** — три абзаци: номер сторінки (12 pt), гриф (14 pt) і
+      ПОРОЖНІЙ абзац, щоб текст наказу не зливався з колонтитулом;
+    * **нижній** — лише гриф (14 pt).
+
+    Ані на ПЕРШІЙ, ані на ОСТАННІЙ сторінці колонтитулів немає. Нумерація
+    наскрізна й рахується з першої сторінки, тож друга сторінка — «2».
+    У заготовці цього нічого немає — усе будує цей код.
+
+    Повертає `True`, якщо колонтитули поставлено.
+    """
+    def note(message: str) -> None:
+        if log:
+            log(message)
+
+    doc.Repaginate()
+    pages_before = doc.ComputeStatistics(_WD_STATISTIC_PAGES)
+    if pages_before < 2:
+        # Одна сторінка є водночас першою й останньою, тож на ній не має бути
+        # ні номера, ні грифа — колонтитули просто не ставляться.
+        note("  Колонтитули: примірник на одну сторінку — ні номера, ні грифа.")
+        return False
+
+    isolate_last_page_section(doc)
+
+    sections = doc.Sections
+    total = sections.Count
+    for index in range(1, total + 1):
+        section = sections(index)
+        setup = section.PageSetup
+        # Чиста ПЕРША сторінка — це вміє сам Word.
+        setup.DifferentFirstPageHeaderFooter = index == 1
+        # Властивість зветься саме `OddAndEvenPagesHeaderFooter`. Ім'я
+        # `DifferentOddAndEvenPagesHeaderFooter` (за аналогією з першою
+        # сторінкою) у Word НЕ ІСНУЄ — воно валило генерацію КОЖНОГО наказу
+        # помилкою «Property ... can not be set». Сама вимкненість парних
+        # колонтитулів — лише запобіжник проти налаштувань заготовки, тому
+        # відмову тут переживаємо, але не мовчки.
+        try:
+            setup.OddAndEvenPagesHeaderFooter = False
+        except Exception as error:
+            note(f"  УВАГА: не вдалося вимкнути парні колонтитули: {error}")
+
+        header = section.Headers(_WD_HEADER_FOOTER_PRIMARY)
+        footer = section.Footers(_WD_HEADER_FOOTER_PRIMARY)
+        try:
+            header.LinkToPrevious = False
+            footer.LinkToPrevious = False
+        except Exception:
+            pass
+
+        # Нумерація наскрізна: перезапуск лише в першому розділі, з одиниці.
+        # Кожна властивість окремо: для ПЕРШОГО розділу Word може відхилити
+        # `RestartNumberingAtSection` (перед ним немає розділу), і спільний
+        # `try` тоді проковтнув би ще й `StartingNumber`.
+        numbers = header.PageNumbers
+        try:
+            numbers.RestartNumberingAtSection = index == 1
+        except Exception as error:
+            note(f"  УВАГА: нумерація розділу {index}: {error}")
+        if index == 1:
+            try:
+                numbers.StartingNumber = 1
+            except Exception as error:
+                note(f"  УВАГА: початок нумерації: {error}")
+
+        if index == total and total > 1:
+            # Останній розділ — це остання сторінка, вона лишається чистою.
+            _clear_story(header)
+            _clear_story(footer)
+            continue
+
+        _set_story_lines(header, ["", SERVICE_MARK_TEXT, ""])
+        number_range = header.Range.Paragraphs(1).Range
+        number_range.Collapse(_WD_COLLAPSE_START)
+        doc.Fields.Add(number_range, _WD_FIELD_PAGE, "", False)
+        # Розміри — за НОМЕРОМ абзацу, а не наосліп: якщо Word віддав інакшу
+        # кількість абзаців, зайвий рядок гірший за помилку, але падати через
+        # звернення до неіснуючого абзацу примірник не має.
+        _style_story(header, {1: _PAGE_NUMBER_SIZE}, default=_SERVICE_MARK_SIZE)
+
+        _set_story_lines(footer, [SERVICE_MARK_TEXT])
+        _style_story(footer, {}, default=_SERVICE_MARK_SIZE)
+
+        if index == 1:
+            _clear_story(section.Headers(_WD_HEADER_FOOTER_FIRST_PAGE))
+            _clear_story(section.Footers(_WD_HEADER_FOOTER_FIRST_PAGE))
+
+    doc.Repaginate()
+    pages_after = doc.ComputeStatistics(_WD_STATISTIC_PAGES)
+    if pages_after > pages_before:
+        # Найгірший наслідок цієї операції — зайва порожня сторінка від
+        # подвійного розриву, тому про розбіжність треба сказати вголос.
+        note(
+            f"  УВАГА: після поділу на розділи сторінок стало {pages_after} "
+            f"замість {pages_before}."
+        )
+    note(
+        f"  Колонтитули: номер сторінки (12 пт) і гриф «{SERVICE_MARK_TEXT}» "
+        "(14 пт); перша й остання сторінки чисті."
+    )
+    return True
 
 
 def find_signature_name_tail(text: str) -> str:
@@ -545,6 +793,10 @@ def build_copy_document(
         # Деякі накази мають порожню останню сторінку — у примірнику її не лишаємо.
         if remove_trailing_empty_page(doc):
             note("  Прибрано порожню останню сторінку.")
+
+        # ТІЛЬКИ ПІСЛЯ видалення порожньої сторінки: колонтитули залежать від
+        # того, яка сторінка є останньою, тож ставити їх раніше не можна.
+        apply_service_headers(doc, log=log)
 
         doc.Repaginate()
         pages = doc.ComputeStatistics(_WD_STATISTIC_PAGES)
