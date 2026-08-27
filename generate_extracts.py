@@ -3436,17 +3436,9 @@ class App:
 
         temp_files = []
         layout_warnings = []
-        # У режимі превʼю Word показується — інакше дивитись нема на що.
-        preview_on = bool(self.p2_preview.get())
-        preview_delay = self.p2_preview_delay.get()
-        if preview_on:
-            self.log_p2(
-                f"🐢 Режим превʼю увімкнено: Word буде видимим, пауза після "
-                f"кожного кроку — {preview_delay} сек. Для великого пакета це довго."
-            )
 
         word = win32com.client.DispatchEx("Word.Application")
-        word.Visible = preview_on
+        word.Visible = False
         word.DisplayAlerts = 0  # wdAlertsNone: не показувати блокуючі діалоги (напр. "Зберегти зміни?")
 
         try:
@@ -4529,8 +4521,17 @@ class App:
 
         created_records = []
         failed_orders: list[tuple[str, str]] = []
+        # У режимі превʼю Word показується — інакше дивитись нема на що.
+        preview_on = bool(self.p2_preview.get())
+        preview_delay = self.p2_preview_delay.get()
+        if preview_on:
+            self.log_p2(
+                f"🐢 Режим превʼю увімкнено: Word буде видимим, пауза після "
+                f"кожного кроку — {preview_delay} сек. Для великого пакета це довго."
+            )
+
         word = win32com.client.DispatchEx("Word.Application")
-        word.Visible = False
+        word.Visible = preview_on
         word.DisplayAlerts = 0  # wdAlertsNone: не показувати блокуючі діалоги (напр. "Зберегти зміни?")
 
         try:
