@@ -55,8 +55,8 @@ def test_back_page_tags_use_only_filename_metadata_and_copy_two_label():
 
 
 def test_copy_two_filename_does_not_invent_missing_order_metadata():
-    assert build_copy_two_filename("396", "06.08.2026", "source.docx") == "прим_2_06.08.2026_396.docx"
-    assert build_copy_two_filename("", "", "source.docx") == "прим_2_source.docx"
+    assert build_copy_two_filename("396", "06.08.2026", "source.docx") == "2,3_№396 від 06.08.2026.docx"
+    assert build_copy_two_filename("", "", "source.docx") == "2,3_source.docx"
 
 
 def test_unmatched_open_units_are_identified_for_yellow_highlighting():
@@ -129,6 +129,231 @@ def test_message_recipient_does_not_repeat_military_unit_phrase():
     routes = map_military_units(text="1. До окрема частина.", mapping=mapping)
 
     assert build_message_recipient_list(mapping, routes) == ["Командиру військової частини А0000"]
+
+
+def test_all_matched_recipients_of_one_item_receive_extracts():
+    from nodeautomationtoolkit.builtin_nodes.recipient_mapping import map_military_units
+
+    mapping = {
+        "перша частина": {"open_name": "перша частина", "cipher": "А0001", "abbreviation": "1Ч"},
+        "друга частина": {"open_name": "друга частина", "cipher": "А0002", "abbreviation": "2Ч"},
+        "третя частина": {"open_name": "третя частина", "cipher": "А0003", "abbreviation": "3Ч"},
+    }
+    result = map_military_units(
+        "§ 1\n1. До перша частина, друга частина, третя частина.", mapping=mapping
+    )
+
+    assert len(result["unit_paragraphs"]) == 3
+    assert all(len(data["items"]) == 1 for data in result["unit_paragraphs"].values())
+
+
+def test_routing_audit_lists_every_numbered_item_without_truncation():
+    from nodeautomationtoolkit.builtin_nodes.recipient_mapping import map_military_units
+
+    mapping = {
+        "перша частина": {"open_name": "перша частина", "cipher": "А0001"},
+    }
+    text = "§ 1\n" + "\n".join(
+        f"{number}. Направити до перша частина." for number in range(1, 12)
+    )
+
+    result = map_military_units(text=text, mapping=mapping)
+
+    assert len(result["routing_audit"]) == 11
+    assert result["unmatched_items"] == []
+    assert len(next(iter(result["unit_paragraphs"].values()))["items"]) == 11
+
+
+def test_unmatched_item_is_returned_for_excel_control():
+    from nodeautomationtoolkit.builtin_nodes.recipient_mapping import map_military_units
+
+    result = map_military_units("§ 1\n1. Пункт без адресата.", mapping={})
+
+    assert len(result["unmatched_items"]) == 1
+    assert result["routing_audit"][0]["final_recipients"] == "—"
+
+
+def test_internal_reference_keeps_explicitly_named_tck_as_recipient():
+    from nodeautomationtoolkit.builtin_nodes.recipient_mapping import map_military_units
+
+    mapping = {
+        "Закарпатський обласний ТЦК та СП": {
+            "open_name": "Закарпатський обласний ТЦК та СП",
+            "cipher": "Закарпатський ОТЦК",
+        },
+    }
+    text = (
+        "§ 1\n"
+        "1. Військовослужбовця Закарпатського обласного територіального центру "
+        "комплектування та соціальної підтримки призначити до цього самого центру."
+    )
+
+    result = map_military_units(text, mapping=mapping)
+
+    assert result["unmatched_items"] == []
+    assert len(result["unit_paragraphs"]) == 1
+    assert "підтверджено названим адресатом" in result["routing_audit"][0]["applied_rules"]
+
+
+def test_unrouted_management_change_is_excluded_not_reported_as_missing():
+    from nodeautomationtoolkit.builtin_nodes.recipient_mapping import map_military_units
+
+    result = map_military_units(
+        "§ 1\n1. Призначити на посаду до відділу управління.", mapping={}
+    )
+
+    assert result["unmatched_items"] == []
+    assert len(result["skipped_items"]) == 1
+    assert "виключено із загального переліку" in result["routing_audit"][0]["applied_rules"]
+
+
+def test_recruiting_center_matches_when_number_order_differs_from_excel():
+    from nodeautomationtoolkit.builtin_nodes.recipient_mapping import map_military_units
+
+    mapping = {
+        "Центр рекрутингу № 7": {
+            "open_name": "Центр рекрутингу № 7",
+            "cipher": "А0007",
+        },
+    }
+    result = map_military_units(
+        "§ 1\n8. Призначити до 7 центру рекрутингу.", mapping=mapping
+    )
+
+    assert result["unmatched_items"] == []
+    assert len(result["unit_paragraphs"]) == 1
+
+
+def test_tck_in_assignment_paragraph_is_not_dropped_as_biographical_text():
+    from nodeautomationtoolkit.builtin_nodes.recipient_mapping import map_military_units
+
+    mapping = {
+        "Рівненський обласний ТЦК та СП": {
+            "open_name": "Рівненський обласний ТЦК та СП",
+            "cipher": "Рівненський ОТЦК",
+        },
+    }
+    text = (
+        "§ 1\n"
+        "7. Старшого офіцера призначити на посаду.\n"
+        "З Рівненського РТЦК та СП — до Рівненського обласного ТЦК та СП."
+    )
+
+    result = map_military_units(text, mapping=mapping)
+
+    assert result["unmatched_items"] == []
+    assert len(result["unit_paragraphs"]) == 1
+
+
+def test_recruiting_center_is_not_searched_by_column_c_abbreviation():
+    from nodeautomationtoolkit.builtin_nodes.recipient_mapping import map_military_units
+
+    mapping = {
+        "Інший запис стовпця A": {
+            "open_name": "Інший запис стовпця A",
+            "abbreviation": "7 ЦР",
+            "cipher": "А0007",
+        },
+    }
+    result = map_military_units(
+        "§ 1\n2. Перевести з 7 центру рекрутингу.", mapping=mapping
+    )
+
+    assert len(result["unmatched_items"]) == 1
+    assert result["unit_paragraphs"] == {}
+
+
+def test_tck_is_not_searched_by_column_e_recipient():
+    from nodeautomationtoolkit.builtin_nodes.recipient_mapping import map_military_units
+
+    recipient = "Начальнику Рівненського обласного ТЦК та СП"
+    mapping = {
+        "Інший запис стовпця A": {
+            "open_name": "Інший запис стовпця A",
+            "cipher": "Рівненський ОТЦК",
+            "abbreviation": "",
+            "recipient_to": recipient,
+        },
+    }
+    result = map_military_units(
+        "§ 1\n7. Перевести з Рівненського районного територіального центру "
+        "комплектування та соціальної підтримки Рівненської області.",
+        mapping=mapping,
+    )
+
+    assert len(result["unmatched_items"]) == 1
+    assert result["unit_paragraphs"] == {}
+
+
+def test_recruiting_center_is_not_searched_by_column_e_recipient():
+    from nodeautomationtoolkit.builtin_nodes.recipient_mapping import map_military_units
+
+    recipient = "Начальнику 7 центру рекрутингу"
+    mapping = {
+        "Інший запис стовпця A": {
+            "open_name": "Інший запис стовпця A",
+            "cipher": "А0007",
+            "abbreviation": "",
+            "recipient_to": recipient,
+        },
+    }
+    result = map_military_units(
+        "§ 1\n8. Перевести з 7 центру рекрутингу.", mapping=mapping
+    )
+
+    assert len(result["unmatched_items"]) == 1
+    assert result["unit_paragraphs"] == {}
+
+
+def test_routing_keeps_column_a_names_before_biographical_suffix_in_same_paragraph():
+    from nodeautomationtoolkit.builtin_nodes.recipient_mapping import map_military_units
+
+    mapping = {
+        "7 центр рекрутингу": {
+            "open_name": "7 центр рекрутингу",
+            "cipher": "А0007",
+            "abbreviation": "7 ЦР",
+        },
+        "Центр підготовки підрозділів": {
+            "open_name": "Центр підготовки підрозділів",
+            "cipher": "А0008",
+            "abbreviation": "ЦПП",
+        },
+    }
+    text = (
+        "§ 1\n"
+        "8. Лейтенанта, начальника групи 7 центру рекрутингу – "
+        "НАЧАЛЬНИКОМ ГРУПИ ЦЕНТРУ ПІДГОТОВКИ ПІДРОЗДІЛІВ, "
+        "народився 10 січня 1990 року, освіта вища."
+    )
+
+    result = map_military_units(text, mapping=mapping)
+
+    assert result["unmatched_items"] == []
+    assert set(result["unit_paragraphs"]) == {"7 ЦР А0007", "ЦПП А0008"}
+
+
+def test_oblast_tck_routes_when_biography_follows_in_same_paragraph():
+    from nodeautomationtoolkit.builtin_nodes.recipient_mapping import map_military_units
+
+    mapping = {
+        "Івано-Франківський обласний територіальний центр комплектування та соціальної підтримки": {
+            "open_name": "Івано-Франківський обласний територіальний центр комплектування та соціальної підтримки",
+            "cipher": "Івано-Франківський ОТЦК та СП",
+        },
+    }
+    text = (
+        "§ 1\n"
+        "4. Капітана, старшого офіцера Івано-Франківського районного "
+        "територіального центру комплектування та соціальної підтримки "
+        "Івано-Франківської області – НАЧАЛЬНИКОМ ВІДДІЛЕННЯ, "
+        "р.н. 1990, підлягає направленню на військовий облік."
+    )
+
+    result = map_military_units(text, mapping=mapping)
+
+    assert result["unmatched_items"] == []
+    assert list(result["unit_paragraphs"]) == ["Івано-Франківський ОТЦК та СП"]
 
 
 def test_ukrainian_typography_non_breaking_spaces():
@@ -247,5 +472,3 @@ def test_ensure_blank_line_before_items():
         "Командир 10 армійського корпусу\n"
         "генерал-майор Іван ПЕТРЕНКО"
     )
-
-

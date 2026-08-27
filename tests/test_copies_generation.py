@@ -71,10 +71,10 @@ def test_copy_filename_and_title_support():
     from generate_extracts import build_copy_two_filename, sanitize_filename
     
     filename = build_copy_two_filename("355/1", "27.07.2026", "Наказ_355.docx")
-    assert filename == "прим_2_27.07.2026_355_1.docx"
+    assert filename == "2,3_№355-1 від 27.07.2026.docx"
 
     filename_empty = build_copy_two_filename("", "", "Наказ_355.docx")
-    assert filename_empty == "прим_2_Наказ_355.docx"
+    assert filename_empty == "2,3_Наказ_355.docx"
 
 
 def test_signer_boundary_detection():

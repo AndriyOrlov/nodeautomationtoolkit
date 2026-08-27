@@ -45,6 +45,7 @@ from nodeautomationtoolkit.builtin_nodes.message_order import (
     generate_decision_order,
     cipher_unit_names,
     find_content_start_line,
+    reflow_soft_breaks,
 )
 from nodeautomationtoolkit.builtin_nodes.copy_generator import (
     build_copy_document,
@@ -216,13 +217,44 @@ def back_page_tag_values(order_num: str, order_date: str) -> dict[str, str]:
     return values
 
 
+# Префікс назви примірника: «2,3» — номери примірників, які друкуються з
+# одного файлу. Старий префікс лишається відомим програмі, бо вже згенеровані
+# файли нікуди не діваються.
+COPY_FILENAME_PREFIX = "2,3"
+_LEGACY_COPY_PREFIX = "прим_"
+
+
 def build_copy_two_filename(order_num: str, order_date: str, source_filename: str) -> str:
-    """Формує безпечну назву примірника № 2 без вигаданих реквізитів."""
+    """Назва примірника — така, щоб її прочитав МОДУЛЬ ВИТЯГІВ.
+
+    За правилом 3.3 номер і дата наказу беруться з назви файлу, і шукаються
+    там саме у вигляді «№ …» та «від …» (`extract_metadata_from_filename`).
+    Стара назва `прим_2_17.08.2026_413.docx` не мала жодного з цих маркерів,
+    тому переданий у витяги примірник приходив БЕЗ номера й дати — поля
+    доводилось заповнювати руками. Тепер назва замикає це коло сама.
+
+    Реквізити не вигадуються: якщо їх не було в назві наказу, лишається його
+    власна назва з префіксом — те, що з неї читалось, читатиметься й далі.
+    """
     if order_num and order_date:
-        safe_number = sanitize_filename(order_num)
+        # Скісну риску («б/н», «123/45» — правило 10.5) Windows у назві файлу
+        # не дозволяє взагалі, тож зберегти її неможливо. Замінюємо на ДЕФІС,
+        # а не на підкреслення: підкреслення не входить у шаблон пошуку номера,
+        # і назва читалась назад обрізаною — «б/н» ставало «б», «123/45» → «123».
+        safe_number = sanitize_filename(order_num, replacement="-")
         safe_date = sanitize_filename(order_date)
-        return f"прим_2_{safe_date}_{safe_number}.docx"
-    return f"прим_2_{os.path.basename(source_filename)}"
+        return f"{COPY_FILENAME_PREFIX}_№{safe_number} від {safe_date}.docx"
+    return f"{COPY_FILENAME_PREFIX}_{os.path.basename(source_filename)}"
+
+
+def is_generated_copy_filename(filename: str) -> bool:
+    """Чи це вже згенерований примірник (брати його як наказ не можна).
+
+    Знає й старий префікс `прим_`: файли, зроблені до перейменування, лежать
+    у теках користувача й далі, і повторно обробляти їх так само не можна.
+    """
+    name = os.path.basename(filename or "").lower()
+    return name.startswith(COPY_FILENAME_PREFIX.lower() + "_") or _LEGACY_COPY_PREFIX in name
 
 
 def apply_ukrainian_typography(text: str) -> str:
@@ -304,7 +336,10 @@ def is_biographical_paragraph(p_text: str) -> bool:
         return False
     if re.fullmatch(r"\d{5,12}\.?", t):
         return True
-    if "р.н." in t or "року народження" in t:
+    # «р. н.» пишуть і злитно, і з пробілами — в офіційному зразку саме
+    # з пробілом. Через вузьку перевірку рядок р.н. не вважався
+    # біографічним, і обов'язковий порожній абзац з'їжджав на ІПН.
+    if re.search(r"\bр\s*\.\s*н\s*\.", t) or "року народження" in t:
         return True
     if "освіта:" in t or "освіта -" in t or "освіта –" in t or "закінчив у" in t:
         return True
@@ -574,6 +609,27 @@ _ORDER_SIGNER_RANK_RE = re.compile(
     r"сержант|старшина|солдат|матрос)\b",
     re.IGNORECASE | re.UNICODE,
 )
+# Пронумерований пункт наказу: «1.», «2.3.», «10)». Та сама форма, що вже
+# використовується в recipient_mapping.py.
+_ITEM_START_RE = re.compile(r"^\d{1,3}(?:\.\d{1,3})*[\.\)]\s+")
+
+
+def _last_item_line(lines: list[str]) -> int:
+    """Номер рядка ОСТАННЬОГО пронумерованого пункту наказу.
+
+    Підписант завжди йде після пунктів, тому цей рядок — природна нижня межа
+    пошуку підписанта. Вона не залежить від довжини службового хвоста, на
+    відміну від лічильника рядків, який доводилося збільшувати щоразу, коли
+    в наказі траплялася більша таблиця розсилки.
+
+    Подавати сюди треба ЛИШЕ тіло наказу, до маркера розсилки: рядки самої
+    таблиці розсилки теж бувають пронумеровані («1. в/ч А0000 — 1 прим.»), і
+    тоді межа заїхала б за підписанта, а його пошук не дав би нічого.
+    """
+    for index in range(len(lines) - 1, -1, -1):
+        if _ITEM_START_RE.match(lines[index]):
+            return index
+    return 0
 
 
 def plan_2up_page_layout(extract_pages: list[int]) -> list[dict]:
@@ -635,8 +691,14 @@ def find_distribution_cutoff_line(text: str) -> int:
     raw_lines = str(text or "").replace("\x07", "").splitlines()
     lines = [re.sub(r"\s+", " ", line).strip() for line in raw_lines]
 
-    scan_limit = max(0, len(lines) - 120)
-    for idx in range(len(lines) - 1, scan_limit - 1, -1):
+    # Документ сканується ПОВНІСТЮ: цикл іде з кінця й повертає ОСТАННІЙ
+    # маркер, тож обмежувати глибину не потрібно. Раніше тут стояло вікно на
+    # кілька сотень рядків, і воно ламалося щоразу, коли службовий хвіст
+    # виростав: відколи текст збирається з абзаців (`read_document_text`),
+    # кожна комірка таблиці розсилки стала окремим рядком. Маркер лишався поза
+    # вікном, підписант визначався неправильно, а останній пункт «затягував»
+    # службовий хвіст у витяг.
+    for idx in range(len(lines) - 1, -1, -1):
         line_lower = lines[idx].casefold().strip()
         if any(line_lower.startswith(marker) or marker == line_lower for marker in _DISTRIBUTION_CUTOFF_MARKERS):
             return idx
@@ -668,14 +730,37 @@ def _find_order_signer(text: str) -> dict[str, str] | None:
     lines = [re.sub(r"\s+", " ", line).strip() for line in raw_lines]
 
     reference_index = find_distribution_cutoff_line(text)
-    search_start = max(0, reference_index - 80)
+    # Пошук іде з кінця й зупиняється на останньому пронумерованому пункті:
+    # підписант стоїть після пунктів, а не всередині них. Це водночас знімає
+    # залежність від довжини службового хвоста і не дає прийняти за підписанта
+    # рядок тіла наказу, що починається з «Начальник…»/«Командир…».
+    #
+    # Межу пунктів рахуємо до ПЕРШОГО службового блоку, а не до останнього
+    # маркера: у зразку звороту останнього аркуша (додаток 43) службових
+    # блоків два — «Розрахунок розсилки витягів із наказу:» і «Розрахунок
+    # розсилки електронних повідомлень:», — а їхні рядки теж пронумеровані
+    # («1. Військова частина А0000 п. 1.»). Рахуючи їх пунктами наказу, межа
+    # заїжджала за підписанта, той не знаходився зовсім, і в витяг протікав
+    # увесь службовий хвіст.
+    body_limit = min(find_service_block_line(text, 0), max(0, reference_index))
+    search_start = _last_item_line(lines[:body_limit])
 
-    for start_index in range(reference_index - 1, search_start - 1, -1):
+    # Після останнього пункту може бути кілька підписоподібних службових
+    # блоків. Для межі тіла наказу потрібен ПЕРШИЙ справжній підписант.
+    # Зворотний пошук вибирав останній блок і затягував усе між ними в текст
+    # останнього пункту витягу.
+    for start_index in range(search_start + 1, reference_index):
         if not _ORDER_SIGNER_START_RE.match(lines[start_index]):
             continue
 
         position_lines = []
-        for line_index in range(start_index, min(reference_index, start_index + 8)):
+        # Межа блоку — початок службової частини, а не лічильник рядків.
+        # Вікно у 8 рядків рвалося, щойно між посадою та званням
+        # ставало більше восьми абзаців — а порожніми абзацами підписний
+        # блок у наказі часто розсувають до низу сторінки. Підписант
+        # тоді не знаходився ЗОВСІМ, тіло наказу не обрізалося, і блок
+        # протікав у {{зміст}}.
+        for line_index in range(start_index, reference_index):
             line = lines[line_index]
             if not line:
                 continue
@@ -719,14 +804,37 @@ def extract_order_signer(text: str) -> dict[str, str]:
     return {key: signer.get(key, "") for key in ("position", "rank", "name")}
 
 
+def _first_signer_like_line_after_last_item(text: str) -> int | None:
+    """Перша підписоподібна межа після останнього пункту.
+
+    Тимчасове жорстке правило: такий блок ніколи не є продовженням останнього
+    пункту, навіть якщо в ньому не вдалося розібрати звання та ПІБ.
+    """
+    raw_lines = str(text or "").replace("\x07", "").splitlines()
+    lines = [re.sub(r"\s+", " ", line).strip() for line in raw_lines]
+    body_limit = find_service_block_line(text, 0)
+    last_item = _last_item_line(lines[:body_limit])
+    for index in range(last_item + 1, body_limit):
+        if _ORDER_SIGNER_START_RE.match(lines[index]):
+            return index
+    return None
+
+
 def text_before_order_signer(text: str) -> tuple[str, dict[str, str]]:
     """Відсікає підписанта й увесь службовий текст, який іде після нього."""
     signer = _find_order_signer(text)
-    if not signer:
+    signer_like_start = _first_signer_like_line_after_last_item(text)
+    if signer_like_start is None and not signer:
         return text, {"position": "", "rank": "", "name": ""}
     raw_lines = str(text or "").splitlines()
-    start_line = signer["start_line"]
-    clean_signer = {key: signer.get(key, "") for key in ("position", "rank", "name")}
+    start_line = signer_like_start if signer_like_start is not None else signer["start_line"]
+    # Не підтягуємо реквізити з пізнішого підписоподібного блока. Вони
+    # прийнятні лише тоді, коли належать саме першій відсіченій межі.
+    clean_signer = (
+        {key: signer.get(key, "") for key in ("position", "rank", "name")}
+        if signer and signer.get("start_line") == start_line
+        else {"position": "", "rank": "", "name": ""}
+    )
     return "\n".join(raw_lines[:start_line]).rstrip(), clean_signer
 
 
@@ -833,6 +941,63 @@ def force_quit_word(word, timeout: float = 5.0) -> None:
         win32api.CloseHandle(handle)
     except Exception:
         pass
+
+
+def _carry_source_formatting(doc, start: int, end: int, source_paragraph) -> None:
+    """Переносить шрифт і геометрію абзацу наказу ЯВНО (правило 5.2.1).
+
+    `FormattedText` не переносить властивість, яка в наказі дорівнює типовій:
+    якщо в наказі шрифт заданий стилем `Normal` (Times New Roman 14), окремої
+    ознаки шрифту в абзаці немає, і в документі-результаті такий абзац
+    успадковує `Normal` ШАБЛОНА — звідти в повідомленні й брався чужий
+    шрифт замість Times New Roman. `Font` та `ParagraphFormat` діапазону
+    віддають ДІЮЧІ значення наказу, тому переносимо саме їх.
+
+    Мішаний абзац Word віддає порожньою назвою шрифту (`""`) і розміром
+    `9999999` — такі значення пропускаємо: у ньому шрифти вже задані явно
+    й перенеслися разом із `FormattedText`.
+    """
+    source_font = source_paragraph.Range.Font
+    source_format = source_paragraph.Range.ParagraphFormat
+
+    font_values = {}
+    try:
+        font_name = str(source_font.Name or "").strip()
+        if font_name:
+            font_values["Name"] = font_name
+    except Exception:
+        pass
+    try:
+        font_size = float(source_font.Size)
+        if 0 < font_size < 1000:  # 9999999 = мішаний розмір
+            font_values["Size"] = font_size
+    except Exception:
+        pass
+
+    geometry = {}
+    for prop in ("Alignment", "LeftIndent", "RightIndent", "FirstLineIndent"):
+        try:
+            geometry[prop] = getattr(source_format, prop)
+        except Exception:
+            pass
+
+    destination = doc.Range(start, end)
+    for prop, value in font_values.items():
+        try:
+            setattr(destination.Font, prop, value)
+        except Exception:
+            pass
+    for index in range(1, destination.Paragraphs.Count + 1):
+        dest_format = destination.Paragraphs(index).Range.ParagraphFormat
+        try:
+            dest_format.PageBreakBefore = False
+        except Exception:
+            pass
+        for prop, value in geometry.items():
+            try:
+                setattr(dest_format, prop, value)
+            except Exception:
+                pass
 
 
 class App:
@@ -2144,12 +2309,16 @@ class App:
         content_start = insert_point
         try:
             for p_index in range(first_para, last_para + 1):
-                source_range = source_doc.Paragraphs(p_index).Range.Duplicate
+                source_paragraph = source_doc.Paragraphs(p_index)
+                source_range = source_paragraph.Range.Duplicate
                 if "\x0c" in (source_range.Text or ""):
                     continue  # ручні розриви сторінок з наказу не переносимо
                 destination = doc.Range(insert_point, insert_point)
                 destination.FormattedText = source_range.FormattedText
-                insert_point = destination.End
+                paragraph_start, insert_point = destination.Start, destination.End
+                _carry_source_formatting(
+                    doc, paragraph_start, insert_point, source_paragraph
+                )
         except Exception as error:
             # Частина абзаців уже вставлена — повертатись до простого тексту
             # не можна, інакше зміст задвоївся б.
@@ -2273,6 +2442,12 @@ class App:
 
             ciphered, _, _ = cipher_unit_names(core, mapping)
             ciphered = apply_ukrainian_typography(clean_duplicated_units(ciphered))
+            # Мʼякий перенос посеред фрази зшивається САМЕ ТУТ — у повідомленні
+            # довга відкрита назва стає трьома словами, і рядок, розірваний у
+            # наказі, лишався б напівпорожнім. Переноси після закінчення
+            # (кома, крапка) — тобто біографічний блок — не чіпаються.
+            # Витягів і примірників це не стосується: там текст 1-в-1.
+            ciphered = reflow_soft_breaks(ciphered)
             if ciphered != core:
                 doc.Range(start, start + len(core)).Text = ciphered
 
@@ -2960,10 +3135,43 @@ class App:
             f"Не вдалося ({len(failures)}):\n{details}",
         )
 
+    def _log_routing_module(self):
+        """Пише в журнал, який саме модуль маршрутизації завантажено."""
+        mapping_module = sys.modules.get(map_military_units.__module__)
+        module_file = getattr(mapping_module, "__file__", "")
+        module_version = getattr(mapping_module, "ROUTING_VERSION", "без версії")
+        self.log(
+            "Модуль маршрутизації: "
+            + (os.path.abspath(str(module_file)) if module_file else "невідомо")
+            + f" · версія {module_version}"
+        )
+
+    def _log_mapping_source(self, excel_res: dict):
+        """Пише в журнал реквізити прочитаного Excel-еталона.
+
+        Правило: вибраний Excel — єдиний еталон маршрутизації, і кожен запуск
+        читає його з диска без кешу. Журнал має це підтверджувати, щоб було
+        видно, що розрахунок зроблено саме за поточним файлом.
+        """
+        modified_ns = excel_res.get("source_modified_ns")
+        if modified_ns:
+            source_modified = datetime.fromtimestamp(
+                modified_ns / 1_000_000_000
+            ).strftime("%d.%m.%Y %H:%M:%S")
+        else:
+            source_modified = "невідомо"
+        self.log(
+            f"Еталон Excel: {excel_res.get('source_path', self.excel_path.get())} · "
+            f"змінено {source_modified} · {excel_res.get('source_size', 0)} байт. "
+            "Файл перечитано з диска без кешу."
+        )
+
     def run_rozrahunok(self):
         self.log("\n=== РОЗРАХУНОК РОЗСИЛКИ ===")
+        self._log_routing_module()
         self.log(f"Читаємо словник: {self.excel_path.get()}")
         excel_res = read_recipient_mapping(path=self.excel_path.get())
+        self._log_mapping_source(excel_res)
         mapping_base = excel_res.get("mapping", {})
         unique_entries = {id(value): value for value in mapping_base.values() if isinstance(value, dict)}
         abbreviation_count = sum(bool(str(value.get("abbreviation", "")).strip()) for value in unique_entries.values())
@@ -3053,7 +3261,9 @@ class App:
 
     def run_extracts(self):
         self.log("\n=== ГЕНЕРАЦІЯ ВИТЯГІВ ===")
+        self._log_routing_module()
         excel_res = read_recipient_mapping(path=self.excel_path.get())
+        self._log_mapping_source(excel_res)
         mapping = excel_res.get("mapping", {})
         unique_entries = {id(value): value for value in mapping.values() if isinstance(value, dict)}
         abbreviation_count = sum(bool(str(value.get("abbreviation", "")).strip()) for value in unique_entries.values())
@@ -3063,17 +3273,13 @@ class App:
         )
 
         source_text = self._read_word_text(self.doc_path.get())
-        text, order_signer = self._refresh_order_signer(source_text)
-        # Якщо користувач вручну відредагував поля підписанта в GUI — використати їх
-        gui_pos = self.order_signer_position.get().strip()
-        gui_rank = self.order_signer_rank.get().strip()
-        gui_name = self.order_signer_name.get().strip()
-        if gui_pos or gui_rank or gui_name:
-            order_signer = {
-                "position": gui_pos.replace(" / ", "\n") if gui_pos else order_signer.get("position", ""),
-                "rank": gui_rank if gui_rank else order_signer.get("rank", ""),
-                "name": gui_name if gui_name else order_signer.get("name", ""),
-            }
+        text, _detected_order_signer = self._refresh_order_signer(source_text)
+        # Тимчасове правило користувача: у витягах блок підписанта оригіналу
+        # наказу повністю вимкнений. Тіло однаково обрізається перед ним, але
+        # реквізити не переносяться до шаблону. «Згідно з оригіналом» та
+        # засвідчувач нижче лишаються.
+        order_signer = {"position": "", "rank": "", "name": ""}
+        self.log("Блок підписанта оригіналу у витягах тимчасово вимкнено.")
         filename = os.path.basename(self.doc_path.get())
         order_num, order_date = extract_metadata_from_filename(filename)
         if not order_num:
@@ -3092,6 +3298,11 @@ class App:
         self.log("Аналізуємо структуру наказу (блоки, адресати)...")
         map_res = map_military_units(text=text, mapping=mapping)
         self.show_analysis_results(map_res)
+        preamble_recipient = str(map_res.get("preamble_recipient") or "").strip()
+        if preamble_recipient:
+            self.log(f"Адресат у преамбулі знайдено за колонкою A: {preamble_recipient}")
+        else:
+            self.log("Адресата у преамбулі за колонкою A не знайдено.")
 
         for invalid_link in map_res.get("invalid_corps_links", []):
             self.log(
@@ -3101,7 +3312,10 @@ class App:
         for tck_reference in map_res.get("unresolved_tck_references", []):
             self.log(f"УВАГА: ТЦК не визначено або його ОТЦК відсутній у таблиці; витяг не буде створено: {tck_reference}")
 
-        routing_report = os.path.join(self.out_folder.get(), "Контроль_маршрутизації.xlsx")
+        order_base = sanitize_filename(os.path.splitext(os.path.basename(self.doc_path.get()))[0])
+        routing_report = os.path.join(
+            self.out_folder.get(), f"Контроль_маршрутизації_{order_base}.xlsx"
+        )
         routing_data = [
             (
                 item.get("label", ""),
@@ -3117,6 +3331,39 @@ class App:
             routing_report,
             ["Пункт", "Збіги з таблиці", "Застосовані правила", "Адресати з пункту", "Адресати з контексту", "Підсумкові адресати"],
             routing_data,
+        )
+
+        unmatched_items = map_res.get("unmatched_items", [])
+        missing_report = os.path.join(
+            self.out_folder.get(), f"Контроль_пропущених_пунктів_{order_base}.xlsx"
+        )
+        _save_table_to_excel(
+            missing_report,
+            ["Пункт", "Текст пункту", "Причина"],
+            [
+                (item.get("label", ""), item.get("text", ""), item.get("reason", ""))
+                for item in unmatched_items
+            ],
+        )
+        if unmatched_items:
+            self.log(
+                f"УВАГА: {len(unmatched_items)} пункт(ів) без адресата. "
+                f"Контрольний файл: {missing_report}"
+            )
+
+        # Рахуємо записи аудиту, а не унікальні мітки: однакова мітка («1.»)
+        # трапляється в різних § і тоді множина злила б їх в один пункт.
+        audited_items = map_res.get("routing_audit", [])
+        routed_count = sum(
+            1
+            for item in audited_items
+            if str(item.get("final_recipients", "")).strip() not in ("", "—")
+        )
+        skipped_items = map_res.get("skipped_items", [])
+        self.log(
+            f"Розібрано пунктів: {len(audited_items)}; "
+            f"з адресатами: {routed_count}; без адресата: {len(unmatched_items)}; "
+            f"виключено із загального переліку (зміна до управління): {len(skipped_items)}."
         )
 
         units_data = map_res.get("unit_paragraphs", {})
@@ -3500,7 +3747,8 @@ class App:
                 )
                 doc = word.Documents.Open(os.path.abspath(temp_path), ReadOnly=False)
 
-                def replace_tag(tag, replacement_text, document=doc, collect_paragraphs=False, highlight_red=False):
+                def replace_tag(tag, replacement_text, document=doc, collect_paragraphs=False,
+                               highlight_red=False, bold_pattern=None):
                     replaced_paragraphs = []
                     find_obj = document.Content.Find
                     find_obj.Text = tag
@@ -3515,6 +3763,17 @@ class App:
                                 repl_range.Font.Bold = 1
                             except Exception:
                                 pass
+                        if bold_pattern:
+                            # Жирним виділяється лише ЧАСТИНА підставленого
+                            # тексту: цифри дня в даті та номер наказу без «№».
+                            match = re.search(bold_pattern, str(replacement_text))
+                            if match:
+                                try:
+                                    document.Range(
+                                        found_start + match.start(), found_start + match.end()
+                                    ).Font.Bold = 1
+                                except Exception:
+                                    pass
                         if collect_paragraphs:
                             replaced_paragraphs.append(
                                 document.Range(found_start, found_start).Paragraphs(1).Range.Duplicate
@@ -3522,6 +3781,32 @@ class App:
                         find_obj = document.Content.Find
                         find_obj.Text = tag
                     return replaced_paragraphs
+
+                def remove_original_signer_template_block():
+                    """Видаляє з шаблону весь блок тегів підписанта оригіналу.
+
+                    Якщо тег стоїть у таблиці, видаляється відповідний рядок,
+                    щоб після вимкненого блока не лишалися порожні комірки.
+                    """
+                    signer_tags = (
+                        "{{підписант}}",
+                        "{{підписант_посада}}",
+                        "{{підписант_звання}}",
+                        "{{підписант_піб}}",
+                    )
+                    paragraph_index = doc.Paragraphs.Count
+                    while paragraph_index >= 1:
+                        paragraph = doc.Paragraphs(paragraph_index).Range
+                        paragraph_text = str(paragraph.Text or "")
+                        if any(tag.casefold() in paragraph_text.casefold() for tag in signer_tags):
+                            try:
+                                if paragraph.Information(12):  # wdWithInTable
+                                    paragraph.Cells(1).Row.Delete()
+                                else:
+                                    paragraph.Delete()
+                            except Exception:
+                                paragraph.Text = ""
+                        paragraph_index = min(paragraph_index - 1, doc.Paragraphs.Count)
 
                 rec_to_val = data.get("recipient_to") or cipher
                 dest_where_val = (data.get("destination_where") or "").strip()
@@ -3534,17 +3819,16 @@ class App:
                 for tag_var in ("{{куди}}", "{{Куди}}", "{{КУДИ}}"):
                     replace_tag(tag_var, dest_where_val, highlight_red=is_dest_manual)
                 if order_date_formatted:
-                    replace_tag("{{дата_наказу}}", order_date_formatted)
+                    # Жирним — лише цифри дня: “29” серпня 2026 року.
+                    replace_tag("{{дата_наказу}}", order_date_formatted,
+                                bold_pattern=r"\d+")
                 if order_num:
-                    replace_tag("{{номер_наказу}}", f"№{order_num}")
+                    # Жирним — лише номер, знак «№» лишається звичайним.
+                    replace_tag("{{номер_наказу}}", f"№{order_num}",
+                                bold_pattern=r"(?<=№).+")
 
-                # Підписант оригіналу наказу (Командувач/Командир)
-                if order_signer["position"]:
-                    replace_tag("{{підписант_посада}}", _slash_to_lines(order_signer["position"]))
-                if order_signer["rank"]:
-                    replace_tag("{{підписант_звання}}", order_signer["rank"])
-                if order_signer["name"]:
-                    replace_tag("{{підписант_піб}}", order_signer["name"])
+                # Підписант оригіналу наказу тимчасово не переноситься.
+                remove_original_signer_template_block()
 
                 # Особа, яка засвідчує витяг («Згідно з оригіналом» / Засвідчувач)
                 replace_tag("{{згідно_з_оригіналом}}", "Згідно з оригіналом")
@@ -3606,13 +3890,6 @@ class App:
                         doc.Range(insert_point, insert_point).InsertBefore("\r")
                         insert_point += 1
 
-                    def is_birth_date_paragraph(paragraph):
-                        paragraph_text = paragraph.Range.Text.casefold()
-                        return (
-                            bool(re.search(r"\bр\s*\.\s*н\s*\.", paragraph_text))
-                            or "року народження" in paragraph_text
-                        )
-
                     def insert_source_span(start_line, end_line, fallback_text, kind):
                         nonlocal insert_point
                         paragraph_indexes = line_span_to_paragraphs(start_line, end_line)
@@ -3635,8 +3912,32 @@ class App:
                             destination_range = doc.Range(start, start)
                             destination_range.FormattedText = source_range.FormattedText
                             insert_point = destination_range.End
+
+                            # Геометрію переносимо ЯВНО, а не покладаємось на
+                            # FormattedText. Word не записує властивість, яка
+                            # дорівнює типовій (Alignment=Left, FirstLineIndent=0),
+                            # тому такий абзац у витягу успадковував стиль
+                            # `Normal` ШАБЛОНА. Якщо в шаблоні стоїть «за
+                            # шириною» та відступ 1.25 см — біографічний блок
+                            # наказу (left 8 см, перший рядок 0, уліво) з'їжджав
+                            # і розтягувався по ширині, і так само «плив» § .
+                            # ParagraphFormat діапазону віддає ДІЮЧІ значення,
+                            # тож так витяг повторює наказ незалежно від шаблону.
+                            source_format = source_paragraph.Range.ParagraphFormat
+                            geometry = {}
+                            for prop in ("Alignment", "LeftIndent", "RightIndent", "FirstLineIndent"):
+                                try:
+                                    geometry[prop] = getattr(source_format, prop)
+                                except Exception:
+                                    pass
                             for dest_pi in range(1, doc.Range(start, insert_point).Paragraphs.Count + 1):
-                                doc.Range(start, insert_point).Paragraphs(dest_pi).Range.ParagraphFormat.PageBreakBefore = False
+                                dest_format = doc.Range(start, insert_point).Paragraphs(dest_pi).Range.ParagraphFormat
+                                dest_format.PageBreakBefore = False
+                                for prop, value in geometry.items():
+                                    try:
+                                        setattr(dest_format, prop, value)
+                                    except Exception:
+                                        pass
                             first_start = start if first_start is None else first_start
                             last_end = insert_point
 
@@ -3704,6 +4005,14 @@ class App:
                             # Між кожним пунктом лишаємо один порожній абзац.
                             # Наприкінці змісту normalize_signature_gap доведе
                             # відступ перед підписантом до двох таких абзаців.
+                            #
+                            # Це ЄДИНИЙ порожній абзац, який додає генератор.
+                            # Усе, що всередині пункту (зокрема порожній абзац
+                            # перед рядком «р. н.»), переноситься 1-в-1 з наказу
+                            # — у реальних наказах він там завжди є. Своїх
+                            # порожніх абзаців усередину пункту не досипаємо:
+                            # офіційний зразок (додаток 44) сам непослідовний,
+                            # тож оригінал наказу — єдиний надійний еталон.
                             insert_empty_paragraph()
 
                     signer_start = None
@@ -3806,6 +4115,46 @@ class App:
                         doc.Repaginate()
                         pages_count = doc.ComputeStatistics(2)
 
+                # 1б. БОНУС для БАГАТОСТОРІНКОВИХ витягів: не змінюючи кількості
+                # сторінок, добираємо інтервал так, щоб на ПЕРШУ сторінку сіло
+                # якнайбільше пунктів. Без цього інтервал лишався 16 пт —
+                # найбільший, — і на першій сторінці часто стояв один пункт,
+                # тоді як 2, 3, 4, 5 разом вміщувалися на другій. Кількість
+                # сторінок не погіршуємо ніколи: це саме бонус, а не стиснення.
+                if pages_count > 1 and inserted_item_ranges:
+
+                    def items_on_first_page():
+                        count = 0
+                        for candidate in inserted_item_ranges:
+                            start_page, end_page = range_pages(candidate)
+                            if start_page == 1 and end_page == 1:
+                                count += 1
+                        return count
+
+                    best_pages = pages_count
+                    best_on_first = items_on_first_page()
+                    best_multi_spacing = 16.0
+                    spacing = 16.0 - 0.5
+                    while spacing >= 14.0 - 1e-6:
+                        apply_exact_line_spacing(spacing)
+                        doc.Repaginate()
+                        pages_now = doc.ComputeStatistics(2)
+                        if pages_now <= best_pages:
+                            on_first = items_on_first_page()
+                            if pages_now < best_pages or on_first > best_on_first:
+                                best_pages = pages_now
+                                best_on_first = on_first
+                                best_multi_spacing = spacing
+                        spacing -= 0.5
+                    apply_exact_line_spacing(best_multi_spacing)
+                    doc.Repaginate()
+                    pages_count = doc.ComputeStatistics(2)
+                    if best_multi_spacing != 16.0:
+                        self.log(
+                            f"  ℹ️ {cipher}: інтервал {best_multi_spacing} пт — на першій "
+                            f"сторінці пунктів: {best_on_first} (сторінок: {pages_count})."
+                        )
+
                 # 2. Правило «Максимально заповнена сторінка»: якщо витяг вміщується
                 # на 1 сторінці, шукаємо в тому самому діапазоні 14 → 16 пт
                 # НАЙБІЛЬШЕ значення точного інтервалу, що все ще утримує весь
@@ -3880,25 +4229,67 @@ class App:
                     target_doc.Close(False)
             else:
                 target_doc = word.Documents.Open(os.path.abspath(first_path))
-                current_doc_pages = first_pages
 
-                if enable_2up and first_pages > 1 and (first_pages % 2 != 0):
-                    rng = target_doc.Content
-                    rng.Collapse(0)
-                    rng.InsertBreak(2)  # wdSectionBreakNextPage
-                    current_doc_pages += 1
-                    self.log(f"Додано порожню сторінку після витягу {first_cipher} ({first_pages} стор.) для вирівнювання аркуша.")
+                def sheet_pages() -> int:
+                    """ФАКТИЧНА кількість сторінок зібраного документа."""
+                    target_doc.Repaginate()
+                    return target_doc.ComputeStatistics(2)  # wdStatisticPages
+
+                def add_blank_page() -> None:
+                    rng_blank = target_doc.Content
+                    rng_blank.Collapse(0)
+                    rng_blank.InsertBreak(2)  # wdSectionBreakNextPage
+
+                def strip_trailing_blank_paragraphs() -> None:
+                    """Прибирає «висячі» порожні абзаци в кінці документа.
+
+                    Без цього вимірювання рахувало ФАНТОМНУ останню сторінку,
+                    якої в друці немає: парність виходила невірна, і наступний
+                    витяг сідав на праву половину того самого аркуша, де
+                    закінчувався попередній. Викликати ЛИШЕ після вставки
+                    витягу — навмисні порожні сторінки чіпати не можна.
+                    """
+                    try:
+                        index = target_doc.Paragraphs.Count
+                        while index > 1:
+                            paragraph = target_doc.Paragraphs(index).Range
+                            if (paragraph.Text or "").strip(chr(13) + chr(7) + chr(11) + chr(12) + chr(32) + chr(9)):
+                                break
+                            paragraph.Delete()
+                            index = min(index - 1, target_doc.Paragraphs.Count)
+                    except Exception:
+                        pass
+
+                # Сторінки ЗАВЖДИ міряємо, а не рахуємо додаванням: розрив
+                # розділу не гарантовано додає рівно одну сторінку, тож
+                # лічильник «повзе». Через це багатосторінковий витяг міг
+                # опинитися на ПРАВІЙ половині аркуша, а кінець попереднього
+                # витягу — ділити аркуш із початком наступного.
+                strip_trailing_blank_paragraphs()
+                current_doc_pages = sheet_pages()
+
+                if enable_2up and current_doc_pages > 1 and (current_doc_pages % 2 != 0):
+                    add_blank_page()
+                    current_doc_pages = sheet_pages()
+                    self.log(
+                        f"Додано порожню сторінку після витягу {first_cipher} "
+                        f"({current_doc_pages - 1} стор.) для вирівнювання аркуша."
+                    )
 
                 for i in range(1, len(temp_files)):
                     t_path, t_pages, t_cipher = temp_files[i]
 
-                    # Якщо увімкнено друк 2 на 1: багатосторінковий витяг (>1 стор.) обов'язково починається з нового фізичного аркуша (з непарної сторінки)
+                    # Багатосторінковий витяг починається з ЛІВОЇ половини
+                    # аркуша, тобто з НЕПАРНОЇ логічної сторінки.
                     if enable_2up and t_pages > 1 and (current_doc_pages % 2 != 0):
-                        rng = target_doc.Content
-                        rng.Collapse(0)
-                        rng.InsertBreak(2)  # wdSectionBreakNextPage
-                        current_doc_pages += 1
-                        self.log(f"Додано порожню сторінку перед багатосторінковим витягом {t_cipher} ({t_pages} стор.), щоб він почався з нового аркуша.")
+                        add_blank_page()
+                        current_doc_pages = sheet_pages()
+                        self.log(
+                            f"Додано порожню сторінку перед багатосторінковим витягом "
+                            f"{t_cipher} ({t_pages} стор.), щоб він почався з нового аркуша."
+                        )
+
+                    pages_before = current_doc_pages
 
                     rng = target_doc.Content
                     rng.Collapse(0)
@@ -3907,17 +4298,30 @@ class App:
                     rng = target_doc.Content
                     rng.Collapse(0)
                     rng.InsertFile(os.path.abspath(t_path))
-                    # Оновлюємо лічильник реальною кількістю сторінок, а не ручною арифметикою
-                    target_doc.Repaginate()
-                    current_doc_pages = target_doc.ComputeStatistics(2)  # wdStatisticPages
+                    strip_trailing_blank_paragraphs()
+                    current_doc_pages = sheet_pages()
 
-                    # Якщо цей багатосторінковий витяг непарний (наприклад, 3 сторінки), додаємо пусту сторінку після нього:
-                    if enable_2up and t_pages > 1 and (t_pages % 2 != 0):
-                        rng = target_doc.Content
-                        rng.Collapse(0)
-                        rng.InsertBreak(2)  # wdSectionBreakNextPage
-                        current_doc_pages += 1
-                        self.log(f"Додано порожню сторінку після багатосторінкового витягу {t_cipher} ({t_pages} стор.) для вирівнювання наступного аркуша.")
+                    # Скільки сторінок витяг займає САМЕ В ЗІБРАНОМУ документі.
+                    # Окремим файлом він міг мати іншу кількість, і саме довіра
+                    # до тієї, старої, ламала вирівнювання.
+                    actual_pages = max(1, current_doc_pages - pages_before)
+                    if actual_pages != t_pages:
+                        self.log(
+                            f"УВАГА: витяг {t_cipher} у зібраному документі займає "
+                            f"{actual_pages} стор. замість {t_pages}; вирівнювання "
+                            "рахується за фактичною кількістю."
+                        )
+
+                    # Після багатосторінкового витягу наступний має починатися з
+                    # НОВОГО аркуша: якщо документ закінчився на лівій половині
+                    # (непарна сторінка) — доповнюємо порожньою.
+                    if enable_2up and actual_pages > 1 and (current_doc_pages % 2 != 0):
+                        add_blank_page()
+                        current_doc_pages = sheet_pages()
+                        self.log(
+                            f"Додано порожню сторінку після багатосторінкового витягу "
+                            f"{t_cipher} ({actual_pages} стор.) для вирівнювання наступного аркуша."
+                        )
 
                 last_para = target_doc.Paragraphs(target_doc.Paragraphs.Count)
                 if last_para.Range.Text.strip() == "":
@@ -3953,6 +4357,22 @@ class App:
                     f"   • Односторонній друк (1 на 1): {sheets_1side} арк. А4\n"
                     f"   • Двосторонній друк (Duplex): {sheets_2side} арк. А4"
                 )
+
+            # Кількість пропущених пунктів показується ЗАВЖДИ, зокрема «0».
+            # Інакше пункт, який не отримав адресата, лишався помітним лише
+            # в журналі, і його легко було не побачити серед статистики друку.
+            missed_count = len(unmatched_items)
+            excluded_count = len(map_res.get("skipped_items", []))
+            missed_lines = [
+                f"{'⚠️' if missed_count else '✅'} Пунктів без адресата (пропущено): {missed_count}"
+            ]
+            if missed_count:
+                missed_lines.append(f"   Перелік: {os.path.basename(missing_report)}")
+            if excluded_count:
+                missed_lines.append(
+                    f"ℹ️ Виключено із загального переліку (управління): {excluded_count}"
+                )
+            stats_msg = chr(10).join([stats_msg] + missed_lines)
 
             self.log(f"Збережено файл: {out_file}")
             self.log(f"\n📊 СТАТИСТИКА ТА РОЗРАХУНОК ДРУКУ:\n{stats_msg}\n")
@@ -4011,7 +4431,7 @@ class App:
                 if (
                     fname.lower().endswith(".docx")
                     and not fname.startswith("~$")
-                    and "прим_" not in fname.lower()
+                    and not is_generated_copy_filename(fname)
                     and os.path.normcase(os.path.abspath(candidate)) != os.path.normcase(os.path.abspath(back_page))
                 ):
                     order_files.append(candidate)
