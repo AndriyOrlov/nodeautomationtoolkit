@@ -26,6 +26,8 @@ _WD_STATISTIC_LINES = 1
 _WD_STATISTIC_PAGES = 2
 _WD_UNDERLINE_SINGLE = 1
 _WD_COLOR_BLACK = 0
+_WD_COLOR_WHITE = 16777215  # wdColorWhite
+_WD_COLOR_UNDEFINED = 9999999  # Word так позначає мішаний за кольором діапазон
 _WD_ALIGN_PARAGRAPH_CENTER = 1
 _WD_LINE_SPACE_SINGLE = 0
 _WD_COLLAPSE_START = 1
@@ -34,6 +36,15 @@ _WD_FIELD_PAGE = 33
 _WD_HEADER_FOOTER_PRIMARY = 1
 _WD_HEADER_FOOTER_FIRST_PAGE = 2
 _WD_PAGE_BREAK_CHARACTER = ""
+
+# Жирним у примірнику — лише ЦИФРИ (правило 3.2.1): день у даті та номер
+# наказу без знака «№». Лапки, назва місяця, рік і сам «№» лишаються
+# звичайними, тому жирність накладається на частину вже підставленого тексту,
+# а не на весь тег.
+BOLD_TAG_PATTERNS = {
+    "{{дата_наказу}}": r"\d+",
+    "{{номер_наказу}}": r"(?<=№).+",
+}
 
 # Гриф обмеження доступу у колонтитулах примірника.
 SERVICE_MARK_TEXT = "ДЛЯ СЛУЖБОВОГО КОРИСТУВАННЯ"
@@ -574,7 +585,9 @@ def format_signature_line(doc, paragraph_range, underline: bool) -> None:
         paragraph_range.Font.Underline = _WD_UNDERLINE_SINGLE
 
 
-def apply_keep_together_rules(doc, content_start: int, content_end: int) -> None:
+def apply_keep_together_rules(
+    doc, content_start: int, content_end: int, signer_inside: bool = True
+) -> None:
     """Нерозривність блоків — так само, як у витягах.
 
     Пункт разом зі своїм біографічним блоком не розривається між сторінками,
@@ -584,6 +597,12 @@ def apply_keep_together_rules(doc, content_start: int, content_end: int) -> None
     пункту: інакше ланцюг «останній пункт + біографія + підписант» стає надто
     довгим, не вміщується і Word переносить його цілком, лишаючи порожнє місце
     та відриваючи підписанта на окрему сторінку.
+
+    `signer_inside=False` — підписант підставлений ОКРЕМИМ тегом
+    `{{підписант}}`, тобто в цьому діапазоні його немає взагалі. Тоді останній
+    непорожній абзац — це останній ПУНКТ наказу, і вважати його підписантом не
+    можна: інакше з нього знімалося зчеплення з власною шапкою, і шапка
+    лишалася сама внизу сторінки.
     """
     content_range = doc.Range(content_start, content_end)
     spans = [
@@ -605,9 +624,12 @@ def apply_keep_together_rules(doc, content_start: int, content_end: int) -> None
 
     kinds = [kind_of(doc.Range(start, end).Text) for start, end in spans]
 
-    # Останній непорожній абзац — підписант наказу.
-    signer_index = next(
-        (i for i in range(len(kinds) - 1, -1, -1) if kinds[i] != "blank"), None
+    # Останній непорожній абзац — підписант наказу, але лише якщо він узагалі
+    # є в цьому діапазоні (див. `signer_inside`).
+    signer_index = (
+        next((i for i in range(len(kinds) - 1, -1, -1) if kinds[i] != "blank"), None)
+        if signer_inside
+        else None
     )
 
     for index, (start, end) in enumerate(spans):
@@ -697,6 +719,23 @@ def remove_trailing_empty_page(doc) -> bool:
     return removed
 
 
+def _previous_paragraph(paragraph):
+    """Попередній абзац або `None`. `Previous()` на першому кидає помилку."""
+    try:
+        return paragraph.Previous()
+    except Exception:
+        return None
+
+
+def _paragraph_index(doc, paragraph) -> int:
+    """Номер абзацу за його позицією — стійко до таблиць у документі."""
+    start = paragraph.Range.Start
+    for index in range(1, doc.Paragraphs.Count + 1):
+        if doc.Paragraphs(index).Range.Start >= start:
+            return index
+    return doc.Paragraphs.Count
+
+
 def format_certifier_block(doc) -> bool:
     """Форматує блок засвідчувача, що починається з «Згідно з оригіналом».
 
@@ -709,16 +748,29 @@ def format_certifier_block(doc) -> bool:
     if not finder.Execute():
         return False
 
-    start_index = doc.Range(0, finder.Parent.Start).Paragraphs.Count
+    # Абзац засвідчувача беремо З ЗНАЙДЕНОГО ДІАПАЗОНУ, а не рахунком
+    # `Range(0, …).Paragraphs.Count`: щойно в документі з'являється таблиця
+    # (табличний підписант), той рахунок зсувається на абзац, і «попереднім»
+    # виявлявся кінець рядка таблиці — порожній абзац лишався на місці.
+    certifier = finder.Parent.Paragraphs(1)
 
     # Між підписантом і блоком засвідчувача порожніх абзаців бути не повинно.
-    while start_index > 1:
-        previous = doc.Paragraphs(start_index - 1).Range
-        if (previous.Text or "").strip("\r\x07 \t"):
+    previous = _previous_paragraph(certifier)
+    while previous is not None:
+        text = previous.Range.Text or ""
+        if text.strip("\r\x07 \t"):
             break
-        previous.Delete()
-        start_index -= 1
+        # ПОРОЖНЮ КОМІРКУ ТАБЛИЦІ ВИДАЛЯТИ НЕ МОЖНА. У табличному варіанті
+        # заготовки підписант стоїть саме таблицею (звання й прізвище вирівняні
+        # до різних країв). `Delete` на її службовому абзаці ламає рядок
+        # таблиці, а не прибирає відступ.
+        if chr(7) in text:
+            break
+        earlier = _previous_paragraph(previous)
+        previous.Range.Delete()
+        previous = earlier
 
+    start_index = _paragraph_index(doc, certifier)
     total = doc.Paragraphs.Count
     last_index = start_index
     for index in range(start_index, total + 1):
@@ -731,24 +783,108 @@ def format_certifier_block(doc) -> bool:
     # Підписант і «Згідно з оригіналом» — один неподільний блок: інакше
     # засвідчувач відривається на наступну сторінку (правило 5.4 AGENT.md).
     chain_start = start_index
-    while chain_start > 1 and (doc.Paragraphs(chain_start - 1).Range.Text or "").strip("\r\x07 \t"):
+    while chain_start > 1:
+        text = doc.Paragraphs(chain_start - 1).Range.Text or ""
+        if chr(7) in text:
+            # ТАБЛИЧНИЙ ПІДПИСАНТ. Службовий абзац таблиці порожній, і обхід
+            # спинявся саме на ньому — ланцюг рвався, а засвідчувач їхав на
+            # наступну сторінку. Таблицю треба ПЕРЕСТУПИТИ, а не спинятись.
+            chain_start -= 1
+            continue
+        if not text.strip("\r\x07 \t"):
+            break
         chain_start -= 1
+
     for index in range(chain_start, last_index + 1):
         paragraph_format = doc.Paragraphs(index).Range.ParagraphFormat
         paragraph_format.KeepTogether = True
         paragraph_format.KeepWithNext = index < last_index
+
+    # Самого `KeepWithNext` для таблиці замало: рядок таблиці Word розриває
+    # між сторінками за власним прапорцем.
+    chain_range = doc.Range(
+        doc.Paragraphs(chain_start).Range.Start, doc.Paragraphs(last_index).Range.End
+    )
+    try:
+        for table_index in range(1, chain_range.Tables.Count + 1):
+            table = chain_range.Tables(table_index)
+            table.Rows.AllowBreakAcrossPages = False
+    except Exception:
+        # Таблиці в ланцюгу може не бути зовсім — це звичайний випадок.
+        pass
     return True
 
 
-def replace_tags(doc, values: dict[str, str]) -> None:
-    """Підставляє значення тегів заготовки."""
+def blacken_invisible_text(doc, start: int, end: int) -> int:
+    """Робить БІЛИЙ (та «автоматичний» на білому) текст чорним.
+
+    У наказах трапляється текст, залитий білим — на екрані його не видно, але
+    в примірнику він має бути звичайним. Правимо лише діапазон ПЕРЕНЕСЕНОГО
+    змісту: власні рядки заготовки не чіпаємо (правило 9.4).
+
+    Перевіряється кожен абзац окремо, бо Word для мішаного за кольором
+    діапазону віддає `wdUndefined` (9999999), і одним присвоєнням на весь
+    діапазон можна затерти навмисне забарвлення (наприклад, червоний маркер).
+
+    Повертає кількість перефарбованих абзаців.
+    """
+    changed = 0
+    content = doc.Range(start, end)
+    for index in range(1, content.Paragraphs.Count + 1):
+        paragraph_range = content.Paragraphs(index).Range
+        if not (paragraph_range.Text or "").strip("\r\x07 \t"):
+            continue
+        try:
+            color = paragraph_range.Font.Color
+        except Exception:
+            continue
+        if color == _WD_COLOR_WHITE:
+            paragraph_range.Font.Color = _WD_COLOR_BLACK
+            changed += 1
+            continue
+        if color == _WD_COLOR_UNDEFINED:
+            # Мішаний абзац — розбираємо по словах, щоб не зачепити решту.
+            for word_index in range(1, paragraph_range.Words.Count + 1):
+                word_range = paragraph_range.Words(word_index)
+                try:
+                    if word_range.Font.Color == _WD_COLOR_WHITE:
+                        word_range.Font.Color = _WD_COLOR_BLACK
+                        changed += 1
+                except Exception:
+                    continue
+    return changed
+
+
+def replace_tags(doc, values: dict[str, str], bold_patterns: dict | None = None) -> None:
+    """Підставляє значення тегів заготовки.
+
+    `bold_patterns` — тег → регулярка тієї ЧАСТИНИ підставленого тексту, яку
+    треба зробити жирною. Типово діє `BOLD_TAG_PATTERNS`: у примірнику, як і у
+    витягу, жирні лише ЦИФРИ — день у даті та номер без знака «№»
+    (правило 3.2.1). Лапки, місяць, рік і сам «№» лишаються звичайними.
+    """
+    patterns = BOLD_TAG_PATTERNS if bold_patterns is None else bold_patterns
+
     for tag, value in values.items():
+        pattern = patterns.get(tag)
         find_obj = doc.Content.Find
         find_obj.Text = tag
         iterations = 0
         while find_obj.Execute() and iterations < 100:
             iterations += 1
+            found_start = find_obj.Parent.Start
             find_obj.Parent.Text = value
+            if pattern:
+                match = re.search(pattern, str(value))
+                if match:
+                    try:
+                        doc.Range(
+                            found_start + match.start(), found_start + match.end()
+                        ).Font.Bold = True
+                    except Exception:
+                        # Жирність — оформлення, а не дані: її втрата не варта
+                        # зірваного примірника.
+                        pass
             find_obj = doc.Content.Find
             find_obj.Text = tag
 
@@ -788,6 +924,7 @@ def build_copy_document(
             source_doc = word.Documents.Open(order_path, ReadOnly=True)
 
         signature_line = ""
+        signer_inside = True
         with steps.step("шукаю межі тіла та підписанта"):
             if resolve_span is not None:
                 resolved = resolve_span(source_doc)
@@ -797,6 +934,9 @@ def build_copy_document(
                     body_start, signer_index = resolved["span"]
                     values = {**values, **resolved.get("values", {})}
                     signature_line = resolved.get("signature_line", "")
+                    # Коли підписант пішов в окремий тег, у діапазоні змісту
+                    # його немає — про це має знати нерозривність.
+                    signer_inside = not resolved.get("signer_in_tag", False)
                 else:
                     body_start, signer_index = resolved
             else:
@@ -835,7 +975,14 @@ def build_copy_document(
             content_start, content_end = copy_order_body(
                 doc, find_obj.Parent, source_doc, body_start, signer_index
             )
-            apply_keep_together_rules(doc, content_start, content_end)
+            apply_keep_together_rules(
+                doc, content_start, content_end, signer_inside=signer_inside
+            )
+            # Білий текст наказу на екрані невидимий, а в примірнику має бути
+            # звичайним. Лише в межах перенесеного змісту.
+            recoloured = blacken_invisible_text(doc, content_start, content_end)
+            if recoloured:
+                note(f"  Білий текст зроблено чорним: {recoloured} фрагм.")
             steps.detail(f"скопійовано абзаців: {signer_index - body_start + 1}")
 
         with steps.step("оформлюю підписанта"):

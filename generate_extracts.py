@@ -2523,8 +2523,13 @@ class App:
             values["{{підписант_посада}}"] = _slash_to_lines(signer["position"])
         if signer.get("rank"):
             values["{{підписант_звання}}"] = signer["rank"]
+            # Табличний варіант заготовки: звання та прізвище стоять в
+            # ОКРЕМИХ комірках, бо вирівняні до різних країв. Пробілами
+            # цього не зробити, тому й теги окремі.
+            values["{{звання_підписанта}}"] = signer["rank"]
         if signer.get("name"):
             values["{{підписант_піб}}"] = signer["name"]
+            values["{{прізвище_підписанта}}"] = signer["name"]
 
         if signer_as_tag and signer_start and signer_start <= last_paragraph:
             # Блок підписанта беремо з наказу ЯК Є: звання та прізвище в ньому
@@ -2550,6 +2555,10 @@ class App:
             "span": (body_start, last_paragraph),
             "values": values,
             "signature_line": signature_line,
+            # Чи лишився підписант усередині перенесеного змісту. Від цього
+            # залежить нерозривність: інакше останній ПУНКТ вважався б
+            # підписантом і втрачав зчеплення з власною шапкою.
+            "signer_in_tag": bool(signer_as_tag and signer_start),
         }
 
     @staticmethod
