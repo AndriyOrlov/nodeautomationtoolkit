@@ -24,6 +24,7 @@ from nodeautomationtoolkit.builtin_nodes.recipient_mapping import (
     _match_case,
     _short_closed_code,
     _format_full_closed_unit_text,
+    is_tck_entry,
     _ORDER_SIGNER_START_RE,
 )
 
@@ -100,6 +101,83 @@ def _apply_case_to_closed_text(closed_text: str, case_label: str) -> str:
     return re.sub(
         r"^військової\s+частини", phrase, closed_text, count=1, flags=re.IGNORECASE
     )
+
+
+# ── Запобіжник від проковтування тексту ─────────────────────────────────────
+#
+# У пункті наказу «звідки» пишеться малими, а «КУДИ» — ВЕЛИКИМИ. Назва однієї
+# частини НІКОЛИ не буває наполовину малою, наполовину ВЕЛИКОЮ. Якщо збіг
+# містить і те, і те — він перетнув межу пункту й з'їв текст між ними, тому
+# такий збіг відхиляється й текст лишається як був.
+#
+# Втрата тексту наказу — найгірший можливий наслідок, тому запобіжників два:
+# цей і заборона переходити тире-роздільник у самому патерні
+# (`_build_unit_fuzzy_pattern`, розд. 4.2.9).
+_MATCH_WORD_RE = re.compile(r"[^\W\d_]+", re.UNICODE)
+
+
+def _spans_source_and_destination(matched_text: str) -> bool:
+    """Чи перетнув збіг межу «звідки → КУДИ» (мішанина регістрів)."""
+    words = _MATCH_WORD_RE.findall(str(matched_text or ""))
+    # Довжина відсікає абревіатури (ТЦК, СП, АК, НГУ) — вони бувають ВЕЛИКИМИ
+    # всередині цілком правильної назви й межі пункту не позначають.
+    has_upper_word = any(len(word) >= 5 and word.isupper() for word in words)
+    has_lower_word = any(len(word) >= 4 and word.islower() for word in words)
+    return has_upper_word and has_lower_word
+
+
+# ── Почесне найменування в лапках після зашифрованої частини ────────────────
+#
+# Почесне найменування («Едельвейс», «Холодний Яр») є частиною ВІДКРИТОЇ назви
+# частини й однозначно її ідентифікує. Патерн словника закінчується на роді
+# частини («…гірсько-штурмової бригади»), тому лапки лишалися в тексті вже
+# ПІСЛЯ шифру: «військової частини А0000 “Едельвейс”». Це і збій вимоги
+# (зайвий текст), і витік відкритої ознаки в закритому повідомленні.
+_CLOSED_UNIT_PHRASE = r"військов\w+\s+частин\w+\s+[АA]\s?\d+"
+_HONORIFIC_AFTER_CLOSED_UNIT_RE = re.compile(
+    rf"((?:{_CLOSED_UNIT_PHRASE})(?:\s+{_CLOSED_UNIT_PHRASE})*)"
+    r"\s*[«“„\"]([^«»“”„\"]{1,80})[»”\"]",
+    re.IGNORECASE | re.UNICODE,
+)
+
+
+def _strip_honorific_after_closed_unit(text: str) -> str:
+    """Прибирає почесне найменування в лапках одразу після шифру частини."""
+    previous = None
+    result = str(text or "")
+    # Кілька проходів: «…А0000 “Х” “У”» трапляється у переліках.
+    while previous != result:
+        previous = result
+        result = _HONORIFIC_AFTER_CLOSED_UNIT_RE.sub(r"\1", result)
+    return result
+
+
+# ── Мʼякі переноси (Shift+Enter) у змісті повідомлення ──────────────────────
+#
+# У наказі довгу відкриту назву часто рве Shift+Enter. У повідомленні на її
+# місці лишається три слова («військової частини АXXXX»), і рядок обривається
+# посеред фрази — половина рядка порожня. Тому в ПОВІДОМЛЕННЯХ (і тільки в
+# них — витяг і примірник копіюють наказ 1-в-1) перенос зшивається.
+#
+# Правило закінчення: перенос лишається там, де рядок ЗАВЕРШЕНО — після коми,
+# крапки, двокрапки тощо. Саме так побудований біографічний блок
+# («…освіта: ТВІ у 2012 р.,» ⏎ «у ЗС - із 08.2008.»), і його структура не
+# змінюється. Розрив посеред фрази прибирається, і абзац переливається сам.
+_SOFT_BREAK_RE = re.compile("[ \t]*[\x0b\n][ \t]*")
+_KEEP_BREAK_AFTER = ",.;:!?…»”\")"
+
+
+def reflow_soft_breaks(text: str) -> str:
+    """Зшиває мʼякі переноси посеред фрази, лишаючи переноси після закінчення."""
+    source = str(text or "")
+
+    def _replace(match: re.Match) -> str:
+        head = source[: match.start()].rstrip()
+        if head and head[-1] in _KEEP_BREAK_AFTER:
+            return match.group(0)
+        return " "
+
+    return _SOFT_BREAK_RE.sub(_replace, source)
 
 
 def _apply_custom_rules(text: str, rules_input: str | list | dict | None) -> tuple[str, int]:
@@ -209,6 +287,13 @@ def cipher_unit_names(
     for open_name, mapped_val in mapping_dict.items():
         if not open_name or not str(open_name).strip():
             continue
+        if is_tck_entry(mapped_val) or is_tck_entry(open_name):
+            # ТЦК не шифрується: у змісті його назва лишається ПОВНОЮ
+            # відкритою (розд. 9.5.6). Підстановка короткої форми зі словника
+            # («Тестовий ОТЦК та СП») сенсу не мала, а рядки ТЦК — найдовші
+            # в словнику, тож саме вони й проковтували текст пункту (4.2.9).
+            # Для маршрутизації ці рядки далі потрібні — там вони не змінені.
+            continue
         closed_code = _format_full_closed_unit_text(mapped_val, mapping_dict)
         if isinstance(mapped_val, dict):
             raw_cipher = str(mapped_val.get("cipher") or "")
@@ -240,17 +325,27 @@ def cipher_unit_names(
     patterns_to_apply.sort(key=lambda x: x[0], reverse=True)
 
     for _, pat, fc, op_name, raw_c, c_info in patterns_to_apply:
-        matches = pat.findall(text)
-        if matches:
-            replaced_count += len(matches)
-            text = pat.sub(
-                lambda m, code=fc: _match_case(
-                    m.group(0),
-                    _apply_case_to_closed_text(code, _detect_grammatical_case(m.group(0))),
-                ),
-                text,
+        hits = [0]
+
+        def _replace(match, code=fc, hits=hits):
+            matched = match.group(0)
+            if _spans_source_and_destination(matched):
+                return matched  # збіг перетнув межу пункту — не чіпаємо текст
+            hits[0] += 1
+            return _match_case(
+                matched,
+                _apply_case_to_closed_text(code, _detect_grammatical_case(matched)),
             )
+
+        text = pat.sub(_replace, text)
+        if hits[0]:
+            replaced_count += hits[0]
             report_rows.append((op_name, raw_c or "(немає)", c_info or "(немає)", fc))
+
+    # 1.1. Почесне найменування в лапках лишається після шифру — прибираємо
+    # його ДО згортання повторів, інакше воно розділяє два однакові шифри
+    # («…А0000 “Едельвейс” військової частини А0000») і повтор не згортається.
+    text = _strip_honorific_after_closed_unit(text)
 
     # 2. Звороти-посилання: «цієї самої бригади» → «цієї самої військової частини»
     for pat, replacer in _UNIT_PHRASE_REPLACEMENTS:
@@ -276,24 +371,71 @@ def cipher_unit_names(
 
 
 def _collapse_unit_phrase_repeats(text: str) -> str:
-    """Згортає підряд повторені «військової частини» та однакові шифри."""
+    """Згортає підряд повторені «військової частини» та однакові шифри.
+
+    Лишається ПЕРШИЙ зворот — саме він несе відмінок речення (його поставив
+    `_apply_case_to_closed_text`) і регістр («ВІЙСЬКОВОЇ ЧАСТИНИ» у частині,
+    КУДИ призначають, лишається великим). Раніше повтор завжди згортався в
+    малий родовий, тож «у військовій частині військовій частині А0000»
+    ставало неграматичним «військової частини А0000».
+    """
+    unit_phrase = r"військов(?:ої|а|у|ій|ою)\s+частин(?:и|а|у|і|ою)"
     text = re.sub(
-        r"\b(?:військов(?:ої|а|у|ій|ою)\s+частин(?:и|а|у|і|ою)\s*){2,}",
-        "військової частини ",
+        rf"\b({unit_phrase})(?:\s+{unit_phrase})+\s*",
+        r"\1 ",
         text,
         flags=re.IGNORECASE,
     )
-    text = re.sub(
-        r"\b(?:ВІЙСЬКОВ(?:ОЇ|А|У|ІЙ|ОЮ)\s+ЧАСТИН(?:И|А|У|І|ОЮ)\s*){2,}",
-        "ВІЙСЬКОВОЇ ЧАСТИНИ ",
-        text,
-    )
-    return re.sub(
-        r"\b(військов\w+\s+частин\w+\s+[АA]\d+)(?:\s+\1\b)+",
-        r"\1",
-        text,
-        flags=re.IGNORECASE,
-    )
+    return _collapse_unit_chain_repeats(text)
+
+
+# Ланка ланцюга підпорядкованості: «військової частини АXXXX».
+_CHAIN_LINK_RE = re.compile(
+    r"(військов\w+\s+частин\w+)\s+([АA]\s?\d+)", re.IGNORECASE | re.UNICODE
+)
+_CHAIN_RUN_RE = re.compile(
+    rf"{_CLOSED_UNIT_PHRASE}(?:\s+{_CLOSED_UNIT_PHRASE})+", re.IGNORECASE | re.UNICODE
+)
+
+
+def _collapse_unit_chain_repeats(text: str) -> str:
+    """Прибирає повтор шифру в ланцюгу підпорядкованості.
+
+    Ланцюг іде від меншого до більшого: батальйон → бригада → корпус, і
+    **три ланки — це нормально**, якщо батальйон має власний номер і шифр.
+    Прибирається лише ПОВТОР того самого шифру, і лишається його **остання**
+    поява: більше зʼєднання завжди стоїть далі.
+
+    Звідки береться повтор: стовпець D так і називається «Корпус», тому в
+    рядку батальйону там часто стоїть корпус, а не бригада. Тоді і батальйон,
+    і бригада тягнуть за собою ту саму ланку корпусу, і виходило
+    «А1111 А3333 А2222 А3333» замість «А1111 А2222 А3333».
+
+    Відмінок і регістр речення несе ПЕРША ланка (`_apply_case_to_closed_text`),
+    тому її написання переноситься на першу ланку, що лишилась.
+    """
+
+    def _collapse_run(match: re.Match) -> str:
+        links = _CHAIN_LINK_RE.findall(match.group(0))
+        if len(links) < 2:
+            return match.group(0)
+
+        last_position = {}
+        for index, (_phrase, cipher) in enumerate(links):
+            last_position[re.sub(r"\s+", "", cipher).upper()] = index
+        kept = [links[index] for index in sorted(set(last_position.values()))]
+        if len(kept) == len(links):
+            # Повторів немає — віддаємо збіг ЯК Є. Інакше складання через
+            # пробіл затерло б мʼякий перенос (Shift+Enter), яким у наказі
+            # часто розірвано назву частини (правило 4.2.8).
+            return match.group(0)
+
+        # Написання першої ланки (відмінок, ВЕЛИКІ літери) належить реченню,
+        # а не конкретному шифру, тому лишається на першому місці.
+        kept[0] = (links[0][0], kept[0][1])
+        return " ".join(f"{phrase} {cipher}" for phrase, cipher in kept)
+
+    return _CHAIN_RUN_RE.sub(_collapse_run, text)
 
 
 @node(

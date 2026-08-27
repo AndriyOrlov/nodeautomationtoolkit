@@ -988,14 +988,237 @@ def organize_orders_by_number(
         "processed_count": processed,
         "details": table,
     }
+def _try_create_extracts_via_word_com(
+    source_order_path: str,
+    units_data: dict,
+    out_dir: Path,
+    template_docx_path: str,
+    order_number: str,
+    order_date: str,
+    signatory_title: str,
+    signatory_rank_name: str,
+    certify_extract: bool,
+    copy_number: str,
+    executor_info: str,
+    commander_signature_text: str,
+    save_individual_files: bool,
+) -> dict | None:
+    """Гібридна обробка через MS Word COM Automation (нативне копіювання з 100% збереженням відступів, списків і форматування)."""
+    try:
+        import win32com.client
+    except ImportError:
+        return None
+
+    if not source_order_path or not Path(source_order_path).is_file():
+        return None
+
+    word = None
+    try:
+        word = win32com.client.Dispatch("Word.Application")
+        word.Visible = False
+        word.DisplayAlerts = False
+    except Exception:
+        return None
+
+    try:
+        abs_src = str(Path(source_order_path).resolve())
+        src_doc = word.Documents.Open(abs_src)
+
+        com_para_map = {}
+        for i in range(1, src_doc.Paragraphs.Count + 1):
+            p = src_doc.Paragraphs(i)
+            t = p.Range.Text.strip()
+            if t and t not in com_para_map:
+                com_para_map[t] = p
+
+        created_paths = []
+        table_rows = []
+
+        for unit_code, unit_info in units_data.items():
+            clean_unit = str(unit_code).replace("/", "-").replace("\\", "-").strip()
+            out_name = f"Витяг_{clean_unit}_№{order_number}.docx"
+            out_file = out_dir / out_name
+            abs_out = str(out_file.resolve())
+
+            recipient_to = unit_info.get("recipient_to", "")
+            destination_where = unit_info.get("destination_where", "")
+            header_lines = unit_info.get("header_lines", [])
+            items = unit_info.get("items", [])
+
+            target_doc = word.Documents.Add()
+            target_doc.PageSetup.TopMargin = 56.7   # 2.0 cm
+            target_doc.PageSetup.BottomMargin = 56.7 # 2.0 cm
+            target_doc.PageSetup.LeftMargin = 56.7   # 2.0 cm
+            target_doc.PageSetup.RightMargin = 42.55 # 1.5 cm
+
+            if recipient_to:
+                p = target_doc.Paragraphs.Add()
+                p.Range.Text = recipient_to + "\n"
+                p.Range.ParagraphFormat.Alignment = 2  # wdAlignParagraphRight
+                p.Range.Font.Bold = 1
+                p.Range.Font.Size = 14
+
+            if destination_where and destination_where.upper() not in ("КУДИ", "[КУДИ]"):
+                p = target_doc.Paragraphs.Add()
+                p.Range.Text = destination_where + "\n"
+                p.Range.ParagraphFormat.Alignment = 2
+                p.Range.Font.Italic = 1
+                p.Range.Font.Size = 12
+            else:
+                p = target_doc.Paragraphs.Add()
+                p.Range.Text = "КУДИ\n"
+                p.Range.ParagraphFormat.Alignment = 2
+                p.Range.Font.Bold = 1
+                p.Range.Font.Size = 12
+                try:
+                    p.Range.Font.Color = 255  # wdColorRed
+                except Exception:
+                    pass
+
+            if header_lines:
+                for idx, line in enumerate(header_lines):
+                    p = target_doc.Paragraphs.Add()
+                    p.Range.Text = line + "\n"
+                    p.Range.ParagraphFormat.Alignment = 1 if idx < len(header_lines) - 1 else 0
+                    p.Range.Font.Bold = 1 if idx == 0 else 0
+                    p.Range.Font.Size = 14
+            else:
+                p1 = target_doc.Paragraphs.Add()
+                p1.Range.Text = "НАКАЗ КОМАНДИРА ВІЙСЬКОВОЇ ЧАСТИНИ А0000\n"
+                p1.Range.ParagraphFormat.Alignment = 1
+                p1.Range.Font.Bold = 1
+                p1.Range.Font.Size = 14
+
+                p2 = target_doc.Paragraphs.Add()
+                p2.Range.Text = f"{order_date}               м. Львів               № {order_number}\n"
+                p2.Range.ParagraphFormat.Alignment = 0
+                p2.Range.Font.Size = 14
+
+            p_title = target_doc.Paragraphs.Add()
+            p_title.Range.Text = "ВИТЯГ З НАКАЗУ\n"
+            p_title.Range.ParagraphFormat.Alignment = 1
+            p_title.Range.Font.Bold = 1
+            p_title.Range.Font.Size = 16
+
+            if copy_number:
+                p_copy = target_doc.Paragraphs.Add()
+                p_copy.Range.Text = f"({copy_number})\n"
+                p_copy.Range.ParagraphFormat.Alignment = 1
+                p_copy.Range.Font.Italic = 1
+                p_copy.Range.Font.Size = 12
+
+            printed_headings = set()
+            for item_data in items:
+                heading = item_data.get("parent_heading", "") if isinstance(item_data, dict) else ""
+                text = item_data.get("text", "") if isinstance(item_data, dict) else str(item_data)
+
+                if heading and heading not in printed_headings:
+                    src_h = com_para_map.get(heading.strip())
+                    if src_h:
+                        src_h.Range.Copy()
+                        target_doc.Paragraphs(target_doc.Paragraphs.Count).Range.Paste()
+                    else:
+                        p_h = target_doc.Paragraphs.Add()
+                        p_h.Range.Text = heading + "\n"
+                        p_h.Range.Font.Bold = 1
+                        p_h.Range.Font.Size = 14
+                    printed_headings.add(heading)
+
+                lines = [line.rstrip() for line in text.splitlines() if line.strip()]
+                for line in lines:
+                    src_p = com_para_map.get(line.strip())
+                    if src_p:
+                        src_p.Range.Copy()
+                        target_doc.Paragraphs(target_doc.Paragraphs.Count).Range.Paste()
+                    else:
+                        p_line = target_doc.Paragraphs.Add()
+                        p_line.Range.Text = line + "\n"
+                        p_line.Range.Font.Size = 14
+
+            if commander_signature_text:
+                # Правило 5.3: рівно 2 порожні абзаци перед підписантом
+                for _ in range(2):
+                    p_blank = target_doc.Paragraphs.Add()
+                    p_blank.Range.Text = "\n"
+                    p_blank.Range.Font.Size = 14
+                for sig_line in commander_signature_text.splitlines():
+                    p_sig = target_doc.Paragraphs.Add()
+                    p_sig.Range.Text = sig_line + "\n"
+                    p_sig.Range.ParagraphFormat.Alignment = 2
+                    p_sig.Range.Font.Bold = 1
+                    p_sig.Range.Font.Size = 14
+
+            if certify_extract:
+                p_c1 = target_doc.Paragraphs.Add()
+                p_c1.Range.Text = "Згідно з оригіналом:\n"
+                p_c1.Range.Font.Bold = 1
+                p_c1.Range.Font.Italic = 1
+                p_c1.Range.Font.Size = 14
+
+                p_c2 = target_doc.Paragraphs.Add()
+                p_c2.Range.Text = signatory_title + "\n"
+                p_c2.Range.Font.Size = 14
+
+                p_c3 = target_doc.Paragraphs.Add()
+                p_c3.Range.Text = signatory_rank_name + "\n"
+                p_c3.Range.ParagraphFormat.Alignment = 2
+                p_c3.Range.Font.Bold = 1
+                p_c3.Range.Font.Size = 14
+
+                year_str = order_date[-4:] if len(order_date) >= 4 and order_date[-4:].isdigit() else "2026"
+                p_c4 = target_doc.Paragraphs.Add()
+                p_c4.Range.Text = f"«____» ____________ {year_str} року\n"
+                p_c4.Range.Font.Italic = 1
+                p_c4.Range.Font.Size = 12
+
+            if executor_info:
+                p_exec = target_doc.Paragraphs.Add()
+                p_exec.Range.Text = executor_info + "\n"
+                p_exec.Range.Font.Italic = 0
+                p_exec.Range.Font.Size = 8
+
+            target_doc.SaveAs2(abs_out, FileFormat=16)
+            target_doc.Close(SaveChanges=False)
+
+            if save_individual_files:
+                created_paths.append(str(out_file))
+
+            table_rows.append((unit_code, len(items), out_name, str(out_file)))
+
+        src_doc.Close(SaveChanges=False)
+
+        clean_order_num = str(order_number).replace("/", "-").replace("\\", "-").strip()
+        combined_path = out_dir / f"Всі_витяги_наказ_№{clean_order_num}.docx"
+        final_paths = created_paths if save_individual_files else [str(combined_path)]
+
+        table = DataTable(
+            ("Військова частина", "Кількість пунктів", "Файл витягу", "Повний шлях"),
+            tuple(table_rows),
+        )
+
+        return {
+            "summary": f"Згенеровано витяги через MS Word COM Automation (нативне копіювання 100% форматування, {len(units_data)} адресатів)",
+            "count": len(final_paths),
+            "details": table,
+            "paths": final_paths,
+            "combined_path": str(combined_path),
+        }
+    except Exception:
+        return None
+    finally:
+        if word is not None:
+            try:
+                word.Quit()
+            except Exception:
+                pass
 
 
 @node(
     name="Пакетне створення витягів за ВЧ",
     category="Word · Пакет",
     description=(
-        "Генерує окремі витяги з наказу у форматі DOCX для кожної розпізнаної військової частини "
-        "з використанням картованих пунктів."
+        "Генерує окремі та 1 ЄДИНИЙ підсумковий DOCX з витягами з наказу для двостороннього друку (2 сторінки на 1 аркуш). "
+        "Підтримує шаблон DOCX з плейсхолдерами {{кому}}, {{куди}}, {{зміст}}, {{номер_наказу}}, {{дата_наказу}}, {{засвідчення}}."
     ),
     type_id="builtin.order_batch.create_unit_extracts",
     outputs={
@@ -1003,6 +1226,7 @@ def organize_orders_by_number(
         "count": "int",
         "details": "DataTable",
         "paths": "List",
+        "combined_path": "str",
     },
     execution_inputs=("exec",),
     execution_outputs=("then",),
@@ -1012,70 +1236,514 @@ def create_unit_extracts(
     source_order_path: str = "",
     unit_paragraphs: dict | None = None,
     output_folder: str = "",
+    template_docx_path: str = "",
     order_number: str = "",
     order_date: str = "",
+    signatory_title: str = "Т.в.о. начальника штабу військової частини А0000",
+    signatory_rank_name: str = "майор Петро СИДОРЕНКО",
+    certify_extract: bool = True,
+    copy_number: str = "прим. 2",
+    executor_info: str = "Пупков ПУпенко 55-358",
+    save_individual_files: bool = False,
+    use_word_com: bool = True,
 ) -> dict:
+    import copy
+    import re
     import docx
+    from docx.shared import Pt, Cm
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+    from docx.enum.section import WD_SECTION
     from nodeautomationtoolkit.builtin_nodes.text_analysis import extract_order_fields
     from nodeautomationtoolkit.core.table_types import DataTable
 
     out_dir = Path(output_folder).expanduser() if output_folder.strip() else Path("output/extracts")
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    commander_signature_text = ""
     if source_order_path.strip() and Path(source_order_path).is_file():
+        src_file = Path(source_order_path)
         src_doc = docx.Document(source_order_path)
         full_text = "\n".join(p.text for p in src_doc.paragraphs)
+
         if not order_number or not order_date:
             extracted = extract_order_fields(full_text)
-            order_number = order_number or extracted.get("order_number") or "б-н"
-            order_date = order_date or extracted.get("order_date") or "б-д"
-    else:
-        order_number = order_number or "б-н"
-        order_date = order_date or "б-д"
+            order_number = order_number or extracted.get("order_number") or ""
+            order_date = order_date or extracted.get("order_date") or ""
+
+        file_stem = src_file.stem
+        if not order_number:
+            num_m = re.search(r"№\s*([A-Za-zА-Яа-яІіЇїЄєҐґ0-9./_-]+)", file_stem)
+            if num_m:
+                order_number = num_m.group(1).strip()
+        if not order_date:
+            date_m = re.search(r"(\d{1,2}\s+(?:січня|лютого|березня|квітня|травня|червня|липня|серпня|вересня|жовтня|листопада|грудня)\s+\d{4}(?:\s*року|\s*р\.)?)", file_stem, re.I)
+            if not date_m:
+                date_m = re.search(r"(\d{1,2}[./_]\d{1,2}[./_]\d{2,4})", file_stem)
+            if date_m:
+                order_date = date_m.group(1).strip().replace("_", ".")
+
+        cmd_lines = []
+        for p in reversed(src_doc.paragraphs):
+            t = p.text.strip()
+            if t and (
+                "командир" in t.lower()
+                or "начальник" in t.lower()
+                or "командувач" in t.lower()
+                or "генерал" in t.lower()
+                or "полковник" in t.lower()
+            ):
+                cmd_lines.append(t)
+                if len(cmd_lines) >= 2:
+                    break
+        if cmd_lines:
+            commander_signature_text = "\n".join(reversed(cmd_lines))
+
+    if use_word_com and source_order_path and Path(source_order_path).is_file():
+        com_res = _try_create_extracts_via_word_com(
+            source_order_path=source_order_path,
+            units_data=unit_paragraphs or {},
+            out_dir=out_dir,
+            template_docx_path=template_docx_path,
+            order_number=order_number or "б-н",
+            order_date=order_date or "б-д",
+            signatory_title=signatory_title,
+            signatory_rank_name=signatory_rank_name,
+            certify_extract=certify_extract,
+            copy_number=copy_number,
+            executor_info=executor_info,
+            commander_signature_text=commander_signature_text,
+            save_individual_files=save_individual_files,
+        )
+        if com_res is not None:
+            return com_res
+
+    # Побудова індексу: текст параграфа (без крайніх пробілів) → оригінальний об'єкт параграфа DOCX
+    source_para_map: dict = {}
+    if source_order_path and Path(source_order_path).is_file():
+        try:
+            _src_doc_map = docx.Document(source_order_path)
+            for _sp in _src_doc_map.paragraphs:
+                _k = _sp.text.strip()
+                if _k and _k not in source_para_map:
+                    source_para_map[_k] = _sp
+        except Exception:
+            pass
+
+    order_number = order_number or "б-н"
+    order_date = order_date or "б-д"
 
     units_data = unit_paragraphs or {}
     created_paths = []
     table_rows = []
 
-    for unit_code, unit_entry in units_data.items():
-        clean_unit = str(unit_code).replace("/", "-").replace("\\", "-").strip()
-        new_doc = docx.Document()
+    def _set_run_font(run, font_name="Times New Roman", size_pt=14, bold=False, italic=False, color_rgb=None):
+        run.font.name = font_name
+        run.font.size = Pt(size_pt)
+        run.bold = bold
+        run.italic = italic
+        if color_rgb:
+            try:
+                run.font.color.rgb = docx.shared.RGBColor(*color_rgb)
+            except Exception:
+                pass
 
+    def _add_styled_p(
+        doc,
+        text="",
+        font_name="Times New Roman",
+        size_pt=14,
+        bold=False,
+        italic=False,
+        color_rgb=None,
+        align=WD_ALIGN_PARAGRAPH.JUSTIFY,
+        space_after=4,
+        line_spacing=1.0,
+        first_indent=1.25,
+        left_indent=0,
+        keep_with_next=False,
+        keep_together=False,
+    ):
+        p = doc.add_paragraph()
+        p.alignment = align
+        p.paragraph_format.space_after = Pt(space_after)
+        p.paragraph_format.line_spacing = line_spacing
+        if first_indent > 0:
+            p.paragraph_format.first_line_indent = Cm(first_indent)
+        if left_indent > 0:
+            p.paragraph_format.left_indent = Cm(left_indent)
+        if keep_with_next:
+            p.paragraph_format.keep_with_next = True
+        if keep_together:
+            p.paragraph_format.keep_together = True
+        if text:
+            run = p.add_run(text)
+            _set_run_font(run, font_name=font_name, size_pt=size_pt, bold=bold, italic=italic, color_rgb=color_rgb)
+        return p
+
+    def _insert_styled_p_before(
+        target_p,
+        text="",
+        font_name="Times New Roman",
+        size_pt=14,
+        bold=False,
+        italic=False,
+        color_rgb=None,
+        align=WD_ALIGN_PARAGRAPH.JUSTIFY,
+        space_after=4,
+        line_spacing=1.0,
+        first_indent=1.25,
+        left_indent=0,
+        keep_with_next=False,
+        keep_together=False,
+    ):
+        p = target_p.insert_paragraph_before()
+        p.alignment = align
+        p.paragraph_format.space_after = Pt(space_after)
+        p.paragraph_format.line_spacing = line_spacing
+        if first_indent > 0:
+            p.paragraph_format.first_line_indent = Cm(first_indent)
+        if left_indent > 0:
+            p.paragraph_format.left_indent = Cm(left_indent)
+        if keep_with_next:
+            p.paragraph_format.keep_with_next = True
+        if keep_together:
+            p.paragraph_format.keep_together = True
+        if text:
+            run = p.add_run(text)
+            _set_run_font(run, font_name=font_name, size_pt=size_pt, bold=bold, italic=italic, color_rgb=color_rgb)
+        return p
+
+    def _apply_source_formatting(p, line_text, src_p=None, keep_with_next=False):
+        """Зберігає форматування (відступи, рівнення, інтервали, рани) з оригіналу без зламу XML."""
+        p.paragraph_format.keep_together = True
+        if keep_with_next:
+            p.paragraph_format.keep_with_next = True
+
+        if src_p is not None:
+            pf_src = src_p.paragraph_format
+            pf_dst = p.paragraph_format
+
+            if src_p.alignment is not None:
+                p.alignment = src_p.alignment
+            else:
+                p.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
+
+            if pf_src.first_line_indent is not None:
+                pf_dst.first_line_indent = pf_src.first_line_indent
+            elif not line_text.startswith("\t"):
+                pf_dst.first_line_indent = Cm(1.25)
+
+            if pf_src.left_indent is not None:
+                pf_dst.left_indent = pf_src.left_indent
+            if pf_src.right_indent is not None:
+                pf_dst.right_indent = pf_src.right_indent
+
+            if pf_src.space_after is not None:
+                pf_dst.space_after = pf_src.space_after
+            else:
+                pf_dst.space_after = Pt(4)
+            if pf_src.space_before is not None:
+                pf_dst.space_before = pf_src.space_before
+            if pf_src.line_spacing is not None:
+                pf_dst.line_spacing = pf_src.line_spacing
+
+            src_runs_text = "".join(r.text for r in src_p.runs).strip()
+            if src_p.runs and src_runs_text == line_text.strip():
+                for r in src_p.runs:
+                    new_r = p.add_run(r.text)
+                    new_r.font.name = r.font.name or "Times New Roman"
+                    if r.font.size:
+                        new_r.font.size = r.font.size
+                    else:
+                        new_r.font.size = Pt(14)
+                    if r.bold is not None:
+                        new_r.bold = r.bold
+                    if r.italic is not None:
+                        new_r.italic = r.italic
+            else:
+                r = p.add_run(line_text)
+                _set_run_font(r, font_name="Times New Roman", size_pt=14, bold=False, italic=False)
+        else:
+            p.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
+            p.paragraph_format.space_after = Pt(4)
+            p.paragraph_format.line_spacing = 1.0
+            if not line_text.startswith("\t"):
+                p.paragraph_format.first_line_indent = Cm(1.25)
+            r = p.add_run(line_text)
+            _set_run_font(r, font_name="Times New Roman", size_pt=14, bold=False, italic=False)
+        return p
+
+    def _insert_para_from_source(target_p, line_text, src_p=None, keep_with_next=False):
+        p = target_p.insert_paragraph_before()
+        return _apply_source_formatting(p, line_text, src_p, keep_with_next)
+
+    def _add_para_from_source(doc, line_text, src_p=None, keep_with_next=False):
+        p = doc.add_paragraph()
+        return _apply_source_formatting(p, line_text, src_p, keep_with_next)
+
+    def _replace_in_paragraph(p, replacements, red_tags=None):
+        full_text = p.text
+        if not any(ph in full_text for ph in replacements):
+            return False
+        replaced = False
+        r_tags = red_tags or set()
+        for run in p.runs:
+            for ph, val in replacements.items():
+                if ph in run.text:
+                    run.text = run.text.replace(ph, val)
+                    if ph in r_tags:
+                        try:
+                            run.font.color.rgb = docx.shared.RGBColor(255, 0, 0)
+                            run.bold = True
+                        except Exception:
+                            pass
+                    replaced = True
+        if any(ph in p.text for ph in replacements):
+            new_text = p.text
+            has_red = False
+            for ph, val in replacements.items():
+                if ph in new_text:
+                    new_text = new_text.replace(ph, val)
+                    if ph in r_tags:
+                        has_red = True
+            if p.runs:
+                p.runs[0].text = new_text
+                if has_red:
+                    try:
+                        p.runs[0].font.color.rgb = docx.shared.RGBColor(255, 0, 0)
+                        p.runs[0].bold = True
+                    except Exception:
+                        pass
+                for r in p.runs[1:]:
+                    r.text = ""
+            else:
+                p.text = new_text
+            replaced = True
+        return replaced
+
+    def _copy_section_properties(src_sec, dst_sec):
+        dst_sec.top_margin = src_sec.top_margin
+        dst_sec.bottom_margin = src_sec.bottom_margin
+        dst_sec.left_margin = src_sec.left_margin
+        dst_sec.right_margin = src_sec.right_margin
+        dst_sec.page_width = src_sec.page_width
+        dst_sec.page_height = src_sec.page_height
+        dst_sec.header_distance = src_sec.header_distance
+        dst_sec.footer_distance = src_sec.footer_distance
+
+    has_template = bool(template_docx_path.strip() and Path(template_docx_path).is_file())
+
+    combined_doc = docx.Document()
+    if has_template:
+        tmpl_ref = docx.Document(template_docx_path)
+        if tmpl_ref.sections:
+            _copy_section_properties(tmpl_ref.sections[0], combined_doc.sections[0])
+    else:
+        for s in combined_doc.sections:
+            s.top_margin = Cm(2.0)
+            s.bottom_margin = Cm(2.0)
+            s.left_margin = Cm(2.0)
+            s.right_margin = Cm(1.5)
+
+    def _slash_to_lines(text_val: str) -> str:
+        """Конвертує слеші ' / ' або '/' (крім 'в/ч' та дат) у переноси рядків."""
+        if not text_val:
+            return ""
+        t = re.sub(r"\b([вВ])\s*/\s*([чЧ])\b", r"\1_SLASH_TEMP_\2", str(text_val))
+        t = re.sub(r"(\d)\s*/\s*(\d)", r"\1_NUMSLASH_TEMP_\2", t)
+        t = re.sub(r"\s*/\s*", "\n", t)
+        t = t.replace("_SLASH_TEMP_", "/")
+        t = t.replace("_NUMSLASH_TEMP_", "/")
+        return t
+
+    signatory_title = _slash_to_lines(signatory_title)
+    commander_signature_text = _slash_to_lines(commander_signature_text)
+    executor_info = _slash_to_lines(executor_info)
+
+    for extract_idx, (unit_code, unit_entry) in enumerate(units_data.items()):
+        clean_unit = str(unit_code).replace("/", "-").replace("\\", "-").replace(" ", "_").strip()
+        
         if isinstance(unit_entry, dict):
             header_lines = unit_entry.get("header_lines", [])
             items = unit_entry.get("items", [])
+            recipient_to = str(unit_entry.get("recipient_to", "") or "").strip()
+            destination_where = str(unit_entry.get("destination_where", "") or "").strip()
         else:
             header_lines = []
             items = [{"parent_heading": "", "text": str(x)} for x in unit_entry]
+            recipient_to = ""
+            destination_where = ""
 
-        for line in header_lines:
-            new_doc.add_paragraph(line)
+        certification_block_text = ""
+        if certify_extract:
+            year_str = order_date[-4:] if len(order_date) >= 4 and order_date[-4:].isdigit() else "2026"
+            certification_block_text = (
+                f"Згідно з оригіналом:\n"
+                f"{signatory_title}\n\n"
+                f"{signatory_rank_name}\n"
+                f"«____» ____________ {year_str} року"
+            )
 
-        new_doc.add_heading(f"ВИТЯГ З НАКАЗУ № {order_number}", level=1)
-        new_doc.add_paragraph(f"Призначено для: {unit_code}\n")
+        if has_template:
+            new_doc = docx.Document(template_docx_path)
+            dest_val = destination_where.strip() if destination_where.strip() else "КУДИ"
+            is_dest_manual = dest_val.upper() in ("КУДИ", "[КУДИ]")
+            red_tags = {"{{куди}}", "{{Куди}}", "{{КУДИ}}"} if is_dest_manual else set()
 
-        printed_headings = set()
-        for item_data in items:
-            if isinstance(item_data, dict):
-                heading = item_data.get("parent_heading", "")
-                text = item_data.get("text", "")
+            _all_mappings = {
+                "{{кому}}": recipient_to,
+                "{{Кому}}": recipient_to,
+                "{{КОМУ}}": recipient_to,
+                "{{куди}}": dest_val,
+                "{{Куди}}": dest_val,
+                "{{КУДИ}}": dest_val,
+                "{{номер_наказу}}": order_number,
+                "{{дата_наказу}}": order_date,
+                "{{примірник}}": copy_number,
+                "{{підпис_командира}}": commander_signature_text,
+                "{{засвідчення}}": certification_block_text,
+                "{{виконавець}}": executor_info,
+            }
+            replacements = {k: v for k, v in _all_mappings.items() if v.strip()}
+
+            executor_replaced = False
+            for p in list(new_doc.paragraphs):
+                p_text = p.text
+                if any(ph in p_text for ph in ["{{зміст}}", "{{content}}", "{{пункти}}"]):
+                    if items:
+                        printed_headings = set()
+                        num_items = len(items)
+                        for item_idx, item_data in enumerate(items):
+                            heading = item_data.get("parent_heading", "") if isinstance(item_data, dict) else ""
+                            text = item_data.get("text", "") if isinstance(item_data, dict) else str(item_data)
+                            is_last_item = (item_idx == num_items - 1)
+
+                            if heading and heading not in printed_headings:
+                                src_h = source_para_map.get(heading.strip())
+                                _insert_para_from_source(p, heading, src_p=src_h, keep_with_next=True)
+                                printed_headings.add(heading)
+
+                            lines = [line.rstrip() for line in text.splitlines() if line.strip()]
+                            total_lines = len(lines)
+                            for line_idx, line in enumerate(lines):
+                                is_last_line_of_item = (line_idx == total_lines - 1)
+                                kwn = not (is_last_item and is_last_line_of_item)
+                                src_p = source_para_map.get(line.strip())
+                                _insert_para_from_source(p, line, src_p=src_p, keep_with_next=kwn)
+                    
+                        p._element.getparent().remove(p._element)
+                else:
+                    if _replace_in_paragraph(p, replacements, red_tags=red_tags):
+                        if "{{виконавець}}" in p_text:
+                            executor_replaced = True
+
+            if executor_info and not executor_replaced:
+                _add_styled_p(new_doc, text="", space_after=8, first_indent=0)
+                _add_styled_p(new_doc, text=executor_info, size_pt=8, italic=False, align=WD_ALIGN_PARAGRAPH.LEFT, space_after=0, first_indent=0, keep_together=True)
+        else:
+            new_doc = docx.Document()
+            sections = new_doc.sections
+            for section in sections:
+                section.top_margin = Cm(2.0)
+                section.bottom_margin = Cm(2.0)
+                section.left_margin = Cm(2.0)
+                section.right_margin = Cm(1.5)
+
+            if recipient_to:
+                _add_styled_p(new_doc, text=recipient_to, size_pt=14, bold=True, align=WD_ALIGN_PARAGRAPH.RIGHT, space_after=2, first_indent=0, keep_with_next=True)
+            if destination_where and destination_where.upper() not in ("КУДИ", "[КУДИ]"):
+                _add_styled_p(new_doc, text=destination_where, size_pt=12, italic=True, align=WD_ALIGN_PARAGRAPH.RIGHT, space_after=6, first_indent=0, keep_with_next=True)
             else:
-                heading = ""
-                text = str(item_data)
+                _add_styled_p(new_doc, text="КУДИ", size_pt=12, bold=True, color_rgb=(255, 0, 0), align=WD_ALIGN_PARAGRAPH.RIGHT, space_after=6, first_indent=0, keep_with_next=True)
 
-            if heading and heading not in printed_headings:
-                p = new_doc.add_paragraph(heading)
-                p.runs[0].bold = True if p.runs else False
-                printed_headings.add(heading)
+            if header_lines:
+                for idx, line in enumerate(header_lines):
+                    align = WD_ALIGN_PARAGRAPH.CENTER if idx < len(header_lines) - 1 else WD_ALIGN_PARAGRAPH.LEFT
+                    _add_styled_p(new_doc, text=line, size_pt=14, bold=(idx == 0), align=align, space_after=2, first_indent=0, keep_with_next=True)
+            else:
+                _add_styled_p(new_doc, text=f"НАКАЗ КОМАНДИРА ВІЙСЬКОВОЇ ЧАСТИНИ А0000", size_pt=14, bold=True, align=WD_ALIGN_PARAGRAPH.CENTER, space_after=2, first_indent=0, keep_with_next=True)
+                _add_styled_p(new_doc, text=f"{order_date}               м. Львів               № {order_number}", size_pt=14, bold=False, align=WD_ALIGN_PARAGRAPH.LEFT, space_after=6, first_indent=0, keep_with_next=True)
 
-            new_doc.add_paragraph(text)
+            _add_styled_p(new_doc, text="", space_after=4, first_indent=0)
+            _add_styled_p(new_doc, text=f"ВИТЯГ З НАКАЗУ", size_pt=16, bold=True, align=WD_ALIGN_PARAGRAPH.CENTER, space_after=4, first_indent=0, keep_with_next=True)
+            if copy_number:
+                _add_styled_p(new_doc, text=f"({copy_number})", size_pt=12, italic=True, align=WD_ALIGN_PARAGRAPH.CENTER, space_after=8, first_indent=0, keep_with_next=True)
+
+            printed_headings = set()
+            num_items = len(items)
+            for item_idx, item_data in enumerate(items):
+                heading = item_data.get("parent_heading", "") if isinstance(item_data, dict) else ""
+                text = item_data.get("text", "") if isinstance(item_data, dict) else str(item_data)
+                is_last_item = (item_idx == num_items - 1)
+
+                if heading and heading not in printed_headings:
+                    src_h = source_para_map.get(heading.strip())
+                    _add_para_from_source(new_doc, heading, src_p=src_h, keep_with_next=True)
+                    printed_headings.add(heading)
+
+                lines = [line.rstrip() for line in text.splitlines() if line.strip()]
+                total_lines = len(lines)
+                for line_idx, line in enumerate(lines):
+                    is_last_line_of_item = (line_idx == total_lines - 1)
+                    kwn = not (is_last_item and is_last_line_of_item)
+                    src_p = source_para_map.get(line.strip())
+                    _add_para_from_source(new_doc, line, src_p=src_p, keep_with_next=kwn)
+
+            # Правило 5.3: рівно 2 порожні абзаци перед підписантом
+            _add_styled_p(new_doc, text="", space_after=0, first_indent=0, keep_with_next=True)
+            _add_styled_p(new_doc, text="", space_after=0, first_indent=0, keep_with_next=True)
+            if commander_signature_text:
+                for sig_line in commander_signature_text.splitlines():
+                    _add_styled_p(new_doc, text=sig_line, size_pt=14, bold=True, align=WD_ALIGN_PARAGRAPH.RIGHT, space_after=3, first_indent=0, keep_with_next=True, keep_together=True)
+
+            if certify_extract:
+                _add_styled_p(new_doc, text="", space_after=12, first_indent=0, keep_with_next=True)
+                _add_styled_p(new_doc, text="Згідно з оригіналом:", size_pt=14, bold=True, italic=True, align=WD_ALIGN_PARAGRAPH.LEFT, space_after=4, first_indent=0, keep_with_next=True, keep_together=True)
+                _add_styled_p(new_doc, text=signatory_title, size_pt=14, align=WD_ALIGN_PARAGRAPH.LEFT, space_after=4, first_indent=0, keep_with_next=True, keep_together=True)
+                _add_styled_p(new_doc, text="", space_after=8, first_indent=0, keep_with_next=True)
+                _add_styled_p(new_doc, text=f"{signatory_rank_name}", size_pt=14, bold=True, align=WD_ALIGN_PARAGRAPH.RIGHT, space_after=4, first_indent=0, keep_together=True)
+                _add_styled_p(new_doc, text=f"«____» ____________ {order_date[-4:] if len(order_date)>=4 and order_date[-4:].isdigit() else '2026'} року", size_pt=12, italic=True, align=WD_ALIGN_PARAGRAPH.LEFT, space_after=4, first_indent=0)
+
+            if executor_info:
+                _add_styled_p(new_doc, text="", space_after=8, first_indent=0)
+                _add_styled_p(new_doc, text=executor_info, size_pt=8, italic=False, align=WD_ALIGN_PARAGRAPH.LEFT, space_after=0, first_indent=0, keep_together=True)
 
         out_name = f"Витяг_{clean_unit}_№{order_number}.docx"
         out_file = out_dir / out_name
-        new_doc.save(out_file)
+        if save_individual_files:
+            new_doc.save(out_file)
+            created_paths.append(str(out_file))
 
-        created_paths.append(str(out_file))
         table_rows.append((unit_code, len(items), out_name, str(out_file)))
+
+        # Додаємо елементи витягу у спільний документ для двостороннього друку
+        if extract_idx > 0:
+            sec = combined_doc.add_section(WD_SECTION.ODD_PAGE)
+            sec.start_type = WD_SECTION.ODD_PAGE
+            if has_template:
+                _copy_section_properties(tmpl_ref.sections[0], sec)
+            else:
+                sec.top_margin = Cm(2.0)
+                sec.bottom_margin = Cm(2.0)
+                sec.left_margin = Cm(2.0)
+                sec.right_margin = Cm(1.5)
+
+        for elem in new_doc.element.body:
+            if elem.tag.endswith("sectPr"):
+                continue
+            elem_copy = copy.deepcopy(elem)
+            for child in list(elem_copy.iter()):
+                if child.tag.endswith("sectPr"):
+                    p_parent = child.getparent()
+                    if p_parent is not None:
+                        p_parent.remove(child)
+            combined_doc.element.body.append(elem_copy)
+
+    clean_order_num = str(order_number).replace("/", "-").replace("\\", "-").strip()
+    combined_path = out_dir / f"Всі_витяги_наказ_№{clean_order_num}.docx"
+    combined_doc.save(combined_path)
+
+    final_paths = created_paths if save_individual_files else [str(combined_path)]
 
     table = DataTable(
         ("Військова частина", "Кількість пунктів", "Файл витягу", "Повний шлях"),
@@ -1083,8 +1751,9 @@ def create_unit_extracts(
     )
 
     return {
-        "summary": f"Створено витягів: {len(created_paths)} у папці {out_dir.name}",
-        "count": len(created_paths),
+        "summary": f"Згенеровано єдиний файл з усіма витягами ({len(units_data)} адресатів) для двостороннього друку: {combined_path.name}",
+        "count": len(final_paths),
         "details": table,
-        "paths": created_paths,
+        "paths": final_paths,
+        "combined_path": str(combined_path),
     }
