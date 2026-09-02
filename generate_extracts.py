@@ -946,6 +946,97 @@ def force_quit_word(word, timeout: float = 5.0) -> None:
         pass
 
 
+#: Word повертає це значення замість властивості, яка в діапазоні НЕОДНАКОВА
+#: (наприклад, вирівнювання, якщо абзаци діапазону вирівняні по-різному).
+WD_UNDEFINED = 9999999
+
+
+def iter_paragraphs(container) -> list:
+    """Абзаци документа чи діапазону — через ІТЕРАТОР колекції, а не Paragraphs(i).
+
+    Word не тримає абзаци масивом: кожне звернення `Paragraphs(i)` проходить
+    історію з початку, тож звичний цикл `for i in range(1, Count + 1)` виходить
+    квадратичним. Для документа на 60 абзаців це непомітно, але такі цикли тут
+    виконуються десятки разів на кожен витяг. Ітератор колекції віддає ті самі
+    об'єкти одним проходом.
+
+    Фолбек на індексацію лишено для фейкових COM-об'єктів у тестах, які
+    ітератора не мають.
+    """
+    paragraphs = getattr(container, "Paragraphs", container)
+    try:
+        return list(paragraphs)
+    except TypeError:
+        return [paragraphs(index) for index in range(1, paragraphs.Count + 1)]
+
+
+def last_paragraph(document):
+    """Останній абзац документа: `Paragraphs.Last` замість `Paragraphs(Count)`.
+
+    Індексація останнім номером щоразу проходить увесь документ, а `Last`
+    Word віддає одразу. Прибирання «висячих» порожніх абзаців у кінці —
+    цикл саме з таких звернень.
+    """
+    paragraphs = document.Paragraphs
+    direct = getattr(paragraphs, "Last", None)
+    if direct is not None:
+        return direct
+    return paragraphs(paragraphs.Count)
+
+
+#: Налаштування Word, які на час пакета вимикаються: (об'єкт, властивість, значення).
+#: Фонова репагінація перебудовує макет після КОЖНОЇ правки абзацу, хоча генератор
+#: і так кличе `Repaginate()` там, де вимір справді потрібен; перевірка орфографії
+#: працює на файлах, які живуть кілька секунд.
+_BATCH_WORD_SETTINGS = (
+    ("application", "ScreenUpdating", False),
+    ("options", "Pagination", False),
+    ("options", "CheckSpellingAsYouType", False),
+    ("options", "CheckGrammarAsYouType", False),
+)
+
+
+def _word_setting_target(word, scope):
+    return word if scope == "application" else getattr(word, "Options", None)
+
+
+def tune_word_for_batch(word) -> list:
+    """Вимикає фонову роботу Word на час пакета; повертає знімок для відкату.
+
+    Частина цих налаштувань у Word спільна для всієї програми й зберігається між
+    запусками, тому початкові значення обов'язково запам'ятовуємо: користувач не
+    має після генерації знайти в СВОЄМУ Word вимкнену перевірку орфографії.
+    Кожна властивість окремо — набір `Options` різниться між версіями, і одна
+    відсутня назва не має валити пакет.
+    """
+    snapshot = []
+    for scope, prop, value in _BATCH_WORD_SETTINGS:
+        target = _word_setting_target(word, scope)
+        if target is None:
+            continue
+        try:
+            snapshot.append((scope, prop, getattr(target, prop)))
+        except Exception:
+            continue
+        try:
+            setattr(target, prop, value)
+        except Exception:
+            pass
+    return snapshot
+
+
+def restore_word_settings(word, snapshot) -> None:
+    """Повертає налаштування Word, змінені `tune_word_for_batch`."""
+    for scope, prop, value in snapshot or ():
+        target = _word_setting_target(word, scope)
+        if target is None:
+            continue
+        try:
+            setattr(target, prop, value)
+        except Exception:
+            pass
+
+
 def _carry_source_formatting(doc, start: int, end: int, source_paragraph) -> None:
     """Переносить шрифт і геометрію абзацу наказу ЯВНО (правило 5.2.1).
 
@@ -1053,6 +1144,14 @@ class App:
         self.message_content_template_path = tk.StringVar()
         self.message_out_folder = tk.StringVar()
         self.message_executor = tk.StringVar()
+
+        # Смуга прогресу генерації (спільна для всіх вкладок)
+        self.progress_value = tk.DoubleVar(value=0.0)
+        self.progress_text = tk.StringVar(value="")
+        self._progress_total = 0
+        self._progress_done = 0
+        self._progress_title = ""
+        self._progress_started_at = None
 
         # Налаштування теми
         self.current_theme = tk.StringVar(value="cosmo")
@@ -1240,6 +1339,95 @@ class App:
         self.theme_btn.config(text="🌙 Темна тема" if new_theme == "cosmo" else "☀️ Світла тема")
         self.save_config()
 
+    def _make_scrollable(self, page):
+        """Робить вкладку прокручуваною: смуга збоку + колесо миші.
+
+        Вміст вкладок вищий за вікно на звичайному ноутбуці, і нижні блоки
+        (кнопки, журнал) просто обрізались — дотягнутись до них не було чим.
+        Полотно тримає вміст, смуга збоку його гортає, а ширина внутрішньої
+        рамки завжди дорівнює ширині вкладки, щоб не з'являлась горизонтальна
+        прокрутка. Повертає рамку, в яку далі кладеться сам вміст вкладки.
+        """
+        canvas = tk.Canvas(page, highlightthickness=0, borderwidth=0)
+        scrollbar = tb.Scrollbar(page, orient=VERTICAL, command=canvas.yview)
+        content = tb.Frame(canvas, padding=10)
+
+        window_id = canvas.create_window((0, 0), window=content, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+        canvas.pack(side=LEFT, fill=BOTH, expand=True)
+        scrollbar.pack(side=RIGHT, fill=Y)
+
+        def _sync_scrollregion(_event=None):
+            canvas.configure(scrollregion=canvas.bbox("all"))
+
+        def _sync_width(event):
+            canvas.itemconfigure(window_id, width=event.width)
+
+        content.bind("<Configure>", _sync_scrollregion)
+        canvas.bind("<Configure>", _sync_width)
+
+        def _on_mousewheel(event):
+            # Списки, дерева та журнал гортають себе самі — інакше колесо
+            # прокручувало б і їх, і вкладку одночасно.
+            if isinstance(event.widget, (tk.Text, tk.Listbox, ttk.Treeview)):
+                return
+            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+        canvas.bind("<Enter>", lambda _event: canvas.bind_all("<MouseWheel>", _on_mousewheel))
+        canvas.bind("<Leave>", lambda _event: canvas.unbind_all("<MouseWheel>"))
+        return content
+
+    # -------------------------------------------------------------------------
+    # СМУГА ПРОГРЕСУ ГЕНЕРАЦІЇ
+    # -------------------------------------------------------------------------
+    def progress_begin(self, total: int, title: str) -> None:
+        """Починає показ прогресу: `total` кроків під назвою `title`."""
+        self._progress_total = max(1, int(total))
+        self._progress_done = 0
+        self._progress_title = title
+        self._progress_started_at = time.monotonic()
+        self._progress_render(f"{title}: 0 / {self._progress_total}", 0.0)
+
+    def progress_step(self, done: int, detail: str = "") -> None:
+        """Показує, що виконано `done` кроків із загальної кількості."""
+        total = getattr(self, "_progress_total", 0)
+        if not total:
+            return
+        self._progress_done = max(0, min(int(done), total))
+        title = getattr(self, "_progress_title", "Обробка")
+        caption = f"{title}: {self._progress_done} / {total}"
+        if detail:
+            caption += f" — {detail}"
+        self._progress_render(caption, 100.0 * self._progress_done / total)
+
+    def progress_end(self, detail: str = "") -> None:
+        """Завершує показ прогресу.
+
+        З підсумком (`detail`) смуга лишається заповненою — це успішне
+        завершення. Без підсумку виклик означає, що робота урвалась (виняток,
+        закритий діалог), тож смуга застигає там, де була, з поміткою.
+        """
+        total = getattr(self, "_progress_total", 0)
+        if not total:
+            return  # прогрес уже завершено успішним викликом
+        started_at = getattr(self, "_progress_started_at", None)
+        done = getattr(self, "_progress_done", 0)
+        caption = detail or "Перервано"
+        if started_at is not None:
+            caption += f" ({time.monotonic() - started_at:.0f} с)"
+        percent = 100.0 if detail else (100.0 * done / total)
+        self._progress_total = 0
+        self._progress_render(caption, percent)
+
+    def _progress_render(self, caption: str, percent: float) -> None:
+        """Малює стан смуги. Мовчить, якщо інтерфейс не побудовано (тести, e2e)."""
+        try:
+            self.progress_text.set(caption)
+            self.progress_value.set(percent)
+            self.root.update_idletasks()
+        except Exception:
+            pass
+
     def create_widgets(self):
         main_container = tb.Frame(self.root, padding=12)
         main_container.pack(fill=BOTH, expand=True)
@@ -1275,18 +1463,45 @@ class App:
         )
         self.theme_btn.pack(side=RIGHT, padx=4)
 
+        # Смуга прогресу генерації — над вкладками, щоб її було видно з будь-якої
+        # вкладки й не доводилось шукати стан у журналі.
+        self.progress_frame = tb.Frame(main_container)
+        self.progress_frame.pack(fill=X, pady=(0, 8))
+        self.progress_frame.columnconfigure(0, weight=1)
+
+        self.progress_bar = tb.Progressbar(
+            self.progress_frame,
+            variable=self.progress_value,
+            maximum=100.0,
+            bootstyle="success-striped",
+        )
+        self.progress_bar.grid(row=0, column=0, sticky="ew")
+
+        self.progress_label = tb.Label(
+            self.progress_frame,
+            textvariable=self.progress_text,
+            font=("Segoe UI", 9),
+            bootstyle="secondary",
+            width=34,
+            anchor=W,
+        )
+        self.progress_label.grid(row=0, column=1, sticky=W, padx=(8, 0))
+
         # Головні робочі вкладки
         self.notebook = tb.Notebook(main_container, bootstyle="primary")
         self.notebook.pack(fill=BOTH, expand=True)
 
-        self.tab_copies = tb.Frame(self.notebook, padding=10)
-        self.notebook.add(self.tab_copies, text="  📑 1. Примірники 2/3  ")
+        self.tab_copies_page = tb.Frame(self.notebook)
+        self.notebook.add(self.tab_copies_page, text="  📑 1. Примірники 2/3  ")
+        self.tab_copies = self._make_scrollable(self.tab_copies_page)
 
-        self.tab_extracts = tb.Frame(self.notebook, padding=10)
-        self.notebook.add(self.tab_extracts, text="  📄 2. Розрахунок та витяги  ")
+        self.tab_extracts_page = tb.Frame(self.notebook)
+        self.notebook.add(self.tab_extracts_page, text="  📄 2. Розрахунок та витяги  ")
+        self.tab_extracts = self._make_scrollable(self.tab_extracts_page)
 
-        self.tab_messages = tb.Frame(self.notebook, padding=10)
-        self.notebook.add(self.tab_messages, text="  💬 3. Повідомлення  ")
+        self.tab_messages_page = tb.Frame(self.notebook)
+        self.notebook.add(self.tab_messages_page, text="  💬 3. Повідомлення  ")
+        self.tab_messages = self._make_scrollable(self.tab_messages_page)
 
         self._build_tab_extracts()
         self._build_tab_copies()
@@ -3001,6 +3216,23 @@ class App:
             self.save_config()
 
     def _read_word_text(self, doc_path: str) -> str:
+        """Текст наказу через Word, з кешем за файлом і часом його зміни.
+
+        Запуск окремого екземпляра Word коштує близько секунди, а той самий наказ
+        читається кілька разів за сеанс: розрахунок розсилки, оновлення підписанта,
+        потім генерація витягів. Поки файл не змінився, вдруге Word не запускаємо.
+        """
+        cache = getattr(self, "_word_text_cache", None)
+        if cache is None:
+            cache = self._word_text_cache = {}
+        try:
+            stat = os.stat(doc_path)
+            cache_key = (os.path.abspath(doc_path), stat.st_mtime_ns, stat.st_size)
+        except OSError:
+            cache_key = None
+        if cache_key is not None and cache_key in cache:
+            return cache[cache_key]
+
         word = None
         doc = None
         try:
@@ -3008,7 +3240,14 @@ class App:
             word.Visible = False
             word.DisplayAlerts = 0  # wdAlertsNone: не показувати блокуючі діалоги (напр. "Зберегти зміни?")
             doc = word.Documents.Open(os.path.abspath(doc_path), ReadOnly=True)
-            return read_document_text(doc)
+            text = read_document_text(doc)
+            if cache_key is not None:
+                # Кеш свідомо маленький: тексти наказів важкі, а користь дає
+                # лише останній оброблюваний файл (і сусідні в пакеті).
+                if len(cache) >= 4:
+                    cache.clear()
+                cache[cache_key] = text
+            return text
         finally:
             try:
                 if doc:
@@ -3427,6 +3666,94 @@ class App:
             messagebox.showwarning("Результат", "Жодної військової частини за словником не знайдено.")
             return
 
+        # Склад кожного витягу з рядками наказу, з яких береться пункт. Саме тут
+        # видно причину задвоєного пункту: два записи з ОДНАКОВИМИ рядками або
+        # шапка, чиї рядки перекриваються з рядками самого пункту.
+        composition_report = os.path.join(
+            self.out_folder.get(), f"Контроль_складу_витягів_{order_base}.xlsx"
+        )
+        composition_rows = []
+        duplicate_spans = 0
+        for unit_key, unit_data in units_data.items():
+            seen_spans: dict[tuple, str] = {}
+            for unit_item in sorted(
+                unit_data.get("items", []),
+                key=lambda value: value.get("source_start_line", 10**9),
+            ):
+                span = (unit_item.get("source_start_line"), unit_item.get("source_end_line"))
+                headings = ", ".join(
+                    f"{heading[0]}–{heading[1]}"
+                    for heading in (unit_item.get("heading_ranges") or [])
+                    if isinstance(heading, (list, tuple)) and len(heading) == 2
+                )
+                note = ""
+                if span in seen_spans:
+                    note = f"ДУБЛЬ рядків із пунктом «{seen_spans[span]}»"
+                    duplicate_spans += 1
+                else:
+                    seen_spans[span] = unit_item.get("label", "")
+                composition_rows.append(
+                    (
+                        unit_key,
+                        unit_item.get("label", ""),
+                        f"{span[0]}–{span[1]}",
+                        headings or "—",
+                        (unit_item.get("text", "") or "").strip()[:120],
+                        note,
+                    )
+                )
+        _save_table_to_excel(
+            composition_report,
+            ["Витяг", "Пункт", "Рядки наказу", "Рядки шапок", "Початок тексту", "Примітка"],
+            composition_rows,
+        )
+        if duplicate_spans:
+            self.log(
+                f"УВАГА: маршрутизація віддала {duplicate_spans} пункт(ів) із тими самими "
+                f"рядками наказу — у витягу вони не задвоюються, але причину видно у файлі "
+                f"{os.path.basename(composition_report)}."
+            )
+
+        # Пункт, який зник БЕЗ СЛІДУ: його номер є в тексті наказу, але він не
+        # потрапив ні у витяги, ні в «Пропущені», ні у виключені. Так буває,
+        # коли пункт поглинула шапка розділу або сусідній пункт — тоді він
+        # узагалі не існує як окремий блок, і жоден інший контроль його не
+        # показує. Рахуємо лише «дірки» всередині наявної нумерації, щоб не
+        # чіплятися до нумерованих рядків усередині самих пунктів.
+        item_number_re = re.compile(r"^\s*(\d{1,3})\s*[.)]")
+
+        def numbers_from_labels(labels) -> set[int]:
+            found = set()
+            for label in labels:
+                match = re.search(r"(\d{1,3})", str(label))
+                if match:
+                    found.add(int(match.group(1)))
+            return found
+
+        numbers_in_text = {
+            int(match.group(1))
+            for match in (item_number_re.match(line) for line in text.splitlines())
+            if match
+        }
+        numbers_reached = numbers_from_labels(
+            [item.get("label", "") for data in units_data.values() for item in data.get("items", [])]
+            + [item.get("label", "") for item in unmatched_items]
+            + [item.get("label", "") for item in skipped_items]
+        )
+        lost_numbers = sorted(
+            number
+            for number in numbers_in_text - numbers_reached
+            if numbers_reached and number < max(numbers_reached)
+        )
+        if lost_numbers:
+            self.log(
+                "УВАГА: у тексті наказу є пункт(и) "
+                + ", ".join(str(number) for number in lost_numbers)
+                + ", але їх немає ні у витягах, ні в контрольних переліках. "
+                "Найімовірніше, такий пункт поглинула шапка розділу або сусідній "
+                f"пункт — подивіться діапазони рядків у файлі {os.path.basename(composition_report)}."
+            )
+
         template_path = os.path.abspath(self.template_path.get())
         out_file = os.path.join(
             self.out_folder.get(), build_extracts_filename(order_num, order_date)
@@ -3450,15 +3777,19 @@ class App:
         word.Visible = False
         word.DisplayAlerts = 0  # wdAlertsNone: не показувати блокуючі діалоги (напр. "Зберегти зміни?")
 
+        word_settings = tune_word_for_batch(word)
+        batch_started_at = time.monotonic()
+
         try:
             source_path = os.path.abspath(self.doc_path.get())
             source_doc = word.Documents.Open(source_path, ReadOnly=True)
 
             self.log("Індексуємо абзаци оригіналу наказу...")
-            para_count = source_doc.Paragraphs.Count
+            source_paragraphs = iter_paragraphs(source_doc)
+            para_count = len(source_paragraphs)
             source_line_to_para = []
-            for pi in range(1, para_count + 1):
-                raw = source_doc.Paragraphs(pi).Range.Text
+            for pi, source_paragraph in enumerate(source_paragraphs, start=1):
+                raw = source_paragraph.Range.Text
                 logical_lines = raw.rstrip("\r\x07").splitlines() or [""]
                 source_line_to_para.extend([pi] * len(logical_lines))
 
@@ -3478,10 +3809,11 @@ class App:
                 """Прибирає зайві «висячі» порожні абзаци в самому кінці документа,
                 щоб дотримати правило 5.3 AGENT.md: 0 порожніх абзаців наприкінці."""
                 try:
-                    idx = doc.Paragraphs.Count
-                    while idx > 1 and is_blank_paragraph(doc.Paragraphs(idx)):
-                        doc.Paragraphs(idx).Range.Delete()
-                        idx -= 1
+                    while doc.Paragraphs.Count > 1:
+                        tail_paragraph = last_paragraph(doc)
+                        if not is_blank_paragraph(tail_paragraph):
+                            break
+                        tail_paragraph.Range.Delete()
                 except Exception:
                     pass
 
@@ -3491,9 +3823,10 @@ class App:
                 Після видалення/додавання абзаців позиції зсуваються, тому
                 підписант шукається заново по непорожньому тексту після content_end_pos.
                 """
+                document_paragraphs = iter_paragraphs(doc)
                 signer_index = None
-                for paragraph_index in range(1, doc.Paragraphs.Count + 1):
-                    if doc.Paragraphs(paragraph_index).Range.Start == signer_start:
+                for paragraph_index, paragraph in enumerate(document_paragraphs, start=1):
+                    if paragraph.Range.Start == signer_start:
                         signer_index = paragraph_index
                         break
                 if signer_index is None:
@@ -3501,8 +3834,7 @@ class App:
 
                 blank_indexes = []
                 for paragraph_index in range(signer_index - 1, 0, -1):
-                    paragraph = doc.Paragraphs(paragraph_index)
-                    if not is_blank_paragraph(paragraph):
+                    if not is_blank_paragraph(document_paragraphs[paragraph_index - 1]):
                         break
                     blank_indexes.append(paragraph_index)
 
@@ -3516,11 +3848,12 @@ class App:
                     for paragraph_index in sorted(blank_indexes[2:], reverse=True):
                         doc.Paragraphs(paragraph_index).Range.Delete()
 
-                # Після видалення/вставки — позиції зсунулись, шукаємо підписанта заново
-                for paragraph_index in range(1, doc.Paragraphs.Count + 1):
-                    paragraph = doc.Paragraphs(paragraph_index).Range
-                    if paragraph.Start >= content_end_pos and not is_blank_paragraph(paragraph):
-                        return paragraph.Start
+                # Після видалення/вставки — позиції зсунулись, шукаємо підписанта
+                # заново, але лише в хвості документа після вставленого змісту.
+                for paragraph in iter_paragraphs(doc.Range(content_end_pos, doc.Content.End)):
+                    paragraph_range = paragraph.Range
+                    if paragraph_range.Start >= content_end_pos and not is_blank_paragraph(paragraph_range):
+                        return paragraph_range.Start
                 return signer_start
 
 
@@ -3535,22 +3868,66 @@ class App:
                     return []
                 return list(dict.fromkeys(source_line_to_para[start_line:end_line + 1]))
 
+            def bind_range(range_object):
+                """Зчіплює ВСІ абзаци діапазону, включно з порожніми всередині.
+
+                Word застосовує ParagraphFormat діапазону до кожного його абзацу,
+                тож це два звернення замість двох на КОЖЕН абзац.
+                """
+                pf = range_object.ParagraphFormat
+                pf.KeepTogether = True
+                pf.KeepWithNext = True
+
+            def release_last_paragraph(range_object):
+                """Знімає KeepWithNext з ОСТАННЬОГО абзацу діапазону — саме там
+                дозволено розрив сторінки (між пунктами, після ланцюга)."""
+                try:
+                    last_paragraph(range_object).Range.ParagraphFormat.KeepWithNext = False
+                except Exception:
+                    pass
+
+            def bind_span(start_position, end_position):
+                """Зчіплює діапазон, заданий позиціями."""
+                if start_position is None or end_position is None:
+                    return
+                if end_position <= start_position:
+                    return
+                bind_range(doc.Range(start_position, end_position))
+
             def apply_keep_rules(item_ranges, heading_ranges, heading_item_pairs, signer_start, executor_start=None):
-                # 1. Заголовки (шапки): зв'язуються з наступними абзацами (KeepWithNext)
-                for heading_range in heading_ranges:
-                    for pi in range(1, heading_range.Paragraphs.Count + 1):
-                        pf = heading_range.Paragraphs(pi).Range.ParagraphFormat
-                        pf.KeepTogether = True
-                        pf.KeepWithNext = True
+                # 1. Шапки (§, розділ, підрозділ) зчіплюються з ПЕРШИМ пунктом
+                # розділу — разом з порожніми абзацами між ними.
+                #
+                # Раніше KeepWithNext діставався лише абзацам самої шапки. Але
+                # після кожної шапки генератор вставляє порожній абзац, і саме
+                # він лишався без зчеплення: Word чесно тримав шапку з наступним
+                # абзацом (порожнім) і мав повне право рвати сторінку одразу за
+                # ним. Через це шапка лишалась унизу сторінки, а пункт їхав на
+                # наступну. Зчіплюємо суцільним діапазоном — так само, як це
+                # зроблено для фінального ланцюга в пункті 3 нижче.
+                #
+                # Зчіплюємо кожну шапку з тим, що стоїть ПІД нею — до початку
+                # наступного вставленого блока (це або наступний рівень шапки,
+                # або сам пункт). Так само тримається й шапка, для якої пари
+                # «шапка → пункт» не склалось: інакше вона висіла б сама.
+                blocks = [(heading_range.Start, "heading", heading_range) for heading_range in heading_ranges]
+                blocks += [(item_range.Start, "item", item_range) for item_range in item_ranges]
+                blocks.sort(key=lambda block: block[0])
+                for index, (start_position, kind, range_object) in enumerate(blocks):
+                    if kind != "heading":
+                        continue
+                    if index + 1 < len(blocks):
+                        bind_span(start_position, blocks[index + 1][0])
+                    else:
+                        bind_range(range_object)
 
                 # 2. Пункти витягу: кожен пункт цілісний
                 for item_index, item_range in enumerate(item_ranges):
-                    paragraph_count = item_range.Paragraphs.Count
-                    is_last_item = (item_index == len(item_ranges) - 1)
-                    for pi in range(1, paragraph_count + 1):
-                        pf = item_range.Paragraphs(pi).Range.ParagraphFormat
-                        pf.KeepTogether = True
-                        pf.KeepWithNext = True if is_last_item else (pi < paragraph_count)
+                    bind_range(item_range)
+                    if item_index != len(item_ranges) - 1:
+                        # Після пункту сторінку рвати можна — крім останнього
+                        # пункту, який зчеплений з підписантом (ланцюг нижче).
+                        release_last_paragraph(item_range)
 
                 # 3. Суцільний нерозривний ланцюг: [Шапка перед останнім пунктом (якщо є)] -> [Останній пункт] -> [Відступ] -> [Підписант] -> [Згідно з оригіналом]
                 # Гарантує, що шапка, останній пункт і підписант становлять неподільний блок і вміщуються разом!
@@ -3564,11 +3941,8 @@ class App:
 
                     signature_end = executor_start if executor_start is not None else doc.Content.End
                     chain_range = doc.Range(chain_start, signature_end)
-                    chain_count = chain_range.Paragraphs.Count
-                    for pi in range(1, chain_count + 1):
-                        pf = chain_range.Paragraphs(pi).Range.ParagraphFormat
-                        pf.KeepTogether = True
-                        pf.KeepWithNext = (pi < chain_count)
+                    bind_range(chain_range)
+                    release_last_paragraph(chain_range)
 
             def layout_issues(item_ranges, item_labels, heading_item_pairs, signer_start=None, executor_start=None):
                 issues = []
@@ -3614,12 +3988,14 @@ class App:
                 if bookmark_name and doc.Bookmarks.Exists(bookmark_name):
                     try:
                         b_pos = doc.Bookmarks(bookmark_name).Range.Start
-                        for pi in range(1, doc.Paragraphs.Count + 1):
-                            pr = doc.Paragraphs(pi).Range
+                        for pi, paragraph in enumerate(iter_paragraphs(doc), start=1):
+                            pr = paragraph.Range
                             if pr.Start <= b_pos < pr.End:
                                 return pi
                     except Exception:
                         pass
+
+                document_paragraphs = iter_paragraphs(doc)
 
                 # 2. За текстом виконавця (фолбек, якщо закладку втрачено)
                 exec_val = self.executor.get().strip()
@@ -3627,14 +4003,14 @@ class App:
                     lines = [ln.strip() for ln in exec_val.replace("/", "\n").splitlines() if ln.strip()]
                     if lines:
                         first_line = lines[0].lower()
-                        for pi in range(doc.Paragraphs.Count, 0, -1):
-                            pt = doc.Paragraphs(pi).Range.Text.strip().lower()
+                        for pi in range(len(document_paragraphs), 0, -1):
+                            pt = document_paragraphs[pi - 1].Range.Text.strip().lower()
                             if first_line in pt or (len(first_line) > 4 and first_line[:4] in pt):
                                 return pi
 
                 # 3. Фолбек: останній непорожній абзац у документі
-                for pi in range(doc.Paragraphs.Count, 0, -1):
-                    if not is_blank_paragraph(doc.Paragraphs(pi)):
+                for pi in range(len(document_paragraphs), 0, -1):
+                    if not is_blank_paragraph(document_paragraphs[pi - 1]):
                         return pi
                 return None
 
@@ -3647,6 +4023,49 @@ class App:
                         return None
                 return None
 
+            def executor_paragraph_start(bookmark_name):
+                """Початок АБЗАЦУ виконавця без проходу по всіх абзацах документа.
+
+                Закладка віддає позицію одразу, а `Range(pos, pos).Paragraphs(1)`
+                — її абзац. Потрібно для меж, у яких дозволено міняти інтервал:
+                блок виконавця не чіпаємо ніколи.
+                """
+                position = executor_start_from_bookmark(bookmark_name)
+                if position is None:
+                    return None
+                try:
+                    return doc.Range(position, position).Paragraphs(1).Range.Start
+                except Exception:
+                    return None
+
+            def executor_paragraph(bookmark_name=None):
+                """Абзац виконавця як ОБ'ЄКТ — із закладки, без обходу документа.
+
+                Увага: сама закладка для цього не годиться після вставок —
+                вставлений перед нею текст Word включає В НЕЇ. Тому позицію з
+                закладки беремо один раз, а далі тримаємось за абзац.
+                """
+                position = executor_start_from_bookmark(bookmark_name)
+                if position is not None:
+                    try:
+                        return doc.Range(position, position).Paragraphs(1)
+                    except Exception:
+                        pass
+                index = find_executor_paragraph_index(bookmark_name)
+                if index is None:
+                    return None
+                try:
+                    return doc.Paragraphs(index)
+                except Exception:
+                    return None
+
+            def previous_paragraph(paragraph):
+                """Попередній абзац або None (на початку документа Word кидає помилку)."""
+                try:
+                    return paragraph.Previous()
+                except Exception:
+                    return None
+
             def position_executor_at_page_bottom(bookmark_name=None, signer_start=None, needs_manual_review=False):
                 """Вирівнює виконавця до низу сторінки, окрім випадків, де це неможливо
                 без наставляння штучних порожніх абзаців — тоді лишаємо позицію зі зразка
@@ -3657,8 +4076,12 @@ class App:
                 означає, що саме область виконавця не можна коректно розмістити.
                 Єдина причина відкату — фізична неможливість (перехід на іншу сторінку),
                 що обробляється нижче в самому циклі."""
-                executor_index = find_executor_paragraph_index(bookmark_name)
-                if executor_index is None:
+                # Працюємо з АБЗАЦОМ-ОБ'ЄКТОМ, а не з його номером: `doc.Paragraphs(i)`
+                # щоразу проходить документ, а самих звернень тут десятки. Абзац
+                # Word тримає прив'язку до свого тексту навіть після вставок перед
+                # ним (перевірено), тож об'єкт лишається чинним увесь підбір.
+                executor = executor_paragraph(bookmark_name)
+                if executor is None:
                     clean_redundant_blanks()
                     return
 
@@ -3666,41 +4089,39 @@ class App:
                 # щоб мати змогу відновити цю позицію, якщо автоматичне вирівнювання
                 # донизу не вдасться виконати чисто (без переходу на іншу сторінку).
                 original_blank_count = 0
-                probe_index = executor_index - 1
-                while probe_index > 0 and is_blank_paragraph(doc.Paragraphs(probe_index)):
+                probe = previous_paragraph(executor)
+                while probe is not None and is_blank_paragraph(probe):
                     original_blank_count += 1
-                    probe_index -= 1
+                    probe = previous_paragraph(probe)
 
-                # Спочатку очищаємо всі наявні порожні абзаци безпосередньо перед виконавцем
-                while executor_index > 1 and is_blank_paragraph(doc.Paragraphs(executor_index - 1)):
-                    try:
-                        doc.Paragraphs(executor_index - 1).Range.Delete()
-                        executor_index -= 1
-                    except Exception:
-                        break
+                def drop_blanks_before_executor():
+                    """Знімає всі порожні абзаци безпосередньо перед виконавцем."""
+                    while True:
+                        previous = previous_paragraph(executor)
+                        if previous is None or not is_blank_paragraph(previous):
+                            return previous
+                        try:
+                            previous.Range.Delete()
+                        except Exception:
+                            return previous
 
-                if executor_index > 1:
+                previous_before_executor = drop_blanks_before_executor()
+                if previous_before_executor is not None:
                     try:
-                        doc.Paragraphs(executor_index - 1).Range.ParagraphFormat.KeepWithNext = False
+                        previous_before_executor.Range.ParagraphFormat.KeepWithNext = False
                     except Exception:
                         pass
 
                 clean_redundant_blanks()
                 doc.Repaginate()
 
-                def restore_sample_position(index):
+                def restore_sample_position():
                     """Відновлює рівно original_blank_count порожніх абзаців перед
                     виконавцем (позиція зі зразка) без штучного доштовхування донизу."""
-                    while index > 1 and is_blank_paragraph(doc.Paragraphs(index - 1)):
-                        try:
-                            doc.Paragraphs(index - 1).Range.Delete()
-                            index -= 1
-                        except Exception:
-                            break
-                    for _ in range(original_blank_count):
-                        pos = doc.Paragraphs(index).Range.Start
-                        doc.Range(pos, pos).InsertBefore("\r")
-                        index += 1
+                    drop_blanks_before_executor()
+                    if original_blank_count:
+                        position = executor.Range.Start
+                        doc.Range(position, position).InsertBefore("\r" * original_blank_count)
                     doc.Repaginate()
 
                 # Опускаємо виконавця до самого низу поточної сторінки.
@@ -3713,57 +4134,55 @@ class App:
                 # працює надійно: додаємо порожні абзаци, доки виконавець не
                 # перескочить на наступну сторінку, і прибираємо останню порцію —
                 # це і є найнижча позиція, яка ще вміщується на сторінці.
-                def insert_enters(count):
-                    nonlocal executor_index
-                    for _ in range(count):
-                        pos = doc.Paragraphs(executor_index).Range.Start
-                        doc.Range(pos, pos).InsertBefore("\r")
-                        executor_index += 1
+                # Кількість ентерів підбираємо ДВІЙКОВИМ пошуком: ознака
+                # «виконавець ще на своїй сторінці» монотонна (що більше
+                # ентерів, то нижче), тож замість до 38 покрокових вставок,
+                # кожна зі своїм Repaginate, вистачає ~7 вимірювань.
+                current_enters = 0
+
+                def set_enters(count):
+                    """Доводить кількість порожніх абзаців перед виконавцем до `count`."""
+                    nonlocal current_enters
+                    position = executor.Range.Start
+                    if count > current_enters:
+                        doc.Range(position, position).InsertBefore("\r" * (count - current_enters))
+                    elif count < current_enters:
+                        # Кожен доданий порожній абзац — рівно один символ,
+                        # тож зайві знімаємо одним діапазоном, а не по одному.
+                        delta = current_enters - count
+                        doc.Range(max(0, position - delta), position).Delete()
+                    current_enters = count
                     doc.Repaginate()
 
-                def remove_enters(count):
-                    nonlocal executor_index
-                    removed = 0
-                    while (
-                        removed < count
-                        and executor_index > 1
-                        and is_blank_paragraph(doc.Paragraphs(executor_index - 1))
-                    ):
-                        doc.Paragraphs(executor_index - 1).Range.Delete()
-                        executor_index -= 1
-                        removed += 1
-                    doc.Repaginate()
+                def executor_still_on_page(count, start_page):
+                    set_enters(count)
+                    return page_of(executor.Range.Start) == start_page
 
                 try:
-                    start_page = page_of(doc.Paragraphs(executor_index).Range.Start)
+                    start_page = page_of(executor.Range.Start)
                     if start_page is None:
                         self.log(f"  ⚠️ {cipher}: не вдалося визначити сторінку виконавця — лишено як у зразку.")
                     else:
-                        added = 0
-                        # Фаза 1 — грубе наближення порціями по 4 абзаци
-                        # (щоб не робити десятки повільних Repaginate).
-                        for _ in range(30):
-                            insert_enters(4)
-                            added += 4
-                            if page_of(doc.Paragraphs(executor_index).Range.Start) != start_page:
-                                remove_enters(4)
-                                added -= 4
-                                break
-                        # Фаза 2 — точне доведення по одному абзацу.
-                        for _ in range(8):
-                            insert_enters(1)
-                            added += 1
-                            if page_of(doc.Paragraphs(executor_index).Range.Start) != start_page:
-                                remove_enters(1)
-                                added -= 1
-                                break
-                        self.log(f"  ↧ {cipher}: виконавця опущено вниз сторінки (+{added} ентер(ів)).")
+                        # fits — найбільша кількість ентерів, яка ще тримає
+                        # виконавця на його сторінці; overflow — перша, яка вже ні.
+                        fits, overflow = 0, 80
+                        if executor_still_on_page(overflow, start_page):
+                            fits = overflow
+                        else:
+                            while overflow - fits > 1:
+                                middle = (fits + overflow) // 2
+                                if executor_still_on_page(middle, start_page):
+                                    fits = middle
+                                else:
+                                    overflow = middle
+                            set_enters(fits)
+                        self.log(f"  ↧ {cipher}: виконавця опущено вниз сторінки (+{fits} ентер(ів)).")
                 except Exception as exec_error:
                     self.log(f"  ⚠️ {cipher}: помилка опускання виконавця: {exec_error}")
                     try:
                         # Повертаємо відступ зі зразка, щоб не лишити виконавця
                         # без жодного порожнього абзацу після невдалої спроби.
-                        restore_sample_position(executor_index)
+                        restore_sample_position()
                     except Exception:
                         pass
 
@@ -3786,8 +4205,11 @@ class App:
                 re.IGNORECASE,
             )
 
+            self.progress_begin(len(units_data) + 1, "Витяги")
             for idx, (cipher, data) in enumerate(units_data.items()):
                 self.log(f"[{idx+1}/{len(units_data)}] Генеруємо витяг для: {cipher}")
+                self.progress_step(idx, cipher)
+                extract_started_at = time.monotonic()
 
                 extract_needs_manual_review = False
                 # Початок вставленого змісту: усе, що ВИЩЕ цієї позиції (герб,
@@ -3802,9 +4224,19 @@ class App:
                     template_path, os.path.join(temp_dir, f"extract_{idx:04d}.docx")
                 )
                 doc = word.Documents.Open(os.path.abspath(temp_path), ReadOnly=False)
+                # Текст шаблону читаємо один раз: більшості з тих двох десятків
+                # тегів у конкретному зразку немає (різні регістри «кому/КОМУ»,
+                # окремі теги засвідчувача), а порожній пошук Word коштує
+                # дорожче, ніж це читання.
+                try:
+                    template_text = str(doc.Content.Text or "").casefold()
+                except Exception:
+                    template_text = None
 
                 def replace_tag(tag, replacement_text, document=doc, collect_paragraphs=False,
                                highlight_red=False, bold_pattern=None):
+                    if template_text is not None and tag.casefold() not in template_text:
+                        return []
                     replaced_paragraphs = []
                     find_obj = document.Content.Find
                     find_obj.Text = tag
@@ -3850,19 +4282,34 @@ class App:
                         "{{підписант_звання}}",
                         "{{підписант_піб}}",
                     )
-                    paragraph_index = doc.Paragraphs.Count
-                    while paragraph_index >= 1:
-                        paragraph = doc.Paragraphs(paragraph_index).Range
-                        paragraph_text = str(paragraph.Text or "")
-                        if any(tag.casefold() in paragraph_text.casefold() for tag in signer_tags):
+                    # У зразку без цих тегів обходити абзаци нема сенсу.
+                    if template_text is not None and not any(
+                        tag.casefold() in template_text for tag in signer_tags
+                    ):
+                        return
+                    # Спершу збираємо абзаци-кандидати одним проходом, потім
+                    # видаляємо з кінця: після видалення рядка таблиці номери
+                    # абзаців зсуваються, а самі об'єкти лишаються чинними.
+                    doomed = [
+                        paragraph
+                        for paragraph in iter_paragraphs(doc)
+                        if any(
+                            tag.casefold() in str(paragraph.Range.Text or "").casefold()
+                            for tag in signer_tags
+                        )
+                    ]
+                    for paragraph in reversed(doomed):
+                        paragraph_range = paragraph.Range
+                        try:
+                            if paragraph_range.Information(12):  # wdWithInTable
+                                paragraph_range.Cells(1).Row.Delete()
+                            else:
+                                paragraph_range.Delete()
+                        except Exception:
                             try:
-                                if paragraph.Information(12):  # wdWithInTable
-                                    paragraph.Cells(1).Row.Delete()
-                                else:
-                                    paragraph.Delete()
+                                paragraph_range.Text = ""
                             except Exception:
-                                paragraph.Text = ""
-                        paragraph_index = min(paragraph_index - 1, doc.Paragraphs.Count)
+                                pass
 
                 rec_to_val = data.get("recipient_to") or cipher
                 dest_where_val = (data.get("destination_where") or "").strip()
@@ -3946,54 +4393,132 @@ class App:
                         doc.Range(insert_point, insert_point).InsertBefore("\r")
                         insert_point += 1
 
+                    def source_runs(paragraph_indexes):
+                        """Ділить абзаци наказу на суцільні прогони для копіювання.
+
+                        Розрив прогону робить лише РУЧНИЙ розрив сторінки в наказі:
+                        такий абзац у витяг не переноситься, пагінація будується
+                        заново. Наявність розриву перевіряємо одним читанням тексту
+                        всього діапазону, а поабзацно — тільки якщо він там справді є.
+                        """
+                        if not paragraph_indexes:
+                            return []
+                        span_text = ""
+                        try:
+                            span_text = str(
+                                source_doc.Range(
+                                    source_paragraphs[paragraph_indexes[0] - 1].Range.Start,
+                                    source_paragraphs[paragraph_indexes[-1] - 1].Range.End,
+                                ).Text
+                                or ""
+                            )
+                        except Exception:
+                            span_text = "\x0c"  # не вдалося прочитати — перевіряємо поабзацно
+                        if "\x0c" not in span_text:
+                            return [list(paragraph_indexes)]
+
+                        runs, current = [], []
+                        for paragraph_index in paragraph_indexes:
+                            if has_manual_page_break(source_paragraphs[paragraph_index - 1]):
+                                self.log("Пропущено вихідний розрив сторінки; пагінація витягу буде побудована заново.")
+                                if current:
+                                    runs.append(current)
+                                    current = []
+                                continue
+                            current.append(paragraph_index)
+                        if current:
+                            runs.append(current)
+                        return runs
+
+                    def carry_geometry(source_range, run, start, end):
+                        """Переносить геометрію абзаців наказу на вставлений діапазон.
+
+                        Геометрію переносимо ЯВНО, а не покладаємось на FormattedText:
+                        Word не записує властивість, яка дорівнює типовій (Alignment=Left,
+                        FirstLineIndent=0), і такий абзац у витягу успадковував стиль
+                        `Normal` ШАБЛОНА. Якщо в шаблоні стоїть «за шириною» та відступ
+                        1.25 см — біографічний блок наказу (left 8 см, перший рядок 0,
+                        уліво) з'їжджав і розтягувався по ширині, і так само «плив» §.
+                        `ParagraphFormat` діапазону віддає ДІЮЧІ значення наказу.
+
+                        Для прогону з однаковою геометрією вистачає одного
+                        `ParagraphFormat` на весь діапазон. Якщо всередині геометрія
+                        різна, Word віддає wdUndefined — тоді переносимо поабзацно.
+                        """
+                        geometry_props = ("Alignment", "LeftIndent", "RightIndent", "FirstLineIndent")
+
+                        def read_geometry(range_object):
+                            source_format = range_object.ParagraphFormat
+                            values = {}
+                            for prop in geometry_props:
+                                try:
+                                    values[prop] = getattr(source_format, prop)
+                                except Exception:
+                                    pass
+                            return values
+
+                        def write_geometry(range_object, values):
+                            dest_format = range_object.ParagraphFormat
+                            try:
+                                dest_format.PageBreakBefore = False
+                            except Exception:
+                                pass
+                            for prop, value in values.items():
+                                try:
+                                    setattr(dest_format, prop, value)
+                                except Exception:
+                                    pass
+
+                        geometry = read_geometry(source_range)
+                        if all(value != WD_UNDEFINED for value in geometry.values()):
+                            write_geometry(doc.Range(start, end), geometry)
+                            return
+
+                        destination_paragraphs = iter_paragraphs(doc.Range(start, end))
+                        if len(destination_paragraphs) != len(run):
+                            # Кількість абзаців не збіглася (таблиця, зноска):
+                            # безпечніше взяти геометрію першого абзацу прогону.
+                            write_geometry(
+                                doc.Range(start, end),
+                                read_geometry(source_paragraphs[run[0] - 1].Range),
+                            )
+                            return
+                        for paragraph_index, destination_paragraph in zip(run, destination_paragraphs):
+                            write_geometry(
+                                destination_paragraph.Range,
+                                read_geometry(source_paragraphs[paragraph_index - 1].Range),
+                            )
+
                     def insert_source_span(start_line, end_line, fallback_text, kind):
                         nonlocal insert_point
                         paragraph_indexes = line_span_to_paragraphs(start_line, end_line)
+                        # Абзаци наказу беремо з готового списку: наказ відкрито
+                        # лише для читання й не змінюється, тож індекси стабільні,
+                        # а кожне `source_doc.Paragraphs(i)` — це прохід по всьому
+                        # документу заново.
                         # Обрізаємо порожні абзаци на початку та в кінці діапазону, але зберігаємо внутрішні ентери
-                        while paragraph_indexes and is_blank_paragraph(source_doc.Paragraphs(paragraph_indexes[0])):
+                        while paragraph_indexes and is_blank_paragraph(source_paragraphs[paragraph_indexes[0] - 1]):
                             paragraph_indexes.pop(0)
-                        while paragraph_indexes and is_blank_paragraph(source_doc.Paragraphs(paragraph_indexes[-1])):
+                        while paragraph_indexes and is_blank_paragraph(source_paragraphs[paragraph_indexes[-1] - 1]):
                             paragraph_indexes.pop()
 
                         first_start = None
                         last_end = None
-                        for paragraph_index in paragraph_indexes:
-                            source_paragraph = source_doc.Paragraphs(paragraph_index)
-
-                            if has_manual_page_break(source_paragraph):
-                                self.log("Пропущено вихідний розрив сторінки; пагінація витягу буде побудована заново.")
-                                continue
-                            source_range = source_paragraph.Range.Duplicate
+                        # Копіюємо не по абзацу, а СУЦІЛЬНИМИ прогонами. Одне
+                        # звернення до Word коштує кілька мілісекунд, а на абзац
+                        # їх виходило близько п'ятнадцяти; до того ж поабзацне
+                        # копіювання не відтворює таблиці. Прогін рветься лише
+                        # там, де в наказі стоїть ручний розрив сторінки.
+                        for run in source_runs(paragraph_indexes):
+                            source_range = source_doc.Range(
+                                source_paragraphs[run[0] - 1].Range.Start,
+                                source_paragraphs[run[-1] - 1].Range.End,
+                            )
                             start = insert_point
                             destination_range = doc.Range(start, start)
                             destination_range.FormattedText = source_range.FormattedText
                             insert_point = destination_range.End
-
-                            # Геометрію переносимо ЯВНО, а не покладаємось на
-                            # FormattedText. Word не записує властивість, яка
-                            # дорівнює типовій (Alignment=Left, FirstLineIndent=0),
-                            # тому такий абзац у витягу успадковував стиль
-                            # `Normal` ШАБЛОНА. Якщо в шаблоні стоїть «за
-                            # шириною» та відступ 1.25 см — біографічний блок
-                            # наказу (left 8 см, перший рядок 0, уліво) з'їжджав
-                            # і розтягувався по ширині, і так само «плив» § .
-                            # ParagraphFormat діапазону віддає ДІЮЧІ значення,
-                            # тож так витяг повторює наказ незалежно від шаблону.
-                            source_format = source_paragraph.Range.ParagraphFormat
-                            geometry = {}
-                            for prop in ("Alignment", "LeftIndent", "RightIndent", "FirstLineIndent"):
-                                try:
-                                    geometry[prop] = getattr(source_format, prop)
-                                except Exception:
-                                    pass
-                            for dest_pi in range(1, doc.Range(start, insert_point).Paragraphs.Count + 1):
-                                dest_format = doc.Range(start, insert_point).Paragraphs(dest_pi).Range.ParagraphFormat
-                                dest_format.PageBreakBefore = False
-                                for prop, value in geometry.items():
-                                    try:
-                                        setattr(dest_format, prop, value)
-                                    except Exception:
-                                        pass
+                            carry_geometry(source_range, run, start, insert_point)
                             first_start = start if first_start is None else first_start
                             last_end = insert_point
 
@@ -4007,7 +4532,52 @@ class App:
                             first_start, last_end = start, insert_point
                         return doc.Range(first_start, last_end) if first_start is not None else None
 
+                    # Один і той самий шматок наказу не переноситься у витяг
+                    # двічі — ні як пункт, ні як шапка. Маршрутизація може
+                    # віддати той самий діапазон рядків двічі (наприклад, коли
+                    # пункт потрапив у два різні § або коли шапка обчислилась
+                    # по рядках самого пункту) — тоді у витягу з'являвся той
+                    # самий пункт двома копіями поспіль.
+                    inserted_source_spans = set()
+
+                    def span_already_inserted(start_line, end_line):
+                        # Пункт без відомих рядків наказу (вставляється резервним
+                        # текстом) дублем НЕ вважається: у таких пунктів «діапазон»
+                        # однаковий — (None, None), — і другий та наступні такі
+                        # пункти мовчки випадали б із витягу.
+                        if start_line is None or end_line is None:
+                            return False
+                        return (start_line, end_line) in inserted_source_spans
+
+                    def heading_repeats_item(heading_span, item_span):
+                        """Чи є «шапка» насправді тим самим текстом, що й пункт.
+
+                        Дотик рівно одним рядком (шапка закінчується там, де
+                        починається пункт) — нормальний випадок: цей рядок майже
+                        завжди порожній і при вставці однаково обрізається.
+                        Дублювання — це коли шапка ЗАХОДИТЬ у пункт.
+                        """
+                        if None in heading_span or None in item_span:
+                            return False
+                        return heading_span[1] > item_span[0] or heading_span[0] >= item_span[0]
+
                     for item in items:
+                        item_span = (item.get("source_start_line"), item.get("source_end_line"))
+                        item_label = item.get("label", "пункт")
+
+                        # Перевірку на дубль робимо ДО вставки шапок: інакше
+                        # шапка вже стоїть у документі, а пункт під нею
+                        # пропускається — і § лишається висіти сам, без нічого,
+                        # з чим його можна зчепити.
+                        if span_already_inserted(item_span[0], item_span[1]):
+                            message = (
+                                f"{item_label}: цей самий фрагмент наказу (рядки "
+                                f"{item_span[0]}–{item_span[1]}) уже перенесено — пропущено як дубль."
+                            )
+                            self.log(f"  ⚠️ {cipher}: {message}")
+                            layout_warnings.append(f"{cipher}: {message}")
+                            continue
+
                         heading_keys = tuple(
                             (heading_range[0], heading_range[1])
                             for heading_range in item.get("heading_ranges", [])
@@ -4019,6 +4589,22 @@ class App:
                             fallback_key = (item.get("heading_start_line"), item.get("heading_end_line"))
                             if all(value is not None for value in fallback_key):
                                 heading_keys = (fallback_key,)
+
+                        # Шапка, що перекривається з власним пунктом, — це не
+                        # шапка: інакше текст пункту вставився б двічі поспіль.
+                        kept_heading_keys = tuple(
+                            heading_key for heading_key in heading_keys
+                            if not heading_repeats_item(heading_key, item_span)
+                        )
+                        if kept_heading_keys != heading_keys:
+                            message = (
+                                f"{item_label}: шапка заходить у рядки самого пункту "
+                                f"(шапка {heading_keys}, пункт {item_span[0]}–{item_span[1]}) — "
+                                "шапку не переносимо, щоб не задвоїти пункт."
+                            )
+                            self.log(f"  ⚠️ {cipher}: {message}")
+                            layout_warnings.append(f"{cipher}: {message}")
+                        heading_keys = kept_heading_keys
 
                         new_heading_ranges = []
                         if heading_keys != copied_heading_keys:
@@ -4035,10 +4621,13 @@ class App:
                             ):
                                 common_len += 1
                             for heading_key in heading_keys[common_len:]:
+                                if span_already_inserted(heading_key[0], heading_key[1]):
+                                    continue
                                 heading_range = insert_source_span(
                                     heading_key[0], heading_key[1], item.get("parent_heading", ""), "заголовка"
                                 )
                                 if heading_range:
+                                    inserted_source_spans.add((heading_key[0], heading_key[1]))
                                     inserted_heading_ranges.append(heading_range)
                                     new_heading_ranges.append(heading_range)
                                     # §, основна шапка та підшапка — окремі
@@ -4051,8 +4640,8 @@ class App:
                             item.get("original_text") or item.get("text", ""), "пункту"
                         )
                         if item_range:
+                            inserted_source_spans.add(item_span)
                             inserted_item_ranges.append(item_range)
-                            item_label = item.get("label", "пункт")
                             inserted_item_labels.append(item_label)
                             heading_item_pairs.extend(
                                 (heading_range, item_range, item_label)
@@ -4110,132 +4699,159 @@ class App:
                     під текстом."""
                     if content_start_pos is None:
                         return None, None
-                    upper = doc.Content.End
-                    exec_idx = find_executor_paragraph_index(executor_bookmark)
-                    if exec_idx:
-                        try:
-                            upper = doc.Paragraphs(exec_idx).Range.Start
-                        except Exception:
-                            upper = doc.Content.End
+                    # Межу беремо із закладки виконавця — це одне звернення до
+                    # Word. Пошук абзацу перебором лишаємо фолбеком: ці межі
+                    # рахуються на кожне виставлення інтервалу.
+                    upper = executor_paragraph_start(executor_bookmark)
+                    if upper is None:
+                        upper = doc.Content.End
+                        exec_idx = find_executor_paragraph_index(executor_bookmark)
+                        if exec_idx:
+                            try:
+                                upper = doc.Paragraphs(exec_idx).Range.Start
+                            except Exception:
+                                upper = doc.Content.End
                     return content_start_pos, upper
 
-                def apply_exact_line_spacing(points, blanks_too=True):
-                    """Виставляє точний міжрядковий інтервал (wdLineSpaceExactly) в pt
-                    виключно на абзаци вставленого змісту та підписанта."""
+                def apply_exact_line_spacing(points):
+                    """Точний міжрядковий інтервал (wdLineSpaceExactly) на весь
+                    вставлений зміст і підписанта — ОДНИМ діапазоном.
+
+                    Раніше тут був обхід усіх абзаців документа з ~10 зверненнями
+                    до Word на кожен. Оскільки інтервал перебирається, це давало
+                    тисячі викликів COM на кожен витяг. Word сам застосовує
+                    ParagraphFormat до всіх абзаців діапазону.
+
+                    Порожні абзаци отримують той самий інтервал, що й текст:
+                    правило «максимально заповнена сторінка» стосується всієї
+                    сторінки, а різна висота порожніх рядків давала різні
+                    відступи між пунктами в сусідніх витягах одного наказу.
+                    """
                     lower, upper = spacing_bounds()
-                    if lower is None:
+                    if lower is None or upper is None or upper <= lower:
                         return
-                    for p_idx in range(1, doc.Paragraphs.Count + 1):
-                        p = doc.Paragraphs(p_idx)
-                        p_range = p.Range
-                        if p_range.Start < lower or p_range.Start >= upper:
-                            continue
-                        # Абзац із вбудованим зображенням ніколи не отримує точний
-                        # інтервал — інакше Word обріже картинку.
+                    target = doc.Range(lower, upper)
+                    # Абзац із вбудованим зображенням точного інтервалу не
+                    # отримує — інакше Word обріже картинку по висоті рядка.
+                    # Запам'ятовуємо їхні інтервали й повертаємо після заміни.
+                    protected = []
+                    try:
+                        for shape in target.InlineShapes:
+                            shape_format = shape.Range.Paragraphs(1).Range.ParagraphFormat
+                            protected.append(
+                                (shape_format, shape_format.LineSpacingRule, shape_format.LineSpacing)
+                            )
+                    except Exception:
+                        protected = []
+                    target_format = target.ParagraphFormat
+                    target_format.LineSpacingRule = 4  # wdLineSpaceExactly
+                    target_format.LineSpacing = points
+                    target_format.SpaceBefore = 0
+                    target_format.SpaceAfter = 0
+                    for shape_format, shape_rule, shape_spacing in protected:
                         try:
-                            if p_range.InlineShapes.Count > 0:
-                                continue
+                            shape_format.LineSpacingRule = shape_rule
+                            shape_format.LineSpacing = shape_spacing
                         except Exception:
                             pass
-                        if not blanks_too and is_blank_paragraph(p):
-                            continue
-                        p_fmt = p_range.ParagraphFormat
-                        p_fmt.LineSpacingRule = 4  # wdLineSpaceExactly
-                        p_fmt.LineSpacing = points
-                        p_fmt.SpaceBefore = 0
-                        p_fmt.SpaceAfter = 0
 
-                # 1. Автопідбір для вміщення на 1 сторінку: якщо через невеликий
-                # перебір вийшло 2 сторінки, шукаємо в діапазоні 16 → 14 пт
-                # (точний міжрядковий інтервал, крок 0.5 пт) найбільше значення,
-                # що ще вміщує весь витяг на 1 сторінку — замість жорсткого
-                # одинарного інтервалу, який не завжди рятує.
-                if pages_count == 2:
-                    clean_redundant_blanks()
-                    fitted_spacing = None
-                    spacing = 16.0
-                    while spacing >= 14.0 - 1e-6:
-                        apply_exact_line_spacing(spacing)
-                        doc.Repaginate()
-                        if doc.ComputeStatistics(2) == 1:
-                            fitted_spacing = spacing
-                            break
-                        spacing -= 0.5
-                    if fitted_spacing is not None:
-                        pages_count = 1
-                        self.log(f"  ℹ️ {cipher}: точний інтервал {fitted_spacing} пт — вміщено на 1 сторінку.")
-                    else:
-                        # Навіть 14 пт не допомогло — це реальний перебір контенту,
-                        # лишаємо 2 сторінки (потребує уваги, а не силового стиснення).
-                        apply_exact_line_spacing(16.0)
-                        doc.Repaginate()
-                        pages_count = doc.ComputeStatistics(2)
+                # ПІДБІР МІЖРЯДКОВОГО ІНТЕРВАЛУ — один пошук замість трьох.
+                #
+                # Було три послідовні перебори: 16→14 з кроком 0.5 «щоб влізло на
+                # сторінку», потім ще один такий самий для багатосторінкових, потім
+                # 16→14 з кроком 0.25 «щоб сторінка була заповнена». Вони міряли
+                # ті самі значення й разом давали до 14 репагінацій на витяг.
+                #
+                # Обидві ознаки монотонні: що менший інтервал, то менше сторінок і
+                # то більше пунктів вміщується на першу. Тому мета одна — НАЙБІЛЬШИЙ
+                # інтервал, що дає мінімальну кількість сторінок і максимум пунктів
+                # на першій сторінці. Для витягу на одну сторінку це і є «максимально
+                # заповнена сторінка», для багатосторінкового — колишній «бонус».
+                if content_start_pos is not None:
+                    spacing_max, spacing_min, spacing_step = 16.0, 14.0, 0.25
+                    spacing_grid = [
+                        round(spacing_max - index * spacing_step, 2)
+                        for index in range(int(round((spacing_max - spacing_min) / spacing_step)) + 1)
+                    ]
+                    applied_spacing = None
+                    spacing_measurements: dict[float, tuple[int, int]] = {}
 
-                # 1б. БОНУС для БАГАТОСТОРІНКОВИХ витягів: не змінюючи кількості
-                # сторінок, добираємо інтервал так, щоб на ПЕРШУ сторінку сіло
-                # якнайбільше пунктів. Без цього інтервал лишався 16 пт —
-                # найбільший, — і на першій сторінці часто стояв один пункт,
-                # тоді як 2, 3, 4, 5 разом вміщувалися на другій. Кількість
-                # сторінок не погіршуємо ніколи: це саме бонус, а не стиснення.
-                if pages_count > 1 and inserted_item_ranges:
+                    def items_fitting_first_page():
+                        """Скільки пунктів ПОВНІСТЮ вміщується на першу сторінку.
 
-                    def items_on_first_page():
-                        count = 0
-                        for candidate in inserted_item_ranges:
-                            start_page, end_page = range_pages(candidate)
+                        Пункти йдуть у порядку документа, тож межу шукаємо двійково:
+                        інакше на кожне вимірювання інтервалу припадало по два
+                        звернення `Information` на КОЖЕН пункт.
+                        """
+                        if not inserted_item_ranges:
+                            return 0
+                        low, high = 0, len(inserted_item_ranges)
+                        while low < high:
+                            middle = (low + high) // 2
+                            start_page, end_page = range_pages(inserted_item_ranges[middle])
                             if start_page == 1 and end_page == 1:
-                                count += 1
-                        return count
+                                low = middle + 1
+                            else:
+                                high = middle
+                        return low
 
-                    best_pages = pages_count
-                    best_on_first = items_on_first_page()
-                    best_multi_spacing = 16.0
-                    spacing = 16.0 - 0.5
-                    while spacing >= 14.0 - 1e-6:
-                        apply_exact_line_spacing(spacing)
-                        doc.Repaginate()
-                        pages_now = doc.ComputeStatistics(2)
-                        if pages_now <= best_pages:
-                            on_first = items_on_first_page()
-                            if pages_now < best_pages or on_first > best_on_first:
-                                best_pages = pages_now
-                                best_on_first = on_first
-                                best_multi_spacing = spacing
-                        spacing -= 0.5
-                    apply_exact_line_spacing(best_multi_spacing)
-                    doc.Repaginate()
-                    pages_count = doc.ComputeStatistics(2)
-                    if best_multi_spacing != 16.0:
+                    def measure_spacing(points):
+                        """(сторінок, пунктів на першій) для інтервалу; стан документа
+                        після виклику завжди відповідає виміряному значенню."""
+                        nonlocal applied_spacing
+                        if applied_spacing != points:
+                            apply_exact_line_spacing(points)
+                            doc.Repaginate()
+                            applied_spacing = points
+                        if points not in spacing_measurements:
+                            pages = doc.ComputeStatistics(2)  # wdStatisticPages
+                            # На одній сторінці лічити нема чого: там усі пункти.
+                            # Кожне звернення до номера сторінки коштує дорого.
+                            spacing_measurements[points] = (
+                                pages,
+                                len(inserted_item_ranges) if pages <= 1 else items_fitting_first_page(),
+                            )
+                        return spacing_measurements[points]
+
+                    best_possible = measure_spacing(spacing_min)
+                    chosen_spacing = spacing_min
+                    if measure_spacing(spacing_max) == best_possible:
+                        # Стискати нема сенсу: найбільший інтервал дає той самий
+                        # результат, що й найменший.
+                        chosen_spacing = spacing_max
+                    else:
+                        low, high = 0, len(spacing_grid) - 1  # high (14.0) свідомо годиться
+                        while low < high:
+                            middle = (low + high) // 2
+                            if measure_spacing(spacing_grid[middle]) == best_possible:
+                                high = middle
+                            else:
+                                low = middle + 1
+                        chosen_spacing = spacing_grid[low]
+                        if measure_spacing(chosen_spacing) != best_possible:
+                            # Підстраховка на випадок, коли верстка Word виявилась
+                            # немонотонною: повертаємось до гарантованого значення.
+                            chosen_spacing = spacing_min
+                            measure_spacing(chosen_spacing)
+
+                    pages_count, items_on_first = spacing_measurements[chosen_spacing]
+                    if chosen_spacing != spacing_max:
                         self.log(
-                            f"  ℹ️ {cipher}: інтервал {best_multi_spacing} пт — на першій "
-                            f"сторінці пунктів: {best_on_first} (сторінок: {pages_count})."
+                            f"  ℹ️ {cipher}: точний інтервал {chosen_spacing} пт — "
+                            f"сторінок: {pages_count}, пунктів на першій: {items_on_first}."
                         )
 
-                # 2. Правило «Максимально заповнена сторінка»: якщо витяг вміщується
-                # на 1 сторінці, шукаємо в тому самому діапазоні 14 → 16 пт
-                # НАЙБІЛЬШЕ значення точного інтервалу, що все ще утримує весь
-                # вміст на 1 сторінці — для максимального гармонійного заповнення
-                # (замість фіксованого +2 пт, який на практиці не заповнював сторінку).
-                if pages_count == 1:
-                    best_spacing = None
-                    spacing = 16.0
-                    while spacing >= 14.0 - 1e-6:
-                        apply_exact_line_spacing(spacing, blanks_too=False)
-                        doc.Repaginate()
-                        if doc.ComputeStatistics(2) == 1:
-                            best_spacing = spacing
-                            break
-                        spacing -= 0.25
-                    if best_spacing is None:
-                        apply_exact_line_spacing(14.0, blanks_too=False)
-                        doc.Repaginate()
-
-                # 3. Остаточна перевірка макета — ПІСЛЯ підбору міжрядкового
+                # 2. Остаточна перевірка макета — ПІСЛЯ підбору міжрядкового
                 # інтервалу (16→14 пт), який часто сам усуває розбіжність
                 # (відірвану шапку, перебір на 2 сторінки тощо). Лише якщо
                 # проблема лишається й після цього — витяг справді потребує
                 # ручної перевірки, і виконавця НЕ підштовхуємо штучно.
-                if inserted_item_ranges:
+                #
+                # Витяг на ОДНІЙ сторінці не перевіряємо взагалі: жоден пункт не
+                # може її не вміститись, ніщо не може відірватись від шапки, і
+                # підписант завжди там само. А кожна така перевірка — це два
+                # запити номера сторінки на кожен пункт і кожну шапку.
+                if inserted_item_ranges and pages_count > 1:
                     remaining_issues = layout_issues(
                         inserted_item_ranges, inserted_item_labels, heading_item_pairs, signer_start, executor_start
                     )
@@ -4244,7 +4860,7 @@ class App:
                     if remaining_issues:
                         extract_needs_manual_review = True
 
-                # 4. Виконавець ЗАВЖДИ вирівнюється строго до низу поточної сторінки,
+                # 3. Виконавець ЗАВЖДИ вирівнюється строго до низу поточної сторінки,
                 # окрім випадків, де це вимагає ручних змін (див. position_executor_at_page_bottom)
                 position_executor_at_page_bottom(executor_bookmark, signer_start, extract_needs_manual_review)
                 doc.Repaginate()
@@ -4260,10 +4876,15 @@ class App:
                 doc.Save()
                 doc.Close(False)
                 temp_files.append((temp_path, pages_count, cipher))
+                self.log(
+                    f"  ✓ {cipher}: {pages_count} стор., "
+                    f"{time.monotonic() - extract_started_at:.1f} с."
+                )
 
             source_doc.Close(False)
 
             # Збираємо всі витяги в один фінальний документ
+            self.progress_step(len(temp_files), "складання документа")
             self.log(f"\nЗбираємо {len(temp_files)} витягів в один документ...")
             enable_2up = self.duplex_2up_layout.get()
 
@@ -4287,7 +4908,15 @@ class App:
                 target_doc = word.Documents.Open(os.path.abspath(first_path))
 
                 def sheet_pages() -> int:
-                    """ФАКТИЧНА кількість сторінок зібраного документа."""
+                    """ФАКТИЧНА кількість сторінок зібраного документа.
+
+                    Вимір потрібен лише для друку «2 на 1»: там від парності
+                    залежить, на яку половину аркуша сяде наступний витяг. Без
+                    цього режиму репагінувати документ, що росте, після кожної
+                    вставки — це квадратична робота ні для чого.
+                    """
+                    if not enable_2up:
+                        return 0
                     target_doc.Repaginate()
                     return target_doc.ComputeStatistics(2)  # wdStatisticPages
 
@@ -4306,13 +4935,11 @@ class App:
                     витягу — навмисні порожні сторінки чіпати не можна.
                     """
                     try:
-                        index = target_doc.Paragraphs.Count
-                        while index > 1:
-                            paragraph = target_doc.Paragraphs(index).Range
+                        while target_doc.Paragraphs.Count > 1:
+                            paragraph = last_paragraph(target_doc).Range
                             if (paragraph.Text or "").strip(chr(13) + chr(7) + chr(11) + chr(12) + chr(32) + chr(9)):
                                 break
                             paragraph.Delete()
-                            index = min(index - 1, target_doc.Paragraphs.Count)
                     except Exception:
                         pass
 
@@ -4359,9 +4986,10 @@ class App:
 
                     # Скільки сторінок витяг займає САМЕ В ЗІБРАНОМУ документі.
                     # Окремим файлом він міг мати іншу кількість, і саме довіра
-                    # до тієї, старої, ламала вирівнювання.
-                    actual_pages = max(1, current_doc_pages - pages_before)
-                    if actual_pages != t_pages:
+                    # до тієї, старої, ламала вирівнювання. Без режиму «2 на 1»
+                    # зібраний документ не міряємо, тож беремо кількість файлу.
+                    actual_pages = max(1, current_doc_pages - pages_before) if enable_2up else t_pages
+                    if enable_2up and actual_pages != t_pages:
                         self.log(
                             f"УВАГА: витяг {t_cipher} у зібраному документі займає "
                             f"{actual_pages} стор. замість {t_pages}; вирівнювання "
@@ -4379,7 +5007,7 @@ class App:
                             f"{t_cipher} ({actual_pages} стор.) для вирівнювання наступного аркуша."
                         )
 
-                last_para = target_doc.Paragraphs(target_doc.Paragraphs.Count)
+                last_para = last_paragraph(target_doc)
                 if last_para.Range.Text.strip() == "":
                     last_para.Range.Delete()
 
@@ -4430,7 +5058,13 @@ class App:
                 )
             stats_msg = chr(10).join([stats_msg] + missed_lines)
 
+            batch_seconds = time.monotonic() - batch_started_at
+            self.progress_end(f"Витягів: {total_extracts}")
             self.log(f"Збережено файл: {out_file}")
+            self.log(
+                f"⏱️ Час генерації: {batch_seconds:.1f} с "
+                f"({batch_seconds / max(1, total_extracts):.1f} с на витяг)."
+            )
             self.log(f"\n📊 СТАТИСТИКА ТА РОЗРАХУНОК ДРУКУ:\n{stats_msg}\n")
             self.show_layout_warnings(layout_warnings)
 
@@ -4454,6 +5088,11 @@ class App:
             if os.path.exists(temp_dir):
                 shutil.rmtree(temp_dir, ignore_errors=True)
 
+            # Налаштування повертаємо ДО показу вікна: з вимкненим ScreenUpdating
+            # видимий Word не перемальовується й виглядає зависшим.
+            restore_word_settings(word, word_settings)
+            word_settings = None
+
             self.log("Відкриваємо згенерований документ...")
             final_doc = word.Documents.Open(os.path.abspath(out_file))
             word.Visible = True
@@ -4461,9 +5100,11 @@ class App:
             word = None
 
         finally:
+            self.progress_end()
             if os.path.exists(temp_dir):
                 shutil.rmtree(temp_dir, ignore_errors=True)
             if word:
+                restore_word_settings(word, word_settings)
                 force_quit_word(word)
 
     # =========================================================================

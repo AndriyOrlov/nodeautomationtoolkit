@@ -595,8 +595,12 @@ _RECRUITING_CENTER_9_RE = re.compile(
 )
 
 
+# Слово «територіальний» у наказі часто пропускають: «ХМЕЛЬНИЦЬКОГО ОБЛАСНОГО
+# ЦЕНТРУ КОМПЛЕКТУВАННЯ ТА СОЦІАЛЬНОЇ ПІДТРИМКИ» — без нього. Через це пункт
+# не знаходив адресата ЗОВСІМ і потрапляв у «Пропущені». Ядро назви —
+# «центр комплектування», воно й лишається обовʼязковим.
 _TCK_KEYWORDS_RE = re.compile(
-    r"(?:територіальн\w*\s+центр\w*\s+комплектування\w*|ТЦК\w*|РТЦК\w*|МТЦК\w*|ОТЦК\w*)",
+    r"(?:(?:територіальн\w*\s+)?центр\w*\s+комплектування\w*|ТЦК\w*|РТЦК\w*|МТЦК\w*|ОТЦК\w*)",
     re.IGNORECASE | re.UNICODE,
 )
 
@@ -1495,8 +1499,24 @@ def map_military_units(
                         heading_segments[-1][1] = abs_idx
             continue
 
+        # Підшапка-підстава звільнення не завжди закінчується двокрапкою:
+        # «У ВІДСТАВКУ ЗА ПІДПУНКТОМ “б” (… про непридатність до військової
+        # служби).» закінчується КРАПКОЮ. Такий рядок не впізнавався як
+        # підшапка, поглинався сусіднім блоком і друкувався у витягу НЕ на
+        # своєму місці — «підшапка переміщалася вниз». Пункт із власною
+        # підставою сюди не потрапляє: він починається з номера.
+        is_discharge_subheading = (
+            _is_inline_discharge_basis(clean_search)
+            and _starts_a_new_heading(clean_search)
+        )
         is_section_marker = clean_search.startswith("§") or (
-            ("відповідно до" in clean_search.casefold() or "згідно з" in clean_search.casefold() or clean_search.endswith(":") or "ВІЙСЬКОВОСЛУЖБОВЦІВ" in clean_search.upper())
+            (
+                "відповідно до" in clean_search.casefold()
+                or "згідно з" in clean_search.casefold()
+                or clean_search.endswith(":")
+                or "ВІЙСЬКОВОСЛУЖБОВЦІВ" in clean_search.upper()
+                or is_discharge_subheading
+            )
             and not re.match(r"^\d+[\.\d]*", clean_search)
             and not clean_search.casefold().startswith("підстава")
         )
@@ -1718,7 +1738,14 @@ def map_military_units(
                         if sec_tck_route:
                             kudy_units.add(sec_tck_route)
 
-            # 2. Знаходимо ВЧ напрямку ЗВІДКИ (або загальну ВЧ у шапці)
+            # 2. Знаходимо ВЧ напрямку ЗВІДКИ (або загальну ВЧ у шапці).
+            #
+            # Шапка може називати КІЛЬКА частин: «По військовій частині А1111 та
+            # військовій частині А2222:». Раніше цикл зупинявся на першій
+            # знайденій (`break`), тож пункти під такою шапкою йшли лише в ОДИН
+            # витяг — причому в який саме, залежало від порядку рядків у
+            # словнику, тому виглядало випадковим. Напрямок КУДИ вище збирає всі
+            # збіги; тут робимо так само.
             zvidky_units: set[tuple[str, str]] = set()
             for open_name, closed_code, corps_col, sender_key, pattern in unit_patterns:
                 m = pattern.search(section_search_text)
@@ -1728,7 +1755,6 @@ def map_military_units(
                     is_tck_entry = "тцк" in low_open or "територіальн" in low_open or "центр" in low_open
                     target_name = sender_key if is_tck_entry else (corps_col if (corps_col and ("корпус" in matched_str.lower() or "ак" in matched_str.lower())) else open_name)
                     zvidky_units.add((sender_key, target_name))
-                    break
 
             sec_units = zvidky_units | kudy_units
             if sec_units:

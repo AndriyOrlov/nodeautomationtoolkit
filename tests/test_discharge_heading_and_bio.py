@@ -136,3 +136,103 @@ def test_registration_line_is_not_biographical():
 )
 def test_new_heading_is_told_apart_from_a_wrapped_fragment(line, expected):
     assert _starts_a_new_heading(line) is expected
+
+
+# ── Підшапка-підстава, що закінчується КРАПКОЮ, а не двокрапкою ──────────────
+_SUB_COLON = "У ЗАПАС ЗА ПІДПУНКТОМ “б” (за станом здоровʼя – за наявності інвалідності):"
+_SUB_PERIOD = (
+    "У ВІДСТАВКУ ЗА ПІДПУНКТОМ “б” (за станом здоровʼя – на підставі висновку "
+    "(постанови) військово-лікарської комісії про непридатність до військової служби)."
+)
+_DISCHARGE_ITEM = (
+    "7. Капітана ТЕСТЕНКА Тараса Тарасовича, інженера 1 окремого тестового загону."
+)
+
+
+def _routes_for(subheadings):
+    order = (
+        "§ 1\n"
+        + HEAD_LINE_1 + "\n"
+        + HEAD_LINE_2 + "\n\n"
+        + "\n\n".join(subheadings) + "\n\n"
+        + _DISCHARGE_ITEM + "\nНародився 10 січня 1973 року.\n987654321.\n"
+        + SIGNER
+    )
+    routes = map_military_units(text=order, mapping=MAPPING)
+    entry = next(iter(routes["unit_paragraphs"].values()))
+    return entry["items"][0]
+
+
+@pytest.mark.parametrize(
+    "subheading",
+    [_SUB_COLON, _SUB_PERIOD],
+    ids=["закінчується-двокрапкою", "закінчується-крапкою"],
+)
+def test_discharge_subheading_is_a_heading_however_it_ends(subheading):
+    """Підстава звільнення не завжди закінчується двокрапкою.
+
+    «У ВІДСТАВКУ ЗА ПІДПУНКТОМ “б” (… до військової служби).» закінчується
+    КРАПКОЮ. Такий рядок не впізнавався як підшапка, поглинався сусіднім
+    блоком і друкувався у витягу не на своєму місці — «підшапка переміщалася
+    вниз», а поруч із нею лишалася чужа, вже неактуальна підстава.
+    """
+    item = _routes_for([subheading])
+
+    assert len(item["heading_ranges"]) == 3, item["heading_ranges"]
+    assert subheading[:24] in item["parent_heading"]
+
+
+def test_neighbouring_discharge_subheadings_replace_each_other():
+    """Дві підстави поспіль — у витяг іде ЛИШЕ остання.
+
+    Інакше у витягу стояли обидві, і незрозуміло, за яким саме підпунктом
+    звільнено. Друга підстава тут закінчується крапкою — саме той випадок,
+    що ламався.
+    """
+    item = _routes_for([_SUB_COLON, _SUB_PERIOD])
+    heading = item["parent_heading"]
+
+    assert "У ЗАПАС" not in heading, heading
+    assert "У ВІДСТАВКУ" in heading
+    assert len(item["heading_ranges"]) == 3, item["heading_ranges"]
+
+
+# ── Підстава НАСТУПНОЇ групи не має приліплюватися до попереднього пункту ────
+_NEXT_BASIS_SPLIT = [
+    "У ЗАПАС ЗА ПІДПУНКТОМ “г” (через сімейні обставини або з інших поважних",
+    "причин, перелік яких визначається частиною дванадцятою цієї статті (якщо",
+    "військовослужбовці не висловили бажання продовжувати військову службу) –",
+    "перебування на утриманні у військовослужбовця трьох і більше дітей):",
+]
+
+
+def test_next_group_basis_does_not_leak_into_the_previous_item():
+    """Підстава наступної групи стоїть ПІСЛЯ пункту й розірвана переносом.
+
+    Її перший уламок не закінчується двокрапкою, тому раніше він не вважався
+    підшапкою, поглинався попереднім пунктом — і у витягу під пунктом стояла
+    ЧУЖА, вже наступна підстава.
+    """
+    order = (
+        "§ 2\n"
+        + HEAD_LINE_1 + "\n"
+        + HEAD_LINE_2 + "\n\n"
+        + SUBHEADING + "\n\n"
+        + "13. Підполковника ТЕСТЕНКА Тараса Тарасовича, начальника четвертого "
+          "відділу 1 окремого тестового загону.\n"
+          "Народився 19 червня 1991 року.\n987654321.\n\n"
+        + "\n".join(_NEXT_BASIS_SPLIT) + "\n\n"
+        + "14. Майора ІНШЕНКА Івана Івановича, офіцера 1 окремого тестового загону.\n"
+        + SIGNER
+    )
+    routes = map_military_units(text=order, mapping=MAPPING)
+    items = {
+        str(item["label"]).strip(): item
+        for entry in routes["unit_paragraphs"].values()
+        for item in entry["items"]
+    }
+
+    thirteenth = "\n".join(items["Пункт 13."].get("lines", []))
+    assert "ПІДПУНКТОМ “г”" not in thirteenth, thirteenth
+    assert "ПІДПУНКТОМ “б”" in items["Пункт 13."]["parent_heading"]
+    assert "ПІДПУНКТОМ “г”" in items["Пункт 14."]["parent_heading"]
