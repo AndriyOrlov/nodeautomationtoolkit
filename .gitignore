@@ -13,3 +13,9 @@ dist/
 .idea/
 .vscode/
 
+
+# Node dependencies of the Office add-in
+node_modules/
+
+# Local working settings: real names, unit ciphers and personal paths
+config.json
