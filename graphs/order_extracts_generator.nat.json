@@ -1,0 +1,181 @@
+{
+  "format": "nodeautomationtoolkit",
+  "version": 1,
+  "name": "Генерація витягів з наказу та закритих наказів",
+  "nodes": [
+    {
+      "id": "start",
+      "type_id": "builtin.flow.start",
+      "x": -900,
+      "y": 0,
+      "parameters": {},
+      "dynamic_outputs": {}
+    },
+    {
+      "id": "read-mapping",
+      "type_id": "builtin.order.read_recipient_mapping",
+      "x": -900,
+      "y": 180,
+      "parameters": {
+        "path": "samples/sample_recipient_mapping.xlsx"
+      },
+      "dynamic_outputs": {}
+    },
+    {
+      "id": "read-order",
+      "type_id": "builtin.word.read_docx",
+      "x": -600,
+      "y": 0,
+      "parameters": {
+        "path": "samples/sample_open_order.docx"
+      },
+      "dynamic_outputs": {}
+    },
+    {
+      "id": "map-senders",
+      "type_id": "builtin.order.map_military_units",
+      "x": -320,
+      "y": 0,
+      "parameters": {},
+      "dynamic_outputs": {}
+    },
+    {
+      "id": "generate-extracts",
+      "type_id": "builtin.order_batch.create_unit_extracts",
+      "x": -40,
+      "y": -100,
+      "parameters": {
+        "output_folder": "output/extracts"
+      },
+      "dynamic_outputs": {}
+    },
+    {
+      "id": "generate-decision",
+      "type_id": "builtin.word.generate_decision_order_docx",
+      "x": -40,
+      "y": 100,
+      "parameters": {
+        "output_path": "output/decision_order.docx",
+        "new_header": "НАКАЗ командира військової частини А0000 (по стройовій частині)",
+        "replace_unit_phrases": true
+      },
+      "dynamic_outputs": {}
+    },
+    {
+      "id": "group-ciphers",
+      "type_id": "builtin.order.groups_to_ciphers",
+      "x": 240,
+      "y": -100,
+      "parameters": {},
+      "dynamic_outputs": {}
+    },
+    {
+      "id": "show-report",
+      "type_id": "builtin.output.show_table",
+      "x": 520,
+      "y": -100,
+      "parameters": {},
+      "dynamic_outputs": {}
+    }
+  ],
+  "connections": [
+    {
+      "source_node": "start",
+      "source_port": "then",
+      "target_node": "read-order",
+      "target_port": "exec",
+      "kind": "execution"
+    },
+    {
+      "source_node": "read-order",
+      "source_port": "then",
+      "target_node": "map-senders",
+      "target_port": "exec",
+      "kind": "execution"
+    },
+    {
+      "source_node": "map-senders",
+      "source_port": "then",
+      "target_node": "generate-extracts",
+      "target_port": "exec",
+      "kind": "execution"
+    },
+    {
+      "source_node": "map-senders",
+      "source_port": "then",
+      "target_node": "generate-decision",
+      "target_port": "exec",
+      "kind": "execution"
+    },
+    {
+      "source_node": "generate-extracts",
+      "source_port": "then",
+      "target_node": "group-ciphers",
+      "target_port": "exec",
+      "kind": "execution"
+    },
+    {
+      "source_node": "group-ciphers",
+      "source_port": "then",
+      "target_node": "show-report",
+      "target_port": "exec",
+      "kind": "execution"
+    },
+    {
+      "source_node": "read-mapping",
+      "source_port": "mapping",
+      "target_node": "map-senders",
+      "target_port": "mapping",
+      "kind": "data"
+    },
+    {
+      "source_node": "read-mapping",
+      "source_port": "mapping",
+      "target_node": "generate-decision",
+      "target_port": "mapping",
+      "kind": "data"
+    },
+    {
+      "source_node": "read-mapping",
+      "source_port": "mapping",
+      "target_node": "group-ciphers",
+      "target_port": "mapping",
+      "kind": "data"
+    },
+    {
+      "source_node": "read-order",
+      "source_port": "text",
+      "target_node": "map-senders",
+      "target_port": "text",
+      "kind": "data"
+    },
+    {
+      "source_node": "read-order",
+      "source_port": "path",
+      "target_node": "generate-decision",
+      "target_port": "path",
+      "kind": "data"
+    },
+    {
+      "source_node": "map-senders",
+      "source_port": "unit_paragraphs",
+      "target_node": "generate-extracts",
+      "target_port": "unit_paragraphs",
+      "kind": "data"
+    },
+    {
+      "source_node": "map-senders",
+      "source_port": "unit_paragraphs",
+      "target_node": "group-ciphers",
+      "target_port": "groups",
+      "kind": "data"
+    },
+    {
+      "source_node": "group-ciphers",
+      "source_port": "report",
+      "target_node": "show-report",
+      "target_port": "table",
+      "kind": "data"
+    }
+  ]
+}

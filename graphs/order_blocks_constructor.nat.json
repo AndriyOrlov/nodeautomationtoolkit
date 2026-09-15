@@ -1,0 +1,180 @@
+{
+  "format": "nodeautomationtoolkit",
+  "version": 1,
+  "name": "Конструктор блоків наказу (закритий наказ)",
+  "nodes": [
+    {
+      "id": "start",
+      "type_id": "builtin.flow.start",
+      "x": -900,
+      "y": 0,
+      "parameters": {},
+      "dynamic_outputs": {}
+    },
+    {
+      "id": "pick-order-file",
+      "type_id": "builtin.windows.open_file",
+      "x": -900,
+      "y": 200,
+      "parameters": {
+        "title": "Виберіть відкритий наказ (.docx)",
+        "file_filter": "Документи Word (*.docx)",
+        "initial_folder": ""
+      },
+      "dynamic_outputs": {}
+    },
+    {
+      "id": "read-order",
+      "type_id": "builtin.word.read_docx",
+      "x": -620,
+      "y": 160,
+      "parameters": {},
+      "dynamic_outputs": {}
+    },
+    {
+      "id": "pick-mapping-file",
+      "type_id": "builtin.windows.open_file",
+      "x": -620,
+      "y": 380,
+      "parameters": {
+        "title": "Виберіть таблицю ВЧ (.xlsx/.csv)",
+        "file_filter": "Таблиці (*.xlsx *.csv)",
+        "initial_folder": ""
+      },
+      "dynamic_outputs": {}
+    },
+    {
+      "id": "read-mapping",
+      "type_id": "builtin.order.read_recipient_mapping",
+      "x": -340,
+      "y": 360,
+      "parameters": {},
+      "dynamic_outputs": {}
+    },
+    {
+      "id": "parse-blocks",
+      "type_id": "builtin.order.parse_to_blocks",
+      "x": -340,
+      "y": 160,
+      "parameters": {},
+      "dynamic_outputs": {}
+    },
+    {
+      "id": "transform-blocks",
+      "type_id": "builtin.order.filter_transform_blocks",
+      "x": -60,
+      "y": 160,
+      "parameters": {
+        "replace_unit_phrases": true
+      },
+      "dynamic_outputs": {}
+    },
+    {
+      "id": "assemble-order",
+      "type_id": "builtin.order.assemble_from_blocks",
+      "x": 220,
+      "y": 160,
+      "parameters": {
+        "new_header": "НАКАЗ командира військової частини А0000 (по стройовій частині)",
+        "separator": "\n\n"
+      },
+      "dynamic_outputs": {}
+    },
+    {
+      "id": "show-result",
+      "type_id": "builtin.output.show_result",
+      "x": 500,
+      "y": 160,
+      "parameters": {
+        "title": "Сформований закритий наказ про прийняття рішень"
+      },
+      "dynamic_outputs": {}
+    }
+  ],
+  "connections": [
+    {
+      "source_node": "start",
+      "source_port": "then",
+      "target_node": "read-order",
+      "target_port": "exec",
+      "kind": "execution"
+    },
+    {
+      "source_node": "read-order",
+      "source_port": "then",
+      "target_node": "parse-blocks",
+      "target_port": "exec",
+      "kind": "execution"
+    },
+    {
+      "source_node": "parse-blocks",
+      "source_port": "then",
+      "target_node": "transform-blocks",
+      "target_port": "exec",
+      "kind": "execution"
+    },
+    {
+      "source_node": "transform-blocks",
+      "source_port": "then",
+      "target_node": "assemble-order",
+      "target_port": "exec",
+      "kind": "execution"
+    },
+    {
+      "source_node": "assemble-order",
+      "source_port": "then",
+      "target_node": "show-result",
+      "target_port": "exec",
+      "kind": "execution"
+    },
+    {
+      "source_node": "pick-order-file",
+      "source_port": "result",
+      "target_node": "read-order",
+      "target_port": "path",
+      "kind": "data"
+    },
+    {
+      "source_node": "read-order",
+      "source_port": "text",
+      "target_node": "parse-blocks",
+      "target_port": "text",
+      "kind": "data"
+    },
+    {
+      "source_node": "pick-mapping-file",
+      "source_port": "result",
+      "target_node": "read-mapping",
+      "target_port": "path",
+      "kind": "data"
+    },
+    {
+      "source_node": "read-mapping",
+      "source_port": "mapping",
+      "target_node": "transform-blocks",
+      "target_port": "mapping",
+      "kind": "data"
+    },
+    {
+      "source_node": "parse-blocks",
+      "source_port": "blocks",
+      "target_node": "transform-blocks",
+      "target_port": "blocks",
+      "kind": "data"
+    },
+    {
+      "source_node": "transform-blocks",
+      "source_port": "blocks",
+      "target_node": "assemble-order",
+      "target_port": "blocks",
+      "kind": "data"
+    },
+    {
+      "source_node": "assemble-order",
+      "source_port": "text",
+      "target_node": "show-result",
+      "target_port": "value",
+      "kind": "data"
+    }
+  ]
+}

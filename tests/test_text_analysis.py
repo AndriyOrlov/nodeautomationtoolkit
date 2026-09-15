@@ -1,7 +1,9 @@
 from nodeautomationtoolkit.builtin_nodes.text_analysis import (
+    UKRAINIAN_MONTH_NUMBERS,
     extract_order_fields,
     find_in_text,
     group_items_by_markers,
+    parse_ukrainian_month,
     replace_in_text,
     split_order_blocks,
 )
@@ -93,3 +95,23 @@ def test_marker_in_action_header_applies_to_following_items():
     assert "3. Третій пункт" not in grouped["groups"]["АЛЬФА"]
     assert "ПРИЗНАЧИТИ до БРАВО" in grouped["groups"]["БРАВО"]
     assert "3. Третій пункт" in grouped["groups"]["БРАВО"]
+
+
+def test_ukrainian_months_database():
+    assert UKRAINIAN_MONTH_NUMBERS["січня"] == 1
+    assert UKRAINIAN_MONTH_NUMBERS["лютого"] == 2
+    assert UKRAINIAN_MONTH_NUMBERS["березня"] == 3
+    assert UKRAINIAN_MONTH_NUMBERS["квітня"] == 4
+    assert UKRAINIAN_MONTH_NUMBERS["травня"] == 5
+    assert UKRAINIAN_MONTH_NUMBERS["червня"] == 6
+    assert UKRAINIAN_MONTH_NUMBERS["липня"] == 7
+    assert UKRAINIAN_MONTH_NUMBERS["серпня"] == 8
+    assert UKRAINIAN_MONTH_NUMBERS["вересня"] == 9
+    assert UKRAINIAN_MONTH_NUMBERS["жовтня"] == 10
+    assert UKRAINIAN_MONTH_NUMBERS["листопада"] == 11
+    assert UKRAINIAN_MONTH_NUMBERS["грудня"] == 12
+
+    assert parse_ukrainian_month("серпня") == 8
+    assert parse_ukrainian_month("липня") == 7
+    assert parse_ukrainian_month("Січень") == 1
+    assert parse_ukrainian_month("груд.") == 12

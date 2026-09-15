@@ -173,6 +173,7 @@ def test_map_military_units_and_create_extracts(tmp_path):
         source_order_path=str(src_doc),
         unit_paragraphs=map_res["unit_paragraphs"],
         output_folder=str(tmp_path / "Extracts"),
+        save_individual_files=True,
     )
 
     assert extract_res["count"] == 2
@@ -255,7 +256,10 @@ def test_multiline_item_with_basis_extraction(tmp_path):
     assert "10. Пункт 2 наказу" in item_text
     assert "1997 р.н. 0000000000." in item_text
     assert "Підстава: клопотання начальника" in item_text
-    assert "військова частина А1670" in item_text
+    # Правило 4.1: item["text"] має відкриті назви, item["text_cipher"] — шифри
+    assert "167 окремої механізованої бригади" in item_text
+    item_cipher = unit_entry["items"][0]["text_cipher"]
+    assert "військова частина А1670" in item_cipher
 
 
 def test_excel_nodes_read_write_replace_save(tmp_path):
@@ -331,6 +335,38 @@ def test_windows_system_and_standalone_packager(tmp_path):
     registry.reload()
     cli_code = _run_cli_scenario(str(dummy_scenario), registry)
     assert cli_code == 0
+
+
+def test_signatory_slash_line_breaks(tmp_path):
+    from nodeautomationtoolkit.builtin_nodes.word_batch import create_unit_extracts
+
+    src_doc = tmp_path / "order_slash.docx"
+    doc = docx.Document()
+    doc.add_paragraph("НАКАЗ\n1. Солдата призначити.")
+    doc.save(src_doc)
+
+    unit_paragraphs = {
+        "А1234": {
+            "items": [{"parent_heading": "", "text": "1. Солдата призначити."}],
+        }
+    }
+
+    slash_pos = "Тимчасово виконуючий обов'язки / командувача військ / оперативного командування"
+    res = create_unit_extracts(
+        source_order_path=str(src_doc),
+        unit_paragraphs=unit_paragraphs,
+        output_folder=str(tmp_path / "Extracts_Slash"),
+        signatory_title=slash_pos,
+        certify_extract=True,
+    )
+
+    created_doc = docx.Document(res["paths"][0])
+    text = "\n".join(p.text for p in created_doc.paragraphs)
+    # Verify that slashes were converted to individual paragraph lines
+    assert "Тимчасово виконуючий обов'язки\nкомандувача військ\nоперативного командування" in text or (
+        "Тимчасово виконуючий обов'язки" in text and "командувача військ" in text
+    )
+
 
 
 

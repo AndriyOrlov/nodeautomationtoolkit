@@ -13,6 +13,32 @@ _MAIN = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
 _REL = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
 _PKG_REL = "http://schemas.openxmlformats.org/package/2006/relationships"
 
+# Друкується Tkinter-генератором у журнал, щоб одразу було видно, що після
+# перезапуску завантажено актуальний вихідний модуль, а не старий процес/EXE.
+ROUTING_VERSION = "2026-09-15-v13-glued-item-numbers"
+
+_ORDER_SIGNER_START_RE = re.compile(
+    r"^\s*(?:т\.?\s*в\.?\s*о\.?|тимчасово\s+виконуюч(?:ий|а)?|"
+    r"командувач|командир|начальник|заступник\s+командувача)\b",
+    re.IGNORECASE | re.UNICODE,
+)
+
+_DISCHARGE_BASIS_RE = re.compile(
+    r"У\s+ЗАПАС|ДО\s+ЗАПАСУ|У\s+ВІДСТАВКУ|ЗА\s+ПІДПУНКТ",
+    re.IGNORECASE | re.UNICODE,
+)
+
+
+def _is_inline_discharge_basis(text: str) -> bool:
+    """Чи містить рядок власну підставу звільнення (У ЗАПАС / ЗА ПІДПУНКТОМ...).
+
+    Використовується, щоб не приліплювати до пункту зовнішню підшапку
+    розділу («У ЗАПАС ЗА ПІДПУНКТОМ …:»), якщо пункт сам повністю
+    формулює свою підставу звільнення у власному тексті (правило 4
+    AGENT.md — підстава належить тексту пункту, а не окремій підшапці).
+    """
+    return bool(_DISCHARGE_BASIS_RE.search(text))
+
 
 def _cell_column(reference: str) -> int:
     letters = re.match(r"[A-Z]+", reference.upper())
@@ -23,6 +49,27 @@ def _cell_column(reference: str) -> int:
 
 
 def _read_xlsx(path: Path, sheet_name: str = "") -> list[list[str]]:
+    """Читає XLSX за допомогою openpyxl (з data_only=True для обчислення значень формул)."""
+    try:
+        import openpyxl
+
+        wb = openpyxl.load_workbook(str(path), data_only=True, read_only=True)
+        if sheet_name and sheet_name in wb.sheetnames:
+            ws = wb[sheet_name]
+        else:
+            ws = wb.active
+        rows: list[list[str]] = []
+        for r in ws.iter_rows(values_only=True):
+            row_vals = [str(c).strip() if c is not None else "" for c in r]
+            if any(row_vals):
+                rows.append(row_vals)
+        wb.close()
+        if rows:
+            return rows
+    except Exception:
+        pass
+
+    # Резервний прямий XML парсер (якщо openpyxl відсутній)
     with zipfile.ZipFile(path) as package:
         shared: list[str] = []
         if "xl/sharedStrings.xml" in package.namelist():
@@ -62,10 +109,11 @@ def _read_xlsx(path: Path, sheet_name: str = "") -> list[list[str]]:
                 else:
                     element = cell.find(f"{{{_MAIN}}}v")
                     value = element.text if element is not None and element.text else ""
-                    if kind == "s" and value:
+                    if kind == "s" and value and value.isdigit() and int(value) < len(shared):
                         value = shared[int(value)]
                 values[column] = value.strip()
-            rows.append(values)
+            if any(values):
+                rows.append(values)
         return rows
 
 
@@ -85,7 +133,7 @@ def _read_rows(path: Path, sheet_name: str = "") -> list[list[str]]:
     category="Наказ",
     description=(
         "Читає CSV/XLSX таблицю за колонками A (Відкрита назва), B (Закрите найменування / в/ч), "
-        "C (Скорочення), D (Корпус). Якщо колонка D вказана — відправником є Корпус; якщо порожня — частина."
+        "C (Скорочення), D (Корпус), E (Кому / Адресат), F (Куди / Дислокація / Місто)."
     ),
     type_id="builtin.order.read_recipient_mapping",
     execution_inputs=("exec",),
@@ -106,10 +154,10 @@ def read_recipient_mapping(
     if not rows:
         raise ValueError("Таблиця порожня")
 
-    # ── Визначаємо індекси колонок або позиційний доступ A, B, C, D, E ──────────
+    # ── Визначаємо індекси колонок або позиційний доступ A, B, C, D, E, F ──────────
     header_index = -1
     col_a_idx, col_b_idx = 0, 1
-    col_c_idx, col_d_idx, col_e_idx = -1, -1, -1
+    col_c_idx, col_d_idx, col_e_idx, col_f_idx = -1, -1, -1, -1
     has_explicit_abbreviation = False
 
     for index, row in enumerate(rows[:10]):
@@ -117,20 +165,31 @@ def read_recipient_mapping(
         if any("відкрит" in k or "найменування" in k for k in row_norm) or any("шифр" in k for k in row_norm):
             header_index = index
             for k, i in row_norm.items():
-                if "відкрит" in k or "назва" in k or "найменування" in k:
+                if "відкрит" in k or ("назва" in k and "закрит" not in k and "скороч" not in k):
                     col_a_idx = i
-                elif "шифр" in k or "закрит" in k:
+                elif "шифр" in k or "закрит" in k or "в/ч" in k or "вч" in k:
                     col_b_idx = i
                 elif "скороч" in k or "абрев" in k:
                     col_c_idx = i
                     has_explicit_abbreviation = True
-                elif "корпус" in k:
+                elif "корпус" in k or k == "ак":
                     col_d_idx = i
-                elif "дислокац" in k or "адрес" in k or "витяг" in k or "куди" in k:
+                elif "кому" in k or "адресат" in k or "отримувач" in k:
                     col_e_idx = i
+                elif "куди" in k or "дислокац" in k or "адрес" in k or "місто" in k:
+                    col_f_idx = i
             break
 
     data_rows = rows[header_index + 1 :] if header_index >= 0 else rows
+
+    # Визначаємо глобальну структуру таблиці
+    max_cols = max((len(r) for r in data_rows), default=0)
+    is_6_col_format = max_cols >= 5 or col_e_idx >= 0 or col_f_idx >= 0 or col_d_idx >= 0
+
+    c_pos = col_c_idx if col_c_idx >= 0 else 2
+    d_pos = col_d_idx if col_d_idx >= 0 else 3
+    e_pos = col_e_idx if col_e_idx >= 0 else 4
+    f_pos = col_f_idx if col_f_idx >= 0 else 5
 
     mapping: dict[str, dict[str, str]] = {}
     table_rows = []
@@ -138,46 +197,55 @@ def read_recipient_mapping(
     for row in data_rows:
         if not any(row):
             continue
-        open_name = row[col_a_idx].strip() if col_a_idx < len(row) else ""
-        cipher = row[col_b_idx].strip() if col_b_idx < len(row) else ""
+        prow = [str(cell or "").strip() for cell in row]
+        while len(prow) < 10:
+            prow.append("")
 
-        # Якщо таблиця має 4+ колонок (A, B, C, D, E):
-        if len(row) >= 4 or has_explicit_abbreviation:
-            c_pos = col_c_idx if col_c_idx >= 0 else 2
-            d_pos = col_d_idx if col_d_idx >= 0 else 3
-            e_pos = col_e_idx if col_e_idx >= 0 else 4
-            abbreviation = row[c_pos].strip() if c_pos < len(row) else ""
-            corps = row[d_pos].strip() if d_pos < len(row) else ""
-            dislocation = row[e_pos].strip() if e_pos < len(row) else ""
-            destination = dislocation if dislocation else (corps if corps else (cipher or open_name))
-        else:
+        open_name = prow[col_a_idx if col_a_idx >= 0 else 0]
+        cipher = prow[col_b_idx if col_b_idx >= 0 else 1]
+
+        if not is_6_col_format and len(row) <= 3 and col_c_idx < 0:
             abbreviation = ""
             corps = ""
-            dislocation = ""
-            destination = row[2].strip() if len(row) > 2 else (cipher or open_name)
+            recipient_to = ""
+            destination_where = prow[2]
+        elif not is_6_col_format and len(row) == 4 and col_c_idx < 0 and col_d_idx < 0:
+            abbreviation = prow[2]
+            corps = prow[3]
+            recipient_to = ""
+            destination_where = ""
+        else:
+            abbreviation = prow[c_pos] if c_pos != f_pos and c_pos != e_pos else ""
+            corps = prow[d_pos] if d_pos != f_pos and d_pos != e_pos else ""
+            recipient_to = prow[e_pos]
+            destination_where = prow[f_pos]
 
-        if not cipher and not abbreviation and not corps and not dislocation:
+        if not cipher and not abbreviation and not corps and not recipient_to and not destination_where:
             continue
+        # Стовпець A — єдине поле пошуку. Інші стовпці містять лише дані,
+        # які використовуються після того, як відповідний рядок уже знайдено.
         if not open_name:
-            open_name = abbreviation or cipher
+            continue
+
+        destination = destination_where if destination_where else (recipient_to if recipient_to else (corps if corps else (cipher or open_name)))
 
         entry = {
             "open_name": open_name,
             "cipher": cipher or open_name,
             "abbreviation": abbreviation,
             "corps": corps,  # Якщо D порожнє -> "", відправник сама частина!
-            "dislocation": dislocation,  # Колонка E: Дислокація / куди направляти у витяги
+            "recipient_to": recipient_to,  # Колонка E: Кому (адресат)
+            "destination_where": destination_where,  # Колонка F: Куди (дислокація / місто)
+            "dislocation": destination_where or recipient_to,
             "destination": destination,
         }
 
         mapping[open_name] = entry
-        if abbreviation and abbreviation != open_name:
-            mapping[abbreviation] = entry
 
-        table_rows.append((open_name, cipher, abbreviation, corps, dislocation or destination))
+        table_rows.append((open_name, cipher, abbreviation, corps, recipient_to, destination_where))
 
     table = DataTable(
-        ("Відкрита назва (A)", "Закрите найменування (B)", "Скорочення (C)", "Корпус (D)", "Дислокація / Куди направляти (E)"),
+        ("Відкрита назва (A)", "Закрите найменування (B)", "Скорочення (C)", "Корпус (D)", "Кому (E)", "Куди (F)"),
         tuple(table_rows),
         "Таблиця відповідностей ВЧ",
     )
@@ -186,6 +254,11 @@ def read_recipient_mapping(
         "markers": list(mapping),
         "table": table,
         "count": len(table_rows),
+        # Доказ того, який саме файл був прочитаний у цьому запуску. Дані
+        # словника ніде не кешуються: кожен виклик знову читає цей файл з диска.
+        "source_path": str(source.resolve()),
+        "source_modified_ns": source.stat().st_mtime_ns,
+        "source_size": source.stat().st_size,
     }
 
 
@@ -328,6 +401,56 @@ def _stem_ukrainian_word(word: str) -> str:
     return w
 
 
+# «о»/«е» в останньому складі зникає при відмінюванні: вузол → вузла,
+# орел → орла, вітер → вітру. Шаблон, побудований лише з називного відмінка
+# (стовпець A), через це не знаходив ЖОДНОЇ відмінкової форми такої назви.
+_FLEETING_VOWEL_RE = re.compile(
+    r"(?<=[бвгджзклмнпрстфхцчшщ])[ое]([лкнрцтвбмдгжчшщ])$"
+)
+
+
+def _stem_variants(stem: str) -> list[str]:
+    """Стем плюс варіант із випадним голосним.
+
+    Додатковий варіант лише РОЗШИРЮЄ пошук: для назв без чергування
+    (полк, центр) регулярка нічого не змінює, бо «о» там не в останньому
+    складі, а для нежиттєвих варіантів на кшталт «полігн» у тексті просто
+    немає збігів.
+    """
+    reduced = _FLEETING_VOWEL_RE.sub(r"\1", stem)
+    if reduced != stem and len(reduced) >= 3:
+        return [stem, reduced]
+    return [stem]
+
+
+def _starts_a_new_heading(line: str) -> bool:
+    """Чи є рядок САМОСТІЙНОЮ шапкою, а не уламком перенесеної.
+
+    Справжня підшапка починається з ВЕЛИКИХ літер («У ЗАПАС ЗА ПІДПУНКТОМ …»,
+    «ПО ОСОБОВОМУ СКЛАДУ:») або з «Відповідно до»/«Згідно з». Уламок шапки,
+    розірваної мʼяким переносом, — звичайний текст, який може починатися і з
+    лапки («“Про військовий обовʼязок…»), тому перевірка «перша літера мала»
+    його не ловила: шапка ставала двома сегментами, обидва вказували на ОДИН
+    абзац Word — і у витягу вона друкувалася ДВІЧІ.
+    """
+    clean = str(line or "").strip()
+    if clean.startswith("§"):
+        return True
+    low = clean.casefold()
+    if low.startswith("відповідно до") or low.startswith("згідно з"):
+        return True
+    words = [w for w in re.split(r"[^A-Za-zА-Яа-яІіЇїЄєҐґ']+", clean) if w][:2]
+    if not words:
+        return False
+    first = words[0]
+    if len(first) >= 2 and first.isupper():
+        return True
+    if len(first) == 1 and first.isupper() and len(words) > 1:
+        second = words[1]
+        return len(second) >= 2 and second.isupper()
+    return False
+
+
 def _build_unit_fuzzy_pattern(open_name: str) -> re.Pattern:
     """
     Будує нечіткий регулярний вираз для пошуку назви військової частини у будь-яких відмінках.
@@ -345,24 +468,184 @@ def _build_unit_fuzzy_pattern(open_name: str) -> re.Pattern:
     tokens = [t for t in re.split(r"[^\w\d]+", clean_name) if t]
 
     anchors: list[str] = []
+    prefix_anchors: list[str] = []
     for token in tokens:
         if not token:
             continue
         if re.match(r"^\d+$", token):
-            anchors.append(re.escape(token))
+            # Номер частини має збігатися повністю: «8» не є «18» або «80».
+            numeric_anchor = rf"(?<!\d){re.escape(token)}(?!\d)"
+            anchors.append(numeric_anchor)
+            prefix_anchors.append(numeric_anchor)
         elif token.casefold() in STOP_WORDS:
             continue
         elif len(token) >= 2:
             stem = _stem_ukrainian_word(token)
-            escaped_stem = re.escape(stem).replace("\\'", r"[^\w\s]?").replace("'", r"[^\w\s]?")
-            pattern_part = escaped_stem + r"\w*"
+            escaped_variants = [
+                re.escape(variant).replace("\\'", r"[^\w\s]?").replace("'", r"[^\w\s]?")
+                for variant in _stem_variants(stem)
+            ]
+            if len(escaped_variants) > 1:
+                pattern_part = "(?:" + "|".join(escaped_variants) + r")\w*"
+            else:
+                pattern_part = escaped_variants[0] + r"\w*"
             anchors.append(pattern_part)
+
+            # Запасний загальний пошук за стабільним початком КОЖНОГО
+            # значущого слова. Він не залежить від переліку відмінкових
+            # закінчень: для довгих слів достатньо перших 4 літер. Якщо в
+            # основі є чергування (вузол/вузла, загін/загону), беремо 3.
+            prefix_base = token.casefold()
+            variants = _stem_variants(stem)
+            has_early_alternation = (
+                len(variants) > 1
+                and len({variant[:4] for variant in variants}) > 1
+            ) or bool(re.search(r"ін(?:а|у|ом|і)?$", prefix_base))
+            if len(prefix_base) <= 4:
+                prefix_length = len(prefix_base)
+            elif has_early_alternation:
+                prefix_length = 3
+            else:
+                # Префікс росте з довжиною слова, але не довший за 6.
+                # Фіксовані 4 зливали слова зі спільним коренем:
+                # «радіотехнічний» давав «раді», що ловило «РАДІОРЕЛЕЙНОГО»,
+                # і витяг ішов ще й на «99 окремий радіотехнічний батальйон»,
+                # хоча в наказі був «99 окремий полк звʼязку».
+                # Довший за 6 теж не можна: «окремий» дало б «окреми», яке не
+                # ловить «окремого», а «відновлювальний» перестало б ловити
+                # скорочену форму «відновного». Обидві пари розходяться саме
+                # на 6-му символі, тому 6 — стеля, а не бажане значення.
+                prefix_length = max(4, min(6, len(prefix_base) - 3))
+            stable_prefix = prefix_base[:prefix_length]
+            prefix_anchors.append(re.escape(stable_prefix) + r"\w*")
 
     if not anchors:
         return re.compile(re.escape(open_name), re.IGNORECASE)
 
-    pattern_str = r".{0,180}?".join(anchors)
+    # Проміжок між словами назви навмисно широкий — між ними стоять почесні
+    # найменування («ордена Богдана Хмельницького», «імені гетьмана …»).
+    # Але він НЕ МОЖЕ містити номер іншої частини: інакше назва «зшивалася»
+    # з уламків двох сусідніх частин у переліку, напр. шаблон
+    # «158 окрема бригада підтримки» хибно збігався з текстом
+    # «158 окремого батальйону зв'язку та 47 окремої бригади підтримки».
+    # Проміжок так само НЕ МОЖЕ перетнути тире-роздільник « – », яким у пункті
+    # відділені «звідки» і «КУДИ». Інакше збіг починався на «…Тестівської
+    # області» й тягнувся аж до «…СОЦІАЛЬНОЇ ПІДТРИМКИ» у ВЕЛИКІЙ половині
+    # пункту: 161 символ разом із «– НАЧАЛЬНИКОМ ГРУПИ …» замінювався одним
+    # шифром, і 139 символів наказу ЗНИКАЛИ. Тире всередині слова
+    # («гірсько-штурмової») не заважає: перевіряється тире з пробілами обабіч.
+    # Назва може переноситися на інший рядок, але не на інше РЕЧЕННЯ.
+    # Інакше шаблон «Волинський обласний ТЦК» брав «Волинській області» з
+    # одного речення, а «центр комплектування» — вже з наступного Львівського
+    # ТЦК, створюючи паразитного адресата.
+    unit_head_guard = (
+        r"(?!\b(?:батальйон|бригад|полк|центр|корпус|дивізіон|загін|загон|"
+        r"вузол|вузл|госпітал|арсенал|інститут|університет|академі|баз)\w*\b)"
+    )
+    gap = (
+        r"(?:(?!\b\d{1,4}\b)(?!\s[-–—]\s)(?![.;:])"
+        + unit_head_guard
+        + r"[\s\S]){0,180}?"
+    )
+    full_stem_pattern = gap.join(anchors)
+    stable_prefix_pattern = gap.join(prefix_anchors)
+    alternatives = [full_stem_pattern, stable_prefix_pattern]
+
+    # Для командного пункту ППО стабільним ідентифікатором є номер та ядро
+    # типу частини. У колонці A після нього можуть стояти додаткові слова
+    # підпорядкування, яких у конкретному пункті наказу немає. Вимагати всі
+    # слова такого довгого рядка означало пропускати явне
+    # «10 командного пункту протиповітряної оборони».
+    name_low = open_name.casefold()
+    number_match = re.search(r"(?<!\d)(\d{1,4})(?!\d)", name_low)
+    is_air_defense_command_post = (
+        number_match is not None
+        and (
+            (
+                "команд" in name_low
+                and "пункт" in name_low
+                and "протиповітр" in name_low
+                and "оборон" in name_low
+            )
+            or "кпппо" in re.sub(r"[^а-яіїєґa-z0-9]", "", name_low)
+        )
+    )
+    if is_air_defense_command_post:
+        number_anchor = rf"(?<!\d){re.escape(number_match.group(1))}(?!\d)"
+        core_gap = (
+            r"(?:(?!\b\d{1,4}\b)(?!\s[-–—]\s)(?![.;:])"
+            + unit_head_guard
+            + r"[\s\S]){0,120}?"
+        )
+        expanded_core = core_gap.join(
+            (number_anchor, r"команд\w*", r"пункт\w*", r"протиповітр\w*", r"оборон\w*")
+        )
+        acronym_core = number_anchor + r"[\s\-]*кпппо\w*"
+        alternatives.extend((expanded_core, acronym_core))
+
+    # Повна назва корпуса в колонці A природно має форму «N армійський
+    # корпус», а в наказі часто пишуть «N АК». Це не пошук по колонці C:
+    # скорочення однозначно виводиться з номера й типу того самого рядка A.
+    is_army_corps = (
+        number_match is not None
+        and "армійськ" in name_low
+        and "корпус" in name_low
+    )
+    if is_army_corps:
+        number_anchor = rf"(?<!\d){re.escape(number_match.group(1))}(?!\d)"
+        alternatives.append(number_anchor + r"[\s\-]*АК\b")
+
+    pattern_str = "(?:" + "|".join(alternatives) + ")"
     return re.compile(pattern_str, re.IGNORECASE | re.UNICODE | re.DOTALL)
+
+
+def _mask_anaphoric_unit_references(text: str) -> str:
+    """Ховає займенникові посилання від прямого пошуку назв із Excel.
+
+    ``цього самого центру`` не є ще одним явно названим центром. Воно лише
+    посилається на вже названу частину пункту або шапки й обробляється нижче
+    через ``has_internal_ref``. Заміна пробілами зберігає початкові індекси
+    справжніх збігів у тексті.
+    """
+
+    reference_pattern = globals().get("_UNIT_REFERENCE_PATTERN")
+    masked = text
+    if reference_pattern is not None:
+        masked = reference_pattern.sub(lambda match: " " * len(match.group(0)), masked)
+
+    # `_UNIT_REFERENCE_PATTERN` навмисно не перетворює ТЦК під час
+    # шифрування. Для МАРШРУТИЗАЦІЇ це інше правило: займенникове
+    # «цього самого центру комплектування...» однаково не є новою явною
+    # назвою з колонки A й має брати адресата лише з контексту.
+    tck_reference = re.compile(
+        r"\b(?:цього|цієї|цьому|цій|цим|цією|того|тієї|тому|тій|тим|тією|"
+        r"зазначен\w*|вказан\w*|дан\w*)\s+"
+        r"(?:(?:ж|же)\s+)?(?:сам\w+\s+)?"
+        r"центр\w*\s+комплектуванн\w*",
+        re.IGNORECASE | re.UNICODE,
+    )
+    return tck_reference.sub(lambda match: " " * len(match.group(0)), masked)
+
+
+def _unit_name_signature(open_name: str) -> frozenset[str]:
+    """Сигнатура назви для відсікання вкладених загальних збігів.
+
+    Наприклад, сигнатура ``центр підготовки`` є підмножиною сигнатури
+    ``555 центр підготовки``. Якщо обидва шаблони накрили один фрагмент,
+    маршрутом є повніший рядок A, а не обидва рядки таблиці.
+    """
+
+    clean_name = str(open_name or "").lstrip("#").casefold()
+    tokens = re.findall(r"\d+|[a-zа-яіїєґ]+", clean_name, re.UNICODE)
+    signature: set[str] = set()
+    for token in tokens:
+        if token.isdigit():
+            signature.add(f"#{token}")
+            continue
+        stem = _stem_ukrainian_word(token)
+        if len(stem) >= 2:
+            signature.add(stem[:6])
+    return frozenset(signature)
 
 
 _CORPS_RE = re.compile(
@@ -389,8 +672,12 @@ _RECRUITING_CENTER_9_RE = re.compile(
 )
 
 
+# Слово «територіальний» у наказі часто пропускають: «ХМЕЛЬНИЦЬКОГО ОБЛАСНОГО
+# ЦЕНТРУ КОМПЛЕКТУВАННЯ ТА СОЦІАЛЬНОЇ ПІДТРИМКИ» — без нього. Через це пункт
+# не знаходив адресата ЗОВСІМ і потрапляв у «Пропущені». Ядро назви —
+# «центр комплектування», воно й лишається обовʼязковим.
 _TCK_KEYWORDS_RE = re.compile(
-    r"(?:територіальн\w*\s+центр\w*\s+комплектування\w*|ТЦК\w*|РТЦК\w*|МТЦК\w*|ОТЦК\w*)",
+    r"(?:(?:територіальн\w*\s+)?центр\w*\s+комплектування\w*|ТЦК\w*|РТЦК\w*|МТЦК\w*|ОТЦК\w*)",
     re.IGNORECASE | re.UNICODE,
 )
 
@@ -399,10 +686,15 @@ _TCK_OBLAST_EXPLICIT_RE = re.compile(
     re.IGNORECASE | re.UNICODE,
 )
 
+_TCK_EXPLICIT_CITY_RE = re.compile(
+    r"\b(?:(?:у|в)\s+)?(?:місті|м\.)\s*([А-ЯІЇЄа-яіїє'ʼ-]+)",
+    re.IGNORECASE | re.UNICODE,
+)
+
 _TCK_REGION_BEFORE_RE = re.compile(
     r"\b([А-ЯІЇЄа-яіїє'ʼ-]+?(?:ськ|цьк|зьк)\w*)"
     r"\s+(?:районн\w*|міськ\w*|обласн\w*|)?\s*"
-    r"(?:територіальн\w*\s+центр\w*\s+комплектування\w*|[РМОО]?ТЦК\w*)",
+    r"(?:(?:територіальн\w*\s+)?центр\w*\s+комплектування\w*|[РМОО]?ТЦК\w*)",
     re.IGNORECASE | re.UNICODE,
 )
 
@@ -456,37 +748,56 @@ _RAYON_TO_OBLAST_MAP = {
 _UKRAINE_OBLAST_STEMS = {
     "вінниц": "Вінницький",
     "волин": "Волинський",
+    "дніпро": "Дніпропетровський",
     "дніпропетровськ": "Дніпропетровський",
     "донец": "Донецький",
     "житомир": "Житомирський",
     "закарпат": "Закарпатський",
+    "запоріж": "Запорізький",
     "запорізьк": "Запорізький",
+    "івано-франків": "Івано-Франківський",
     "івано-франківськ": "Івано-Франківський",
+    "франків": "Івано-Франківський",
+    "франківськ": "Івано-Франківський",
+    "київ": "Київський",
     "київськ": "Київський",
+    "києв": "Київський",
     "кіровоград": "Кіровоградський",
     "луган": "Луганський",
     "львів": "Львівський",
+    "львов": "Львівський",
     "миколаїв": "Миколаївський",
+    "миколаєв": "Миколаївський",
+    "одес": "Одеський",
     "одеськ": "Одеський",
     "полтав": "Полтавський",
     "рівнен": "Рівненський",
     "сум": "Сумський",
     "тернопіл": "Тернопільський",
+    "тернопол": "Тернопільський",
     "харків": "Харківський",
+    "харков": "Харківський",
     "херсон": "Херсонський",
     "хмельниц": "Хмельницький",
     "черкас": "Черкаський",
     "чернівец": "Чернівецький",
     "чернігів": "Чернігівський",
+    "чернігов": "Чернігівський",
 }
 
 
 def _normalize_region_to_nominative(region_raw: str) -> str:
-    """Нормалізує прикметник регіону до називного відмінку чоловічого роду (напр. Камінь-Каширського → Камінь-Каширський)."""
-    parts = region_raw.strip().split("-")
+    """Нормалізує прикметник регіону до називного відмінку чоловічого роду (напр. Камінь-Каширського → Камінь-Каширський, Івано-Франківського → Івано-Франківський)."""
+    raw = (region_raw or "").strip()
+    if raw.lower().startswith("івано-франків"):
+        return "Івано-Франківський"
+    parts = raw.split("-")
     norm_parts = []
     for part in parts:
         p = part.strip()
+        if p.lower() in ("івано", "камінь", "кам'янець", "рава", "кривий", "дніпро"):
+            norm_parts.append(p[0].upper() + p[1:] if p else "")
+            continue
         p = re.sub(r"(?:ського|ської|ському|ським|ською)$", "ський", p, flags=re.IGNORECASE)
         p = re.sub(r"(?:цького|цької|цькому|цьким|цькою)$", "цький", p, flags=re.IGNORECASE)
         p = re.sub(r"(?:зького|зької|зькому|зьким|зькою)$", "зький", p, flags=re.IGNORECASE)
@@ -494,6 +805,154 @@ def _normalize_region_to_nominative(region_raw: str) -> str:
             p += "ський"
         norm_parts.append(p[0].upper() + p[1:] if p else "")
     return "-".join(norm_parts)
+
+
+_OBLAST_TO_CITY_MAP = {
+    "вінниц": "м. Вінниця",
+    "волин": "м. Луцьк",
+    "дніпро": "м. Дніпро",
+    "дніпропетровськ": "м. Дніпро",
+    "донец": "м. Краматорськ",
+    "житомир": "м. Житомир",
+    "закарпат": "м. Ужгород",
+    "запоріж": "м. Запоріжжя",
+    "івано-франків": "м. Івано-Франківськ",
+    "київ": "м. Київ",
+    "кіровоград": "м. Кропивницький",
+    "луган": "м. Сєвєродонецьк",
+    "львів": "м. Львів",
+    "миколаїв": "м. Миколаїв",
+    "одес": "м. Одеса",
+    "полтав": "м. Полтава",
+    "рівнен": "м. Рівне",
+    "сум": "м. Суми",
+    "тернопіл": "м. Тернопіль",
+    "харків": "м. Харків",
+    "херсон": "м. Херсон",
+    "хмельниц": "м. Хмельницький",
+    "черкас": "м. Черкаси",
+    "чернівец": "м. Чернівці",
+    "чернігів": "м. Чернігів",
+}
+
+
+def _row_is_the_recipient_itself(open_name: str, sender_key: str) -> bool:
+    """Чи є цей рядок словника САМИМ адресатом, а не тим, хто на нього розсилається.
+
+    У таблиці трапляється пара рядків з однаковою колонкою B: підпорядкована
+    установа (наприклад, регіональний центр соціального супроводу) і сам
+    обласний ТЦК. Для розрахунку потрібен другий: у наказі названо саме його.
+    Ознака проста — обидві назви про ТЦК і в них та сама область.
+    """
+    name_low = str(open_name or "").casefold()
+    key_low = str(sender_key or "").casefold()
+    if not name_low or not key_low:
+        return False
+
+    def looks_like_tck(value: str) -> bool:
+        # Навмисно ширше за `_TCK_KEYWORDS_RE`: у таблиці трапляються описки
+        # («Територіальний Центер Комплектування»), і через них рядок ОТЦК
+        # переставав вважатися ТЦК, а розрахунок брав назву підпорядкованого.
+        if "тцк" in value or "територіальн" in value:
+            return True
+        return ("комплектуванн" in value) and ("центр" in value or "центер" in value)
+
+    if not looks_like_tck(key_low) or not looks_like_tck(name_low):
+        return False
+
+    # Обидві назви починаються з тієї самої обласної ознаки: «Рівненський ОТЦК
+    # та СП» і «Рівненський обласний територіальний центр …». Порівняння за
+    # першим словом, а не за переліком областей: у переліку може не бути
+    # потрібної форми, а підпорядкований рядок («1 регіональний центр …»)
+    # однаково не збігається.
+    first_key = next(iter(re.findall(r"[а-яіїєґa-z'’\-]+", key_low)), "")
+    first_name = next(iter(re.findall(r"[а-яіїєґa-z'’\-]+", name_low)), "")
+    if first_key and first_name and first_key[:6] == first_name[:6]:
+        return True
+    return any(stem in key_low and stem in name_low for stem in _UKRAINE_OBLAST_STEMS)
+
+
+def _find_entry_in_mapping(norm_code: str, open_name: str, mapping_dict: dict) -> dict | None:
+    """Знаходить рядок таблиці виключно за його пошуковою назвою зі стовпця A."""
+    if not mapping_dict:
+        return None
+    candidates = {
+        _normalize_unit_name(value)
+        for value in (norm_code, open_name)
+        if str(value or "").strip()
+    }
+    for k, val in mapping_dict.items():
+        if not isinstance(val, dict):
+            continue
+        column_a = str(val.get("open_name") or k).strip()
+        if _normalize_unit_name(column_a) in candidates:
+            return val
+
+    # Районний/міський ТЦК зводиться до обласного, але сам рядок однаково
+    # вибирається лише за назвою зі стовпця A.
+    norm_low = (norm_code or "").casefold()
+    open_low = (open_name or "").casefold()
+    if "тцк" in norm_low or "центр" in norm_low or "отцк" in norm_low or "тцк" in open_low:
+        for k, val in mapping_dict.items():
+            if not isinstance(val, dict):
+                continue
+            column_a_low = str(val.get("open_name") or k).casefold()
+            for stem in _UKRAINE_OBLAST_STEMS:
+                if (stem in norm_low or stem in open_low) and (
+                    stem in column_a_low
+                ):
+                    return val
+    return None
+
+
+def _tck_context_spans(text: str) -> list[tuple[int, int]]:
+    """Позиції явних назв ТЦК/спеціального центру рекрутингу в тексті."""
+
+    spans = [match.span() for match in _TCK_KEYWORDS_RE.finditer(text or "")]
+    spans.extend(match.span() for match in _RECRUITING_CENTER_9_RE.finditer(text or ""))
+    return sorted(set(spans))
+
+
+def _linked_tck_oblast_matches(text: str) -> list[re.Match]:
+    """Області, які стоять після конкретної назви ТЦК у тому ж реченні."""
+
+    value = text or ""
+    contexts = _tck_context_spans(value)
+    linked = []
+    for match in _TCK_OBLAST_EXPLICIT_RE.finditer(value):
+        if any(
+            context_end <= match.start()
+            and match.start() - context_end <= 220
+            and not re.search(r"[.;:]", value[context_end:match.start()])
+            for _context_start, context_end in contexts
+        ):
+            linked.append(match)
+    return linked
+
+
+def _linked_tck_city_matches(text: str) -> list[re.Match]:
+    """Міста з конструкції ``у місті ... ТЦК`` у тому ж реченні."""
+
+    value = text or ""
+    contexts = _tck_context_spans(value)
+    linked = []
+    for match in _TCK_EXPLICIT_CITY_RE.finditer(value):
+        if any(
+            (
+                match.end() <= context_start
+                and context_start - match.end() <= 160
+                and not re.search(r"[.;:]", value[match.end():context_start])
+            )
+            or (
+                context_end <= match.start()
+                and match.start() - context_end <= 160
+                and not re.search(r"[.;:]", value[context_end:match.start()])
+            )
+            for context_start, context_end in contexts
+        ):
+            linked.append(match)
+    return linked
+
 
 
 
@@ -506,7 +965,7 @@ def _extract_tck_sender(text: str) -> str | None:
         return None
 
     # Пріоритет 1: Якщо у тексті прямо вказано назву області (напр: Київської області)
-    oblast_match = _TCK_OBLAST_EXPLICIT_RE.search(text)
+    oblast_match = next(iter(_linked_tck_oblast_matches(text)), None)
     if oblast_match:
         reg_nom = _normalize_region_to_nominative(oblast_match.group(1))
         for stem, obl_name in _UKRAINE_OBLAST_STEMS.items():
@@ -514,7 +973,18 @@ def _extract_tck_sender(text: str) -> str | None:
                 return f"{obl_name} ОТЦК та СП"
         return f"{reg_nom} ОТЦК та СП"
 
-    # Пріоритет 2: Шукаємо прикметник БЕЗПОСЕРЕДНЬО перед ТЦК (напр: Броварського РТЦК)
+    # Пріоритет 2: явне місце розташування «у місті Львові» переважає
+    # складену районну назву. Наприклад, «Галицько-Франківського об'єднаного
+    # районного у місті Львові ТЦК» належить Львівському ОТЦК, а слово
+    # «Франківського» не означає Івано-Франківську область.
+    city_match = next(iter(_linked_tck_city_matches(text)), None)
+    if city_match:
+        city_low = city_match.group(1).casefold()
+        for stem, obl_name in _UKRAINE_OBLAST_STEMS.items():
+            if city_low.startswith(stem):
+                return f"{obl_name} ОТЦК та СП"
+
+    # Пріоритет 3: Шукаємо прикметник БЕЗПОСЕРЕДНЬО перед ТЦК (напр: Броварського РТЦК)
     region_match = _TCK_REGION_BEFORE_RE.search(text)
     if region_match:
         reg_nom = _normalize_region_to_nominative(region_match.group(1))
@@ -530,6 +1000,69 @@ def _extract_tck_sender(text: str) -> str | None:
         return f"{reg_nom} ОТЦК та СП"
 
     return "Обласний ТЦК та СП"
+
+
+def _extract_tck_senders(text: str) -> list[str]:
+    """Повертає всі обласні ТЦК, явно названі в одному пункті.
+
+    Пункт про скасування/переміщення може одночасно згадувати ТЦК двох
+    областей. Старий одиничний extractor повертав лише перший і втрачав
+    другого адресата.
+    """
+    if not (_TCK_KEYWORDS_RE.search(text or "") or _RECRUITING_CENTER_9_RE.search(text or "")):
+        return []
+
+    senders: list[str] = []
+
+    def add_oblast(raw_region: str) -> None:
+        reg_nom = _normalize_region_to_nominative(raw_region)
+        for stem, obl_name in _UKRAINE_OBLAST_STEMS.items():
+            if reg_nom.casefold().startswith(stem):
+                sender = f"{obl_name} ОТЦК та СП"
+                if sender not in senders:
+                    senders.append(sender)
+                return
+
+    # Явно названі області мають найвищий пріоритет і можуть бути різними.
+    for match in _linked_tck_oblast_matches(text or ""):
+        add_oblast(match.group(1))
+    if senders:
+        return senders
+
+    # Якщо областей немає, збираємо всі явні місця «у місті ...».
+    for match in _linked_tck_city_matches(text or ""):
+        city_low = match.group(1).casefold()
+        for stem, obl_name in _UKRAINE_OBLAST_STEMS.items():
+            if city_low.startswith(stem):
+                sender = f"{obl_name} ОТЦК та СП"
+                if sender not in senders:
+                    senders.append(sender)
+                break
+    if senders:
+        return senders
+
+    fallback = _extract_tck_sender(text)
+    return [fallback] if fallback else []
+
+def _extract_tck_region_hints(text: str) -> list[str]:
+    """Витягує назви областей з тексту ТЦК."""
+    hints = []
+    oblast_match = next(iter(_linked_tck_oblast_matches(text or "")), None)
+    if oblast_match:
+        reg_nom = _normalize_region_to_nominative(oblast_match.group(1))
+        for stem, obl_name in _UKRAINE_OBLAST_STEMS.items():
+            if reg_nom.lower().startswith(stem):
+                hints.append(obl_name)
+        if not hints:
+            hints.append(reg_nom)
+    city_match = next(iter(_linked_tck_city_matches(text or "")), None)
+    if city_match:
+        city_low = city_match.group(1).casefold()
+        for stem, obl_name in _UKRAINE_OBLAST_STEMS.items():
+            if city_low.startswith(stem) and obl_name not in hints:
+                hints.append(obl_name)
+    return hints
+
 
 def _extract_corps_abbr(corps_str: str) -> str:
     """Витягує скорочену назву корпусу (напр. '25 армійський корпус' -> '25АК')."""
@@ -590,18 +1123,41 @@ def _auto_abbreviate_unit_name(open_name: str) -> str:
     return clean
 
 
+def _norm_corps_token(value: str) -> str:
+    return re.sub(r"\s+", " ", str(value or "")).strip().casefold()
+
+
 def _find_corps_entry(corps_col_val: str, corps_abbr_val: str, mapping_dict: dict) -> dict | None:
-    """Шукає рядок корпусу у таблиці за ключем, скороченням або повною назвою."""
+    """Знаходить РЯДОК корпусу, на який посилається стовпець D частини.
+
+    Це розвʼязування внутрішнього посилання таблиці (D → рядок), а не пошук
+    у тексті наказу, тому тут дозволено дивитися і на стовпець C. Пошук
+    адресата в тексті, як і раніше, йде виключно за стовпцем A.
+    """
     entry = mapping_dict.get(corps_col_val) or mapping_dict.get(corps_abbr_val)
     if isinstance(entry, dict) and entry.get("cipher"):
         return entry
+
+    # Стовпець D часто містить СКОРОЧЕННЯ корпусу («ОК Захід»), яке збігається
+    # зі стовпцем C його рядка, а не зі стовпцем A («оперативне командування
+    # «Захід»») і не з шаблоном «N АК». Без цього рядок корпусу не знаходився:
+    # ключ будувався без шифру, і на ОДИН корпус виходило ДВА витяги —
+    # «ОК Захід» (через підпорядковану частину) і «ОК Захід А0777» (від
+    # прямого збігу), причому в першому «Кому»/«Куди» лишалися від частини.
+    wanted = {_norm_corps_token(corps_col_val), _norm_corps_token(corps_abbr_val)} - {""}
+    if wanted:
+        for _name, _val in mapping_dict.items():
+            if not isinstance(_val, dict) or not _val.get("cipher"):
+                continue
+            abbreviation = _norm_corps_token(_val.get("abbreviation") or _val.get("abbr"))
+            if abbreviation and abbreviation in wanted:
+                return _val
+
     for _name, _val in mapping_dict.items():
         if not isinstance(_val, dict):
             continue
-        abbr = str(_val.get("abbreviation") or _val.get("abbr") or "").strip()
-        if abbr and _extract_corps_abbr(abbr) == corps_abbr_val and _val.get("cipher"):
-            return _val
-        if _extract_corps_abbr(_name) == corps_abbr_val and _val.get("cipher"):
+        column_a = str(_val.get("open_name") or _name).strip()
+        if _extract_corps_abbr(column_a) == corps_abbr_val and _val.get("cipher"):
             return _val
     return None
 
@@ -618,16 +1174,17 @@ def _build_sender_key(closed_code: str, abbreviation: str, corps_col: str, corps
         corps_cipher = corps_resolved_cipher.get(corps_abbr, short_cipher)
         corps_entry = _find_corps_entry(corps_col, corps_abbr, mapping_dict)
         if corps_entry:
-            c_abbr = str(corps_entry.get("abbreviation") or corps_entry.get("abbr") or corps_abbr).strip()
-            if c_abbr:
-                if re.search(r"\bА\s*\d{4}\b", c_abbr, re.IGNORECASE) or (corps_cipher and corps_cipher.casefold() in c_abbr.casefold()):
-                    sender_key = c_abbr
-                elif corps_cipher:
-                    sender_key = f"{c_abbr} {corps_cipher}"
-                else:
-                    sender_key = c_abbr
-            else:
-                sender_key = f"{corps_abbr} {corps_cipher}".strip() if corps_cipher else corps_abbr
+            # Ключ корпусу будуємо ТИМИ САМИМИ правилами, що й для самого
+            # корпусу: інакше корпус із порожньою колонкою C отримував два
+            # різні ключі («14АК А5555» через частину і «А5555» напряму),
+            # і на один корпус створювалося два витяги.
+            sender_key, _ = _build_sender_key(
+                str(corps_entry.get("cipher") or corps_cipher),
+                str(corps_entry.get("abbreviation") or corps_entry.get("abbr") or "").strip(),
+                "",
+                corps_resolved_cipher,
+                mapping_dict,
+            )
         else:
             sender_key = f"{corps_abbr} {corps_cipher}".strip() if corps_cipher else corps_abbr
         return sender_key, corps_abbr
@@ -660,15 +1217,11 @@ def _short_closed_code(code: str, abbreviation: str = "") -> str:
 
     abbr = str(abbreviation).strip()
 
-    # Для ТЦК та СП — повертаємо лаконічну назву (напр. 'Київський ОТЦК та СП') без дублювання довгої назви
+    # Для ТЦК та СП джерелом є виключно таблиця: точний текст колонки C,
+    # а якщо вона порожня — точний текст колонки B. Не нормалізуємо й не
+    # конструюємо назву з окремо знайденого прикметника.
     if "ТЦК" in abbr.upper() or "ТЦК" in cipher.upper() or "ТЕРИТОРІАЛЬН" in cipher.upper() or "ЦЕНТЕР" in cipher.upper() or "ЦЕНТР" in cipher.upper():
-        if abbr:
-            return abbr
-        reg = re.search(r"\b([А-ЯІЇЄ][а-яіїє'ʼ]+(?:ськ|цьк|зьк)\w*)\b", cipher, re.IGNORECASE)
-        if reg:
-            reg_nom = _normalize_region_to_nominative(reg.group(1))
-            return f"{reg_nom} ОТЦК та СП"
-        return "Обласний ТЦК та СП"
+        return abbr or cipher
 
     if abbr and abbr != cipher and abbr.casefold() not in cipher.casefold():
         return f"{abbr} {cipher}"
@@ -676,7 +1229,20 @@ def _short_closed_code(code: str, abbreviation: str = "") -> str:
 
 
 def _format_item_numbers_range(labels: list[str]) -> str:
-    """Форматує перелік пунктів з використанням дефісів для послідовних діапазонів (напр. 1,3,4-7,9,10,11-25)."""
+    """Форматує перелік пунктів з використанням дефісів для послідовних діапазонів (напр. 1,3,4-7,9,10,11-25).
+    Для ієрархічних номерів (1.1, 1.2) повертає точний перелік через кому."""
+    has_hierarchical = any(re.search(r"\b\d+\.\d+\b", str(lbl)) for lbl in labels)
+    if has_hierarchical:
+        items = []
+        for label in labels:
+            clean = str(label).strip()
+            m = re.search(r"\b\d+(?:\.\d+)+\b|\b\d+\b", clean)
+            if m:
+                items.append(m.group(0))
+            elif clean:
+                items.append(clean)
+        return ",".join(items) if items else "-"
+
     nums = set()
     non_nums = []
 
@@ -725,24 +1291,114 @@ def _format_item_numbers_range(labels: list[str]) -> str:
 
 def _get_item_main_text(lines: list[str]) -> str:
     """
-    Витягує основні рядки пункту (включаючи назву ТЦК з рядків обліку 'Перебуває на обліку / Підлягає направленню').
-    Рядки з документообігом 'Підстава: ...' повністю ігноруються.
+    Витягує виключно розпорядчий текст пункту наказу.
+    Повністю ігнорує:
+    1. Рядки підстав ('Підстава: ...').
+    2. Біографічні та облікові рядки (р.н., освіта, ІПН/РНОКПП, ВОС, 'у ЗС із...',
+       'призваний...', 'перебуває на обліку...', 'підлягає направленню на військовий облік...').
     """
+    hard_bio_markers = (
+        "народивс",
+        "народил",
+        "р.н.",
+        "р. н.",
+        "року народження",
+        "рнокпп",
+        "іпн",
+        "освіта",
+        "вос-",
+        "вос ",
+        "у зс",
+        "у зсу",
+        "призваний",
+        "призвана",
+    )
+    accounting_markers = (
+        "військовий облік",
+        "військовому обліку",
+        "військового обліку",
+        "підлягає",
+        "підлягають",
+        "направленню на",
+        "перебуває на",
+        "перебувають на",
+    )
     selected_lines = []
+    # Біографічний блок — це ХВІСТ пункту: після нього розпорядчого тексту вже
+    # немає. Без цього мʼякий перенос усередині маркера ламав фільтр: рядок
+    # «Підлягає направленню на військовий ⏎ облік до …ТЦК та СП» розпадався на
+    # два, у першому маркер був, а другий («облік до …») не збігався з жодним —
+    # і ТЦК ставав адресатом, тобто витяг ішов не туди.
+    tail_started = False
     for line in lines:
         clean = line.strip()
         low = clean.lower()
+        if not clean:
+            continue
+        if tail_started:
+            continue
         if clean.startswith("Підстава") or clean.startswith("підстава"):
             continue
-        # Якщо в рядку є опис обліку в ТЦК — обов'язково зберігаємо його
-        if ("перебуває" in low or "підлягає" in low or "облік" in low or "тцк" in low or "ртцк" in low or "отцк" in low):
-            selected_lines.append(line)
+        # У частині наказів розпорядчий текст і біографічні відомості стоять
+        # в одному абзаці. Не відкидаємо весь абзац: залишаємо початок із
+        # адресатом зі стовпця A та відрізаємо лише біографічний хвіст.
+        cutoff_positions = [low.find(marker) for marker in hard_bio_markers if marker in low]
+        if cutoff_positions:
+            main_prefix = clean[: min(cutoff_positions)].rstrip(" ,;:–—-")
+            if main_prefix:
+                selected_lines.append(main_prefix)
+            tail_started = True
             continue
-        # Чисто біографічні рядки з р.н. без ТЦК пропускаємо
-        if ("р.н." in low or "р. н." in low or "року народження" in low or "рнокопп" in low):
-            continue
+        accounting_positions = [low.find(marker) for marker in accounting_markers if marker in low]
+        if accounting_positions:
+            accounting_start = min(accounting_positions)
+            prefix = clean[:accounting_start]
+            has_item_label = bool(
+                re.match(r"^\s*\d{1,3}(?:\.\d{1,3})*[\.\)]\s*", clean)
+            )
+            prefix_without_label = re.sub(
+                r"^\s*\d{1,3}(?:\.\d{1,3})*[\.\)]\s*",
+                "",
+                prefix,
+            ).strip(" ,;:–—-")
+            # Окремий абзац військового обліку є біографічним. Якщо ж перед
+            # ним у тому самому абзаці є розпорядчий текст або це самостійний
+            # пронумерований пункт, не втрачаємо названий там маршрут ТЦК.
+            if not prefix_without_label and not has_item_label:
+                tail_started = True
+                continue
         selected_lines.append(line)
-    return "\n".join(selected_lines) if selected_lines else "\n".join(lines)
+    return "\n".join(selected_lines)
+
+
+#: Невидимі символи, які Word і системи документообігу лишають у тексті:
+#: пропуски нульової ширини, «з'єднувачі», BOM.
+_INVISIBLE_TEXT_CHARS_RE = re.compile("[\u200b\u200c\u200d\u2060\ufeff]")
+#: Номер пункту, за яким ОДРАЗУ йде текст: «1.Капітана», «2)Майора», «3.«Про…».
+#: Лише на початку рядка (зокрема після м'якого переносу Word — \x0b).
+_GLUED_ITEM_NUMBER_RE = re.compile(
+    "(^|[\x0b\x0c\x1c\x1d\x1e\x85\u2028\u2029])"
+    r"([ \t\u00a0]*\d{1,3}(?:\.\d{1,3})*[\.\)])"
+    r"(?=[^\W\d_]|[«\"“'])",
+    re.MULTILINE | re.UNICODE,
+)
+
+
+def normalize_item_numbering(text: str) -> str:
+    """Робить номер пункту впізнаваним, не змінюючи кількості рядків.
+
+    Пункт впізнається за формою «номер, крапка, ПРОПУСК». Номер без пропуску
+    («1.Капітана») чи з невидимим символом після крапки пунктом не ставав: весь
+    пункт поглинала шапка наказу, його частини ставали контекстом для ВСІХ
+    наступних пунктів, і чужі пункти потрапляли в розсилку частин першого
+    пункту (наказ №459, 15.09.2026). Дати («01.09.2026»), роки («1985 р. н.»)
+    й довгі числа сюди не потрапляють: після номера має йти літера або лапка.
+
+    Кількість рядків зберігається — на ній тримається відповідність
+    «рядок тексту ↔ абзац Word».
+    """
+    cleaned = _INVISIBLE_TEXT_CHARS_RE.sub("", text or "")
+    return _GLUED_ITEM_NUMBER_RE.sub(lambda match: f"{match.group(1)}{match.group(2)} ", cleaned)
 
 
 @node(
@@ -780,7 +1436,7 @@ def map_military_units(
             "summary": "Порожній текст наказу",
         }
 
-    text = _fix_military_typos(text)
+    text = normalize_item_numbering(_fix_military_typos(text))
     mapping_raw = mapping or {}
     mapping_dict = {}
     for k, v in mapping_raw.items():
@@ -800,30 +1456,36 @@ def map_military_units(
     content_start_idx = len(lines)
     for idx, line in enumerate(lines):
         clean = line.strip()
+        clean_search = re.sub(r"\s+", " ", clean)
         if (
-            clean.startswith("§")
-            or re.match(r"^\d+[\.\)]", clean)
-            or "НАКАЗУЮ" in clean.upper()
-            or "ПРИЗНАЧИТИ" in clean.upper()
-            or "НАПРАВИТИ" in clean.upper()
-            or "ВІДРЯДИТИ" in clean.upper()
-            or "ЗВІЛЬНИТИ" in clean.upper()
-            or "ВІЙСЬКОВОСЛУЖБОВЦІВ" in clean.upper()
+            clean_search.startswith("§")
+            or re.match(r"^\d+[\.\)]", clean_search)
+            or "ВІДПОВІДНО ДО" in clean_search.upper()
+            or "ЗГІДНО З" in clean_search.upper()
+            or "НАКАЗУЮ" in clean_search.upper()
+            or "ПРИЗНАЧИТИ" in clean_search.upper()
+            or "НАПРАВИТИ" in clean_search.upper()
+            or "ВІДРЯДИТИ" in clean_search.upper()
+            or "ЗВІЛЬНИТИ" in clean_search.upper()
+            or "ВІЙСЬКОВОСЛУЖБОВЦІВ" in clean_search.upper()
         ):
             content_start_idx = idx
             break
         if clean:
             header_lines.append(line)
 
-    if not header_lines and lines:
-        header_lines = lines[:3]
-
     # ── Компілюємо патерни для кожної ВЧ ──────────────────────────────────────
     unit_patterns: list[tuple[str, str, str, re.Pattern]] = []
     unit_abbr_map: dict[str, str] = {}
+    #: Ключі, для яких скорочення вже взято з «власного» рядка адресата.
+    own_abbr_sender_keys: set[str] = set()
 
     canonical_key_map: dict[str, str] = {}
-    cipher_digits_map: dict[str, tuple[str, str]] = {}
+    corps_map: dict[str, str] = {}
+    cipher_to_primary_key: dict[str, str] = {}
+    entry_routes_by_id: dict[int, tuple[str, str]] = {}
+    route_entries_by_sender_key: dict[str, dict] = {}
+    route_entries_by_open_name: dict[str, dict] = {}
 
     # ── Прохід 1: визначаємо ЄДИНИЙ шифр для кожного Корпусу ─────────────────
     corps_resolved_cipher: dict[str, str] = {}  # corps_abbr -> шифр корпусу
@@ -834,6 +1496,7 @@ def map_military_units(
         corps_col = str(mapped_val.get("corps", "")).strip()
         if corps_col:
             corps_abbr = _extract_corps_abbr(corps_col)
+            corps_map[open_name] = corps_col
             if corps_abbr not in corps_resolved_cipher:
                 corps_entry = _find_corps_entry(corps_col, corps_abbr, mapping_dict)
                 if corps_entry:
@@ -843,7 +1506,13 @@ def map_military_units(
                     corps_resolved_cipher[corps_abbr] = ""
 
     # ── Прохід 2: компілюємо патерни з єдиним sender_key ─────────────────────
-    for open_name, mapped_val in mapping_dict.items():
+    # Сортуємо: пріоритетні рядки з # обробляються першими
+    sorted_mapping = sorted(
+        mapping_dict.items(),
+        key=lambda item: (not str(item[0]).startswith("#"), -len(str(item[0]))),
+    )
+
+    for open_name, mapped_val in sorted_mapping:
         corps_col = ""
         if isinstance(mapped_val, dict):
             closed_code = str(
@@ -864,14 +1533,41 @@ def map_military_units(
             closed_code = str(mapped_val)
             abbreviation = ""
 
-        low_open = open_name.lower()
-        is_tck_entry = "тцк" in low_open or "територіальн" in low_open or "центр" in low_open
-        if isinstance(mapped_val, dict) and not abbreviation and not corps_col and not is_tck_entry:
-            abbreviation = _auto_abbreviate_unit_name(open_name)
-
         short_cipher = _short_closed_code(closed_code)
         sender_key, resolved_abbr = _build_sender_key(closed_code, abbreviation, corps_col, corps_resolved_cipher, mapping_dict)
-        unit_abbr_map[sender_key] = resolved_abbr or unit_abbr_map.get(sender_key, "")
+
+        if short_cipher:
+            if short_cipher in cipher_to_primary_key:
+                primary_key = cipher_to_primary_key[short_cipher]
+                canonical_key_map[sender_key] = primary_key
+                sender_key = primary_key
+            else:
+                cipher_to_primary_key[short_cipher] = sender_key
+
+        if isinstance(mapped_val, dict):
+            entry_routes_by_id[id(mapped_val)] = (sender_key, open_name)
+            route_entry = mapped_val
+            if corps_col:
+                corps_abbr = _extract_corps_abbr(corps_col)
+                corps_entry = _find_corps_entry(corps_col, corps_abbr, mapping_dict)
+                if isinstance(corps_entry, dict):
+                    route_entry = corps_entry
+            route_entries_by_open_name[open_name] = route_entry
+            if sender_key not in route_entries_by_sender_key or _row_is_the_recipient_itself(open_name, sender_key):
+                route_entries_by_sender_key[sender_key] = route_entry
+
+        # Кілька рядків таблиці можуть вести на ОДНОГО адресата: окремий центр,
+        # який розсилається на свій ОТЦК, і сам ОТЦК. Раніше скорочення для
+        # розрахунку діставалось тому рядку, у якого колонка C просто не
+        # порожня, — і в розрахунку зʼявлявся «1 рег. центр с.с.» замість
+        # «Рівненський ОТЦК та СП», хоча в наказі названо саме ОТЦК.
+        # Пріоритет має рядок, чия колонка A і Є цим адресатом; його колонку C
+        # беремо навіть порожньою — тоді показується сама закрита назва.
+        if _row_is_the_recipient_itself(open_name, sender_key):
+            unit_abbr_map[sender_key] = resolved_abbr
+            own_abbr_sender_keys.add(sender_key)
+        elif sender_key not in own_abbr_sender_keys:
+            unit_abbr_map[sender_key] = resolved_abbr or unit_abbr_map.get(sender_key, "")
 
         for variant in [open_name, closed_code, f"в/ч {short_cipher}", short_cipher, abbreviation, corps_col]:
             if variant:
@@ -880,104 +1576,377 @@ def map_military_units(
                     corps_abbr = _extract_corps_abbr(corps_col)
                     canonical_key_map[corps_abbr] = sender_key
 
-        # Реєструємо 4-значні цифри шифру для миттєвого пошуку прямо за шифром в/ч у тексті
-        c_digits = re.findall(r"\d{4}", closed_code)
-        if c_digits:
-            cipher_digits_map[c_digits[0]] = (sender_key, open_name)
-
-
-
-        low_open = open_name.lower()
+        clean_open = open_name.lstrip("#").strip()
+        low_open = clean_open.lower()
         is_tck_entry = "тцк" in low_open or "територіальн" in low_open or "центр" in low_open
         if fuzzy_match or is_tck_entry:
-            pattern = _build_unit_fuzzy_pattern(open_name)
+            pattern = _build_unit_fuzzy_pattern(clean_open)
         else:
-            pattern = re.compile(re.escape(open_name), re.IGNORECASE)
+            pattern = re.compile(re.escape(clean_open), re.IGNORECASE)
 
         unit_patterns.append((open_name, closed_code, corps_col, sender_key, pattern))
-        if abbreviation and abbreviation != open_name:
-            abbr_pattern = _build_unit_fuzzy_pattern(abbreviation) if fuzzy_match else re.compile(re.escape(abbreviation), re.IGNORECASE)
-            unit_patterns.append((abbreviation, closed_code, corps_col, sender_key, abbr_pattern))
 
-        if closed_code and closed_code != open_name:
-            code_pattern = _build_unit_fuzzy_pattern(closed_code) if fuzzy_match else re.compile(re.escape(closed_code), re.IGNORECASE)
-            unit_patterns.append((closed_code, closed_code, corps_col, sender_key, code_pattern))
+    unit_patterns.sort(key=lambda x: (not str(x[0]).startswith("#"), -len(str(x[0]))))
 
-        if short_cipher and short_cipher != open_name and short_cipher != closed_code:
-            short_pattern = re.compile(r"\b" + re.escape(short_cipher) + r"\b", re.IGNORECASE)
-            unit_patterns.append((short_cipher, closed_code, corps_col, sender_key, short_pattern))
+    # ── Районний/міський ТЦК ніколи не отримує власного витягу ───────────────
+    # Правило: такий ТЦК ЗАВЖДИ прямує до свого обласного, а «Кому»/«Куди»
+    # беруться з рядка області. Коли районного ТЦК у таблиці немає, це вже
+    # працювало (`_extract_tck_sender` одразу давав область). Але якщо він там
+    # є ОКРЕМИМ РЯДКОМ, він збігався як звичайна частина і на нього
+    # створювався окремий витяг.
+    def _is_tck_name(name: str) -> bool:
+        low = str(name).casefold()
+        return (
+            "тцк" in low
+            or "територіальн" in low
+            or (
+                "комплектуванн" in low
+                and ("центр" in low or "центер" in low)
+            )
+        )
 
-    # Шукаємо вихідну ВЧ у заголовочній шапці наказу (HEADER)
-    header_text = "\n".join(header_lines)
-    header_zvidky_unit: tuple[str, str] | None = None
-    for open_name, closed_code, corps_col, sender_key, pattern in unit_patterns:
-        m = pattern.search(header_text)
-        if m:
-            header_zvidky_unit = (sender_key, open_name)
-            break
-    if not header_zvidky_unit:
-        h_ciphers = re.findall(r"\bА\s*(\d{4})\b", header_text, re.IGNORECASE)
-        for digit in h_ciphers:
-            if digit in cipher_digits_map:
-                header_zvidky_unit = cipher_digits_map[digit]
+    tck_redirect: dict[str, str] = {}
+    for open_name, _code, _corps, sender_key, _pattern in unit_patterns:
+        clean = str(open_name).lstrip("#").strip()
+        low = clean.casefold()
+        if not _is_tck_name(low) or "обласн" in low:
+            continue
+        oblast_name = _extract_tck_sender(clean)
+        if not oblast_name:
+            continue
+        for other_name, _c, _cc, other_key, _p in unit_patterns:
+            other_clean = str(other_name).lstrip("#").strip()
+            if other_key == sender_key or "обласн" not in other_clean.casefold():
+                continue
+            if _extract_tck_sender(other_clean) == oblast_name:
+                tck_redirect[sender_key] = other_key
                 break
+
+    if tck_redirect:
+        for name, _code, _corps, key, _pattern in unit_patterns:
+            if key in tck_redirect:
+                oblast_entry = route_entries_by_sender_key.get(tck_redirect[key])
+                if oblast_entry is not None:
+                    route_entries_by_open_name[name] = oblast_entry
+        unit_patterns = [
+            (name, code, corps, tck_redirect.get(key, key), pattern)
+            for (name, code, corps, key, pattern) in unit_patterns
+        ]
+        for old_key, new_key in tck_redirect.items():
+            if new_key in route_entries_by_sender_key:
+                route_entries_by_sender_key[old_key] = route_entries_by_sender_key[new_key]
+        for alias, key in list(canonical_key_map.items()):
+            if key in tck_redirect:
+                canonical_key_map[alias] = tck_redirect[key]
+        for entry_id, (key, name) in list(entry_routes_by_id.items()):
+            if key in tck_redirect:
+                entry_routes_by_id[entry_id] = (tck_redirect[key], name)
+
+    def route_from_current_table(entry: dict | None) -> tuple[str, str] | None:
+        """Повертає маршрут лише для рядка поточної Excel-таблиці."""
+        if not isinstance(entry, dict):
+            return None
+        return entry_routes_by_id.get(id(entry))
+
+    def direct_unit_matches(search_text: str) -> list[tuple]:
+        """Повертає лише явні, найконкретніші збіги назв зі стовпця A.
+
+        Займенникові посилання (``цього самого центру``) тут маскуються:
+        вони підтверджують контекст, але не запускають новий пошук у всій
+        таблиці. Якщо той самий фрагмент одночасно збігається з повною та
+        коротшою загальною назвою, лишається повніша назва.
+        """
+
+        masked_text = _mask_anaphoric_unit_references(search_text)
+
+        def overlapping_matches(pattern: re.Pattern) -> list[re.Match]:
+            """Усі збіги, включно з компактнішим збігом усередині широкого."""
+
+            found: list[re.Match] = []
+            search_from = 0
+            while search_from <= len(masked_text):
+                match = pattern.search(masked_text, search_from)
+                if match is None:
+                    break
+                found.append(match)
+                next_start = match.start() + 1
+                search_from = next_start if next_start > search_from else search_from + 1
+            return found
+
+        candidates: list[dict] = []
+        seen_clean_names: set[str] = set()
+        for open_name, closed_code, corps_col, sender_key, pattern in unit_patterns:
+            clean_name = str(open_name).lstrip("#").strip().casefold()
+            if clean_name in seen_clean_names:
+                continue
+            matches = overlapping_matches(pattern)
+            if not matches:
+                continue
+            seen_clean_names.add(clean_name)
+            candidates.append(
+                {
+                    "route": (open_name, closed_code, corps_col, sender_key, pattern),
+                    "signature": _unit_name_signature(open_name),
+                    "matches": matches,
+                }
+            )
+
+        selected: list[tuple] = []
+        for candidate_index, candidate in enumerate(candidates):
+            signature = candidate["signature"]
+            numeric_signature = {token for token in signature if token.startswith("#")}
+            retained_matches = []
+            for match in candidate["matches"]:
+                start, end = match.span()
+                shadowed = any(
+                    (
+                        signature < other["signature"]
+                        or (
+                            not numeric_signature
+                            and any(token.startswith("#") for token in other["signature"])
+                        )
+                        or (
+                            signature == other["signature"]
+                            and other_index < candidate_index
+                        )
+                    )
+                    and any(
+                        max(start, other_match.start()) < min(end, other_match.end())
+                        for other_match in other["matches"]
+                    )
+                    for other_index, other in enumerate(candidates)
+                    if other_index != candidate_index
+                )
+                if not shadowed:
+                    retained_matches.append(match)
+            if retained_matches:
+                selected.append((*candidate["route"], retained_matches))
+        return selected
+
+    # Шукаємо вихідну ВЧ в усій преамбулі до першого справжнього пункту.
+    # Межа `header/content` є технічною і в Word може пройти просто посеред
+    # назви частини: «46 окремого» лишається у header, а
+    # «ремонтно-відновлювального полку ЗВІЛЬНИТИ…» починає content. Пошук по
+    # обох половинах окремо тоді гарантовано нічого не знаходить.
+    first_item_idx = next(
+        (
+            idx
+            for idx, line in enumerate(lines)
+            if re.match(
+                r"^\s*\d{1,3}(?:\.\d{1,3})*[\.\)](?:\s|$)",
+                re.sub(r"\s+", " ", line),
+            )
+        ),
+        len(lines),
+    )
+    # § починає локальну шапку, а не загальну преамбулу наказу.
+    # Без цієї межі адресат §1 ставав fallback для всіх наступних §.
+    preamble_end = next(
+        (idx for idx, line in enumerate(lines[:first_item_idx]) if line.lstrip().startswith("§")),
+        first_item_idx,
+    )
+    header_text = "\n".join(lines[:preamble_end])
+    header_zvidky_units: set[tuple[str, str]] = set()
+    header_matches = direct_unit_matches(header_text)
+    if header_matches:
+        header_zvidky_units = {
+            (sender_key, open_name)
+            for open_name, _closed_code, _corps_col, sender_key, _pattern, _matches
+            in header_matches
+        }
 
     # ── Парсимо тіло наказу у блоки (§-параграфи та пронумеровані пункти) ─────
     blocks = []
     current_parent_heading = ""
     current_block = None
 
-    for line in lines[content_start_idx:]:
+    active_heading_start_idx = -1
+    active_heading_end_idx = -1
+    # Ієрархія шапки як список сегментів по рівнях: [§, шапка, підшапка, ...].
+    # Кожен елемент — [start_line, end_line, text]. Генератор витягів
+    # повторює лише той рівень, що реально змінився (§ і незмінна шапка не
+    # дублюються для кожного пункту одного розділу — AGENT.md, розд. 4).
+    heading_segments: list[list] = []
+    # Стан ієрархії ДО останнього доданого/заміненого рівня (напр. підшапки
+    # «У ЗАПАС ЗА ПІДПУНКТОМ …:») та прапорець, що цей останній рівень сам є
+    # підставою звільнення. Потрібно для двох випадків:
+    #  1) пункт із власною підставою звільнення в тексті не успадковує чужу
+    #     зовнішню підшапку;
+    #  2) сусідня підшапка-причина звільнення в межах ОДНОГО § заміняє
+    #     попередню (той самий рівень), а не додає ще один рівень вкладеності.
+    pre_discharge_heading_segments: list[list] | None = None
+    last_segment_is_discharge = False
+    previous_line_was_heading = False
+    for rel_idx, line in enumerate(lines[content_start_idx:]):
+        abs_idx = content_start_idx + rel_idx
         clean = line.strip()
+        clean_search = re.sub(r"\s+", " ", clean)
         if not clean:
+            previous_line_was_heading = False
             if current_block:
                 current_block["lines"].append("")
+                current_block["end_line"] = abs_idx
+                if current_block["type"] == "section":
+                    active_heading_end_idx = abs_idx
+                    if heading_segments:
+                        heading_segments[-1][1] = abs_idx
             continue
 
-        is_section_marker = clean.startswith("§") or (
-            ("Відповідно до" in clean or "Згідно з" in clean or clean.endswith(":") or "ВІЙСЬКОВОСЛУЖБОВЦІВ" in clean.upper())
-            and not re.match(r"^\d+[\.\d]*", clean)
-            and not clean.startswith("Підстава")
-            and not clean.startswith("підстава")
+        # Підшапка-підстава звільнення не завжди закінчується двокрапкою:
+        # «У ВІДСТАВКУ ЗА ПІДПУНКТОМ “б” (… про непридатність до військової
+        # служби).» закінчується КРАПКОЮ. Такий рядок не впізнавався як
+        # підшапка, поглинався сусіднім блоком і друкувався у витягу НЕ на
+        # своєму місці — «підшапка переміщалася вниз». Пункт із власною
+        # підставою сюди не потрапляє: він починається з номера.
+        is_discharge_subheading = (
+            _is_inline_discharge_basis(clean_search)
+            and _starts_a_new_heading(clean_search)
+        )
+        is_section_marker = clean_search.startswith("§") or (
+            (
+                "відповідно до" in clean_search.casefold()
+                or "згідно з" in clean_search.casefold()
+                or clean_search.endswith(":")
+                or "ВІЙСЬКОВОСЛУЖБОВЦІВ" in clean_search.upper()
+                or is_discharge_subheading
+            )
+            and not re.match(r"^\d+[\.\d]*", clean_search)
+            and not clean_search.casefold().startswith("підстава")
         )
 
         is_new_item = (
             not is_section_marker
-            and not ("р.н." in clean or "р. н." in clean or clean.startswith("Підстава"))
+            # Наявність «р.н.» наприкінці того самого абзацу не скасовує
+            # номер пункту на його початку. Раніше через це пункти 2/4/7/8
+            # приєднувалися до шапки й зовсім не потрапляли в маршрутизацію.
+            and not clean.startswith("Підстава")
             and bool(re.match(r"^\d{1,3}(?:\.\d{1,3})*[\.\)]\s+", clean))
         )
+
+        # Шапку розділу часто розбиває МʼЯКИЙ ПЕРЕНОС (Shift+Enter) просто
+        # посеред назви частини: «…офіцерського складу 46 окремого⏎
+        # ремонтно-відновлювального полку ЗВІЛЬНИТИ…». Обидва уламки
+        # проходили як шапка (другий — бо закінчується двокрапкою) і ставали
+        # ОКРЕМИМИ блоками, тож назва частини лишалася розірваною і не
+        # знаходилась зовсім: усі пункти розділу втрачали адресата.
+        #
+        # Уламок продовження починається з МАЛОЇ літери — цим він і
+        # відрізняється від справжньої підшапки («У ЗАПАС ЗА ПІДПУНКТОМ …:»),
+        # яка завжди починається з великої.
+        is_heading_continuation = (
+            previous_line_was_heading
+            and not clean.startswith("§")
+            and not is_new_item
+            and not clean.casefold().startswith("підстава")
+            and not _starts_a_new_heading(clean)
+            and current_block is not None
+            and current_block["type"] == "section"
+        )
+        if is_heading_continuation:
+            current_block["lines"].append(line)
+            current_block["end_line"] = abs_idx
+            active_heading_end_idx = abs_idx
+            if heading_segments:
+                heading_segments[-1][1] = abs_idx
+                heading_segments[-1][2] = f"{heading_segments[-1][2]} {clean}".strip()
+                current_parent_heading = "\n\n".join(seg[2] for seg in heading_segments)
+                current_block["heading"] = current_parent_heading
+                current_block["heading_ranges"] = [(seg[0], seg[1]) for seg in heading_segments]
+            # Підтримуємо ланцюг із трьох і більше уламків. Середній уламок
+            # не зобов'язаний сам закінчуватися двокрапкою або містити
+            # «Відповідно до», але наступний рядок усе ще є продовженням
+            # тієї самої шапки після Shift+Enter.
+            previous_line_was_heading = True
+            continue
+
+        previous_line_was_heading = is_section_marker
 
         if is_section_marker:
             if clean.startswith("§") or not current_parent_heading:
                 current_parent_heading = line
+                active_heading_start_idx = abs_idx
+                heading_segments = [[abs_idx, abs_idx, line]]
+                pre_discharge_heading_segments = None
+                last_segment_is_discharge = False
             else:
-                current_parent_heading += "\n\n" + line
+                is_discharge_line = _is_inline_discharge_basis(line)
+                if is_discharge_line and last_segment_is_discharge and heading_segments:
+                    # Сусідня підшапка-причина звільнення (напр. підпункт «в»
+                    # після підпункту «а») заміняє попередню на тому самому
+                    # рівні ієрархії, а не додається як глибша вкладеність.
+                    pre_discharge_heading_segments = [list(seg) for seg in heading_segments[:-1]]
+                    heading_segments[-1] = [abs_idx, abs_idx, line]
+                else:
+                    pre_discharge_heading_segments = [list(seg) for seg in heading_segments]
+                    heading_segments.append([abs_idx, abs_idx, line])
+                last_segment_is_discharge = is_discharge_line
+                current_parent_heading = "\n\n".join(seg[2] for seg in heading_segments)
+            active_heading_end_idx = abs_idx
             current_block = {
                 "type": "section",
                 "heading": current_parent_heading,
                 "label": clean.split()[0] if clean.split() else "Розділ",
                 "lines": [line],
+                "start_line": abs_idx,
+                "end_line": abs_idx,
+                "heading_start_line": active_heading_start_idx,
+                "heading_end_line": active_heading_end_idx,
+                "heading_ranges": [(seg[0], seg[1]) for seg in heading_segments],
             }
             blocks.append(current_block)
         elif is_new_item:
             match = re.match(r"^(\d+[\.\d]*)", clean)
             label = f"Пункт {match.group(1)}" if match else "Пункт"
+            item_heading = current_parent_heading
+            item_segments = heading_segments
+            if (
+                last_segment_is_discharge
+                and pre_discharge_heading_segments is not None
+                and _is_inline_discharge_basis(clean)
+            ):
+                # Пункт сам формулює власну підставу звільнення — не
+                # копіюємо зовнішню підшапку «У ЗАПАС ЗА ПІДПУНКТОМ …»,
+                # лишаємо лише попередні рівні ієрархії (§ + основна шапка).
+                item_segments = pre_discharge_heading_segments
+                item_heading = "\n\n".join(seg[2] for seg in item_segments)
+            item_heading_start = item_segments[0][0] if item_segments else active_heading_start_idx
+            item_heading_end = (
+                item_segments[-1][1] if item_segments
+                else (active_heading_end_idx if active_heading_end_idx >= 0 else abs_idx - 1)
+            )
             current_block = {
                 "type": "item",
-                "heading": current_parent_heading,
+                "heading": item_heading,
                 "label": label,
+                # Ієрархія БЕЗ зовнішньої підшапки-підстави. Знадобиться, якщо
+                # власна підстава пункту стоїть не в першому його рядку.
+                "_pre_discharge_segments": (
+                    [list(seg) for seg in pre_discharge_heading_segments]
+                    if last_segment_is_discharge and pre_discharge_heading_segments is not None
+                    else None
+                ),
                 "lines": [line],
+                "start_line": abs_idx,
+                "end_line": abs_idx,
+                "heading_start_line": item_heading_start,
+                "heading_end_line": item_heading_end,
+                "heading_ranges": [(seg[0], seg[1]) for seg in item_segments],
             }
             blocks.append(current_block)
         else:
             if current_block:
                 current_block["lines"].append(line)
+                current_block["end_line"] = abs_idx
             else:
                 current_block = {
                     "type": "item",
                     "heading": current_parent_heading,
                     "label": "Основний текст",
                     "lines": [line],
+                    "start_line": abs_idx,
+                    "end_line": abs_idx,
+                    "heading_start_line": active_heading_start_idx,
+                    "heading_end_line": active_heading_end_idx if active_heading_end_idx >= 0 else abs_idx - 1,
                 }
                 blocks.append(current_block)
 
@@ -986,13 +1955,52 @@ def map_military_units(
     unit_counts: dict[str, int] = {}
     unit_open_names: dict[str, set[str]] = {}
     match_report_rows = []
+    # Ці два списки є джерелом даних для вкладок і Excel-контролю
+    # генератора. Раніше ключі очікувалися в інтерфейсі, але не поверталися
+    # звідси, через що «Контроль пропущених пунктів» завжди був порожнім.
+    unmatched_items: list[dict] = []
+    skipped_items: list[dict] = []
+    management_paragraphs: dict[str, dict] = {}
+    routing_audit: list[dict] = []
+
+    # Власна підстава звільнення може стояти НЕ в першому рядку пункту: текст
+    # часто розриває мʼякий перенос, і «У ЗАПАС ЗА ПІДПУНКТОМ …» опиняється на
+    # другому рядку. Перевірка при створенні блоку бачила лише перший рядок,
+    # тому до пункту приліплювалася ЧУЖА зовнішня підшапка (правило 4 AGENT.md).
+    for item_block in blocks:
+        if item_block.get("type") != "item":
+            continue
+        alt_segments = item_block.pop("_pre_discharge_segments", None)
+        if not alt_segments:
+            continue
+        alt_ranges = [(seg[0], seg[1]) for seg in alt_segments]
+        if item_block.get("heading_ranges") == alt_ranges:
+            continue
+        if _is_inline_discharge_basis(chr(10).join(item_block.get("lines", []))):
+            item_block["heading"] = (chr(10) * 2).join(seg[2] for seg in alt_segments)
+            item_block["heading_ranges"] = alt_ranges
 
     processed_lines = list(lines)
-    active_section_units: set[tuple[str, str]] = set()
+    active_section_units: set[tuple[str, str]] = set(header_zvidky_units)
 
     for block in blocks:
         if block["type"] == "section":
             section_raw_text = "\n".join(block["lines"])
+            # `lines` містить лише фізичний уламок, який створив поточний
+            # section-блок. Word може розбити одну шапку м'яким переносом,
+            # окремими абзацами/комірками або навіть порожнім абзацом. Повна
+            # актуальна ієрархія вже зібрана в `heading`; саме її треба
+            # перевіряти під час пошуку адресата, інакше номер та початок
+            # назви лишаються в одному блоці, а тип частини — в іншому.
+            # Не вибираємо одне з двох джерел. `heading` містить успадковану
+            # ієрархію шапок, а `lines` — усі фізичні абзаци поточного блоку.
+            # У реальних DOCX продовження шапки може починатися з великої
+            # літери: тоді воно залишається у `lines`, але не додається до
+            # `heading`. Саме в такому продовженні часто стоїть назва ВЧ.
+            heading_text = str(block.get("heading") or "").strip()
+            section_search_text = "\n\n".join(
+                part for part in (heading_text, section_raw_text.strip()) if part
+            )
             sec_units: set[tuple[str, str]] = set()
 
             # Шукаємо ЗВІДКИ (вихідна ВЧ) та КУДИ (цільова ВЧ) у шапці розділу
@@ -1005,44 +2013,45 @@ def map_military_units(
 
             # 1. Знаходимо ВЧ напрямку КУДИ
             kudy_units: set[tuple[str, str]] = set()
-            if kudy_text and "цього саг" not in kudy_text.lower() and "цієї саг" not in kudy_text.lower() and "того ж" not in kudy_text.lower():
-                for open_name, closed_code, corps_col, sender_key, pattern in unit_patterns:
-                    m = pattern.search(kudy_text)
-                    if m:
-                        matched_str = m.group(0)
-                        low_open = open_name.lower()
-                        is_tck_entry = "тцк" in low_open or "територіальн" in low_open or "центр" in low_open
-                        target_name = sender_key if is_tck_entry else (corps_col if (corps_col and ("корпус" in matched_str.lower() or "ак" in matched_str.lower())) else open_name)
-                        kudy_units.add((sender_key, target_name))
+            if kudy_text:
+                for open_name, _closed_code, _corps_col, sender_key, _pattern, _matches in direct_unit_matches(kudy_text):
+                    kudy_units.add((sender_key, open_name))
                 if not kudy_units:
                     sec_tck = _extract_tck_sender(kudy_text)
                     if sec_tck:
-                        kudy_units.add((sec_tck, "ТЦК та СП"))
+                        sec_tck_entry = _find_entry_in_mapping(sec_tck, sec_tck, mapping_dict)
+                        sec_tck_route = route_from_current_table(sec_tck_entry)
+                        if sec_tck_route:
+                            kudy_units.add(sec_tck_route)
 
-            # 2. Знаходимо ВЧ напрямку ЗВІДКИ (або загальну ВЧ у шапці)
+            # 2. Знаходимо ВЧ напрямку ЗВІДКИ (або загальну ВЧ у шапці).
+            #
+            # Шапка може називати КІЛЬКА частин: «По військовій частині А1111 та
+            # військовій частині А2222:». Раніше цикл зупинявся на першій
+            # знайденій (`break`), тож пункти під такою шапкою йшли лише в ОДИН
+            # витяг — причому в який саме, залежало від порядку рядків у
+            # словнику, тому виглядало випадковим. Напрямок КУДИ вище збирає всі
+            # збіги; тут робимо так само.
             zvidky_units: set[tuple[str, str]] = set()
-            for open_name, closed_code, corps_col, sender_key, pattern in unit_patterns:
-                m = pattern.search(section_raw_text)
-                if m:
-                    matched_str = m.group(0)
-                    low_open = open_name.lower()
-                    is_tck_entry = "тцк" in low_open or "територіальн" in low_open or "центр" in low_open
-                    target_name = sender_key if is_tck_entry else (corps_col if (corps_col and ("корпус" in matched_str.lower() or "ак" in matched_str.lower())) else open_name)
-                    zvidky_units.add((sender_key, target_name))
-                    break
+            for open_name, _closed_code, _corps_col, sender_key, _pattern, _matches in direct_unit_matches(section_search_text):
+                zvidky_units.add((sender_key, open_name))
 
-            sec_units = (zvidky_units | kudy_units)
-            if len(sec_units) > 2:
-                sec_units = set(list(sec_units)[:2])
-
+            sec_units = zvidky_units | kudy_units
             if sec_units:
                 active_section_units = sec_units
+            elif str(block["lines"][0] if block["lines"] else "").strip().startswith("§"):
+                # Правило 4.3: fallback на вихідну ВЧ із шапки наказу діє для
+                # НОВОГО розділу §, який сам частини не називає.
+                active_section_units = set(header_zvidky_units)
+            # Інакше це ПІДШАПКА всередині того самого § («У ЗАПАС ЗА
+            # ПІДПУНКТОМ …:»). Вона задає підставу, а не адресата, тому
+            # частину, названу в шапці розділу, треба ЗБЕРЕГТИ. Раніше вона
+            # скидалася, і всі пункти під підшапкою втрачали адресата.
             continue
 
         if block["type"] != "item":
             continue
 
-        # Очищаємо варіанти префіксів командних пунктів для точного зіставлення
         raw_text_clean = re.sub(
             r"\b(?:передов\w*|запасн\w*|головн\w*|)?\s*"
             r"(?:командн\w*\s+пункт\w*|пункт\w*\s+управління|ЗКП|ГКП|ППУ|КП)\s+",
@@ -1050,20 +2059,20 @@ def map_military_units(
             "\n".join(block["lines"]),
             flags=re.IGNORECASE | re.UNICODE,
         )
+        full_item_text = "\n".join(block["lines"]).strip()
         block_raw_text = _get_item_main_text(block["lines"])
         block_replaced_lines = list(block["lines"])
+        block_replaced_text = "\n".join(block_replaced_lines)
         matched_units_in_block: set[tuple[str, str]] = set()
-
-            # Якщо у базі є вихідна ВЧ із шапки наказу
         item_destinations: set[tuple[str, str]] = set()
+        matched_open_names_for_item: list[str] = []
 
-        # 1. Зіставлення за патернами з колонок A (повна назва) та C (скорочення)
-        for open_name, closed_code, corps_col, sender_key, pattern in unit_patterns:
-            all_matches = pattern.findall(block_raw_text) or pattern.findall(raw_text_clean)
-            if not all_matches:
-                continue
+        # 1. Зіставлення виключно за пошуковими назвами зі стовпця A.
+        for open_name, closed_code, corps_col, sender_key, pattern, all_matches in direct_unit_matches(block_raw_text):
+            if open_name not in matched_open_names_for_item:
+                matched_open_names_for_item.append(open_name)
 
-            for found_form in set(str(m) if isinstance(m, str) else str(m[0]) for m in all_matches):
+            for found_form in {match.group(0) for match in all_matches}:
                 existing = next(
                     (r for r in match_report_rows if r[0] == open_name and r[1] == found_form),
                     None,
@@ -1076,38 +2085,111 @@ def map_military_units(
                 else:
                     match_report_rows.append((open_name, found_form, closed_code, 1))
 
-            block_replaced_lines = [pattern.sub(closed_code, ln) for ln in block_replaced_lines]
-            matched_str = str(all_matches[0]) if all_matches else ""
-            low_open = open_name.lower()
-            is_tck_entry = "тцк" in low_open or "територіальн" in low_open or "центр" in low_open
-            target_name = sender_key if is_tck_entry else (corps_col if (corps_col and ("корпус" in matched_str.lower() or "ак" in matched_str.lower())) else open_name)
-            item_destinations.add((sender_key, target_name))
-            break
+            # `direct_unit_matches()` уже вибрав конкретний рядок A. Під час
+            # шифрування не можна вдруге робити безумовну глобальну заміну:
+            # загальна назва, явно згадана в одному місці, могла зачепити ще
+            # й займенниковий зворот «цього самого центру» в іншому місці.
+            # Маска зберігає індекси, тому замінюємо лише справжні назви.
+            routing_mask = _mask_anaphoric_unit_references(block_replaced_text)
 
-        # 2. Пошук за цифровими шифрами в/ч (наприклад: військової частини А2424 або А 2828)
-        if not item_destinations:
-            found_ciphers = re.findall(r"\bА\s*(\d{4})\b", block_raw_text, re.IGNORECASE)
-            for digit in found_ciphers:
-                if digit in cipher_digits_map:
-                    s_key, o_name = cipher_digits_map[digit]
-                    item_destinations.add((s_key, o_name))
-                    break
+            def replace_explicit_item_name(match: re.Match) -> str:
+                matched_text = match.group(0)
+                masked_slice = routing_mask[match.start():match.end()]
+                if any(
+                    original_char != masked_char and not original_char.isspace()
+                    for original_char, masked_char in zip(matched_text, masked_slice)
+                ):
+                    return matched_text
+                return closed_code
 
-        # 3. Якщо в таблиці немає відповідностей — перевіряємо ТЦК (районний/міський -> Область)
-        if not item_destinations:
-            tck_sender = _extract_tck_sender(block_raw_text)
-            if tck_sender:
-                item_destinations.add((tck_sender, "ТЦК та СП"))
+            block_replaced_text = pattern.sub(
+                replace_explicit_item_name, block_replaced_text
+            )
+            block_replaced_lines = block_replaced_text.splitlines()
+            item_destinations.add((sender_key, open_name))
+
+        # 2. Центри рекрутингу: у словнику номер часто записано після назви
+        # («Центр рекрутингу № 7»), а в наказі — перед нею («7 центру
+        # рекрутингу»). Зіставляємо номер і ключові слова окремо, без
+        # прив'язки до конкретного номера та лише серед записів Excel.
+        recruiting_numbers = set(
+            re.findall(
+                r"\b(\d{1,3})[-\s]*(?:-?й|-?го|-?му|-?м)?\s*"
+                r"(?:центр\w*|цнтр\w*)\s+рекрутинг\w*\b",
+                block_raw_text,
+                re.IGNORECASE | re.UNICODE,
+            )
+        )
+        directly_matched_recruiting_numbers = {
+            number
+            for number in recruiting_numbers
+            for open_name in matched_open_names_for_item
+            if re.search(rf"(?<!\d){re.escape(number)}(?!\d)", str(open_name))
+            and "рекрут" in str(open_name).casefold()
+        }
+        for number in sorted(recruiting_numbers, key=int):
+            if number in directly_matched_recruiting_numbers:
+                continue
+            candidates = []
+            for open_name, closed_code, corps_col, sender_key, pattern in unit_patterns:
+                entry_text = str(open_name).casefold()
+                has_number = bool(
+                    re.search(rf"(?<!\d){re.escape(number)}(?!\d)", entry_text)
+                )
+                is_recruiting_entry = (
+                    "центр" in entry_text and "рекрут" in entry_text
+                ) or bool(
+                    has_number
+                    and re.search(
+                        rf"(?<!\d){re.escape(number)}(?!\d)\s*цр\b",
+                        entry_text,
+                        re.IGNORECASE | re.UNICODE,
+                    )
+                )
+                if has_number and is_recruiting_entry:
+                    candidates.append(
+                        (open_name, closed_code, corps_col, sender_key, pattern)
+                    )
+            if not candidates:
+                continue
+            # Для оберненого порядку слів, який не взяв загальний matcher,
+            # обираємо один найповніший/пріоритетний рядок A цього номера.
+            candidates.sort(
+                key=lambda candidate: (
+                    not str(candidate[0]).startswith("#"),
+                    -len(_unit_name_signature(candidate[0])),
+                    -len(str(candidate[0])),
+                )
+            )
+            open_name, _closed_code, _corps_col, sender_key, _pattern = candidates[0]
+            if open_name not in matched_open_names_for_item:
+                matched_open_names_for_item.append(open_name)
+            item_destinations.add((sender_key, open_name))
+
+        # 3. Якщо в тексті згадується ТЦК (районний/міський -> Область) — додаємо його
+        for tck_sender in _extract_tck_senders(block_raw_text):
+            if tck_sender in [s for s, _ in item_destinations]:
+                continue
+            tck_entry = _find_entry_in_mapping(tck_sender, tck_sender, mapping_dict)
+            tck_route = route_from_current_table(tck_entry)
+            if tck_route and tck_route[0] not in [s for s, _ in item_destinations]:
+                item_destinations.add(tck_route)
 
         # 4. Якщо в таблиці немає відповідностей — перевіряємо чи в тексті явно є АК
         if not item_destinations:
             corps_name = _extract_army_corps(block_raw_text)
             if corps_name:
                 corps_abbr = _extract_corps_abbr(corps_name)
-                c_key = canonical_key_map.get(corps_name) or canonical_key_map.get(corps_abbr) or corps_abbr
-                item_destinations.add((c_key, corps_name))
+                corps_entry = _find_corps_entry(corps_name, corps_abbr, mapping_dict)
+                corps_route = route_from_current_table(corps_entry)
+                if corps_route:
+                    item_destinations.add(corps_route)
 
-        # Якщо у тексті пункту є вказівка на внутрішнє переміщення ("цього самого батальйону", "цієї самої бригади", "цього ж полку") — цільова ВЧ = вихідна ВЧ
+        # Зворот «цього/цієї самої ...» сам по собі ще не означає внутрішнє
+        # переміщення. Воно є внутрішнім для маршрутизації лише тоді, коли у
+        # пункті НЕМАЄ окремо названого рядка A і єдиний адресат справді
+        # успадковується з шапки. Якщо частину/ТЦК названо в самому пункті,
+        # зворот є лише граматичним посиланням і не отримує такої позначки.
         has_internal_ref = bool(
             re.search(
                 r"\b(?:цього|цієї|того)\s+(?:самого|самої|ж)\b",
@@ -1115,33 +2197,113 @@ def map_military_units(
                 re.IGNORECASE,
             )
         )
-        if has_internal_ref:
-            item_destinations = set()
 
         # Формуємо підсумковий набір отримувачів пункту (Джерело ЗВІДКИ + Призначення КУДИ)
-        base_source = active_section_units or ({header_zvidky_unit} if header_zvidky_unit else set())
+        base_source = active_section_units or set(header_zvidky_units)
         matched_units_in_block = set(base_source) | item_destinations
-        if len(matched_units_in_block) > 2:
-            matched_units_in_block = set(list(matched_units_in_block)[:2])
+
+        def audit_recipient_names(recipient_pairs: set[tuple[str, str]]) -> list[str]:
+            return sorted(
+                {
+                    _normalize_key(raw_code, canonical_key_map) or str(open_name).strip()
+                    for raw_code, open_name in recipient_pairs
+                    if str(raw_code).strip() or str(open_name).strip()
+                }
+            )
+
+        item_recipient_names = audit_recipient_names(item_destinations)
+        context_recipient_names = audit_recipient_names(set(base_source))
+        final_recipient_names = audit_recipient_names(matched_units_in_block)
+        is_internal_movement = bool(
+            has_internal_ref
+            and context_recipient_names
+            and not item_recipient_names
+        )
+        # Зміни на посади в управлінні не включаються до загального переліку
+        # витягів. Це окремий напрямок розсилки, який користувач обробляє поза
+        # цим генератором, тому такий пункт не є «пропущеним».
+        is_management_change = (
+            not final_recipient_names
+            # Перевіряємо повний текст пункту, а не тільки розпорядчу його
+            # частину: фільтр маршрутизації прибирає службові/облікові рядки,
+            # але слово «управління» може бути саме в такому рядку.
+            and bool(re.search(r"\bуправлінн\w*\b", full_item_text, re.IGNORECASE))
+        )
+        applied_rules = []
+        if context_recipient_names:
+            applied_rules.append("адресат із шапки розділу/наказу")
+        if item_recipient_names:
+            applied_rules.append("адресат знайдено в пункті")
+        if is_internal_movement:
+            applied_rules.append("внутрішнє переміщення: адресат із контексту")
+        if is_management_change:
+            applied_rules.append("зміна до управління: витяг виключено із загального переліку")
+        routing_audit.append(
+            {
+                "label": block.get("label", ""),
+                "matched_entries": ", ".join(matched_open_names_for_item) or "—",
+                "applied_rules": "; ".join(applied_rules) or "адресата не знайдено",
+                "item_recipients": ", ".join(item_recipient_names) or "—",
+                "context_recipients": ", ".join(context_recipient_names) or "—",
+                "final_recipients": ", ".join(final_recipient_names) or "—",
+            }
+        )
 
         if matched_units_in_block:
-            full_item_text = "\n".join(block_replaced_lines).strip()
+            # Правило 4.1: text — завжди з відкритими назвами (для витягів)
+            # text_cipher — з шифрами (для повідомлень/рішень)
+            full_item_text_cipher = "\n".join(block_replaced_lines).strip()
             # Дедуплікація: один пункт наказу додається лише ОДИН раз на кожен унікальний norm_code
             seen_norm_codes: set[str] = set()
-            for raw_code, open_name in matched_units_in_block:
+            # Явно названий у пункті рядок A має пріоритет над успадкованою
+            # шапкою, якщо обидва зводяться до одного sender_key/шифру.
+            # Інакше лексикографічне сортування могло випадково взяти E/F зі
+            # шапки, а не з локально знайденого рядка A.
+            recipient_pairs = sorted(item_destinations) + sorted(
+                set(base_source) - set(item_destinations)
+            )
+            for raw_code, open_name in recipient_pairs:
                 norm_code = _normalize_key(raw_code, canonical_key_map)
                 if norm_code in seen_norm_codes:
                     continue
                 seen_norm_codes.add(norm_code)
+
+                # Пошук адресата вже завершено за стовпцем A. Тут лише беремо
+                # вихідні B–F саме з обраного рядка (для підпорядкованої
+                # частини — з уже визначеного рядка корпусу).
+                # B та E/F можуть повторюватися: зберігаємо саме знайдений
+                # рядок A, включно з явним перенаправленням до корпусу/ОТЦК.
+                mapping_entry = route_entries_by_open_name.get(open_name)
+                if mapping_entry is None:
+                    mapping_entry = route_entries_by_sender_key.get(norm_code)
+                if mapping_entry is None:
+                    mapping_entry = _find_entry_in_mapping(norm_code, open_name, mapping_dict)
+                rec_to = ""
+                dest_where = ""
+                if mapping_entry:
+                    rec_to = str(mapping_entry.get("recipient_to") or "").strip()
+                    dest_where = str(mapping_entry.get("destination_where") or mapping_entry.get("dislocation") or "").strip()
+
+                # Якщо поле 'Куди' не заповнено в Excel — встановлюємо маркер 'КУДИ' для ручної правки (виділяється червоним)
+                if not dest_where:
+                    dest_where = "КУДИ"
+
                 unit_entry = unit_data_map.setdefault(
                     norm_code,
                     {
                         "unit_code": norm_code,
+                        "open_name": open_name,
                         "abbreviation": unit_abbr_map.get(norm_code, ""),
+                        "recipient_to": rec_to,
+                        "destination_where": dest_where,
                         "header_lines": header_lines,
                         "items": [],
                     },
                 )
+                if not unit_entry.get("recipient_to") and rec_to:
+                    unit_entry["recipient_to"] = rec_to
+                if (not unit_entry.get("destination_where") or unit_entry.get("destination_where") == "КУДИ") and dest_where and dest_where != "КУДИ":
+                    unit_entry["destination_where"] = dest_where
                 if "abbreviation" not in unit_entry or not unit_entry["abbreviation"]:
                     unit_entry["abbreviation"] = unit_abbr_map.get(norm_code, "")
                 unit_entry["items"].append(
@@ -1149,10 +2311,55 @@ def map_military_units(
                         "parent_heading": block["heading"],
                         "label": block["label"],
                         "text": full_item_text,
+                        "text_cipher": full_item_text_cipher,
+                        "source_start_line": block.get("start_line", 0),
+                        "source_end_line": block.get("end_line", 0),
+                        "heading_start_line": block.get("heading_start_line", 0),
+                        "heading_end_line": block.get("heading_end_line", 0),
+                        "heading_ranges": block.get("heading_ranges", []),
                     }
                 )
                 unit_counts[norm_code] = unit_counts.get(norm_code, 0) + 1
                 unit_open_names.setdefault(norm_code, set()).add(open_name)
+        elif is_management_change:
+            # Окремий вихід, який НЕ бере участі у units_table/units_list.
+            # По одному витягу на пункт; адреса та друкарське компонування
+            # для управління не потрібні.
+            # Ключ читається в журналі та у звітах контролю, тому містить
+            # номер пункту. Номер у кінці додається лише на випадок, коли та
+            # сама мітка трапилась у різних § і ключі збіглися б.
+            management_key = f"Управління — {block.get('label', '')}".strip(" —")
+            if not management_key or management_key in management_paragraphs:
+                management_key = f"{management_key or 'Управління'} ({len(management_paragraphs) + 1})"
+            management_paragraphs[management_key] = {
+                "unit_code": management_key, "open_name": "Управління",
+                "recipient_to": "", "destination_where": "", "abbreviation": "",
+                "header_lines": header_lines,
+                "items": [{
+                    "parent_heading": block["heading"], "label": block.get("label", ""),
+                    "text": full_item_text,
+                    "source_start_line": block.get("start_line", 0),
+                    "source_end_line": block.get("end_line", 0),
+                    "heading_start_line": block.get("heading_start_line", 0),
+                    "heading_end_line": block.get("heading_end_line", 0),
+                    "heading_ranges": block.get("heading_ranges", []),
+                }],
+            }
+            skipped_items.append(
+                {
+                    "label": block.get("label", ""),
+                    "text": "\n".join(block.get("lines", [])).strip(),
+                    "reason": "Зміна до управління: витяг не створюється у загальному переліку.",
+                }
+            )
+        else:
+            unmatched_items.append(
+                {
+                    "label": block.get("label", ""),
+                    "text": "\n".join(block.get("lines", [])).strip(),
+                    "reason": "Не знайдено адресата ні в пункті, ні в контексті розділу/наказу.",
+                }
+            )
 
     # ── Будуємо вихідні таблиці ────────────────────────────────────────────────
     table_rows = []
@@ -1184,8 +2391,15 @@ def map_military_units(
         "units_table": table,
         "units_list": list(unit_counts.keys()),
         "unit_paragraphs": unit_data_map,
+        "management_paragraphs": management_paragraphs,
         "unit_abbr_map": unit_abbr_map,
         "match_report": match_report,
+        "unmatched_items": unmatched_items,
+        "skipped_items": skipped_items,
+        "routing_audit": routing_audit,
+        "preamble_recipient": ", ".join(
+            sorted(open_name for _sender_key, open_name in header_zvidky_units)
+        ),
         "summary": summary,
     }
 
@@ -1327,50 +2541,207 @@ def split_by_senders(
 
 
 # ── Правила заміни займенниково-іменникових зворотів ───────────────────────────
+# ── Звороти-посилання на раніше згадану частину ──────────────────────────────
+#
+# «цієї самої бригади», «цього самого батальйону», «у цій самій роті» тощо
+# мають ставати «…військової частини» у ТОМУ Ж відмінку, але вже в жіночому
+# роді, бо «військова частина» — жіночого роду. Відмінок визначається за
+# формою означення (цей/той/зазначений/вказаний/даний), яка однозначна.
+# Прийменник не захоплюється: давальний і місцевий дають однакову форму
+# («військовій частині»), тому «у цьому самому батальйоні» коректно стає
+# «у цій самій військовій частині» без окремого правила на прийменник.
+
+_UNIT_PHRASE_CASE_FORMS = {
+    "Н": "військова частина",
+    "Р": "військової частини",
+    "Д": "військовій частині",   # давальний і місцевий збігаються
+    "З": "військову частину",
+    "О": "військовою частиною",
+}
+
+# Форми означення в жіночому роді — те, що потрапляє у вихідний текст.
+_DETERMINER_FEMININE = {
+    "цей":        {"Н": "ця",        "Р": "цієї",       "Д": "цій",        "З": "цю",        "О": "цією"},
+    "той":        {"Н": "та",        "Р": "тієї",       "Д": "тій",        "З": "ту",        "О": "тією"},
+    "зазначений": {"Н": "зазначена", "Р": "зазначеної", "Д": "зазначеній", "З": "зазначену", "О": "зазначеною"},
+    "вказаний":   {"Н": "вказана",   "Р": "вказаної",   "Д": "вказаній",   "З": "вказану",   "О": "вказаною"},
+    "даний":      {"Н": "дана",      "Р": "даної",      "Д": "даній",      "З": "дану",      "О": "даною"},
+}
+
+_SAM_FEMININE = {"Н": "сама", "Р": "самої", "Д": "самій", "З": "саму", "О": "самою"}
+
+# Усі форми означення, які розпізнаються у вхідному тексті (будь-який рід).
+_DETERMINER_SURFACE_FORMS = {
+    "цей": {
+        "Н": ("цей", "ця", "це"),
+        "Р": ("цього", "цієї"),
+        "Д": ("цьому", "цій"),
+        "З": ("цю",),
+        "О": ("цим", "цією"),
+    },
+    "той": {
+        "Н": ("той", "та", "те"),
+        "Р": ("того", "тієї", "тої"),
+        "Д": ("тому", "тій"),
+        "З": ("ту",),
+        "О": ("тим", "тією", "тою"),
+    },
+    "зазначений": {
+        "Н": ("зазначений", "зазначена", "зазначене"),
+        "Р": ("зазначеного", "зазначеної"),
+        "Д": ("зазначеному", "зазначеній"),
+        "З": ("зазначену",),
+        "О": ("зазначеним", "зазначеною"),
+    },
+    "вказаний": {
+        "Н": ("вказаний", "вказана", "вказане"),
+        "Р": ("вказаного", "вказаної"),
+        "Д": ("вказаному", "вказаній"),
+        "З": ("вказану",),
+        "О": ("вказаним", "вказаною"),
+    },
+    "даний": {
+        "Н": ("даний", "дана", "дане"),
+        "Р": ("даного", "даної"),
+        "Д": ("даному", "даній"),
+        "З": ("дану",),
+        "О": ("даним", "даною"),
+    },
+}
+
+_DETERMINER_LOOKUP = {
+    form: (lemma, case_label)
+    for lemma, by_case in _DETERMINER_SURFACE_FORMS.items()
+    for case_label, forms in by_case.items()
+    for form in forms
+}
+
+# Ці форми поза контекстом надто неоднозначні («та» — сполучник «і»,
+# «це»/«те» — вказівні частки), тому перетворюються лише разом зі словом «сам…».
+_DETERMINER_REQUIRES_SAM = frozenset({"та", "те", "це"})
+
+_SAM_SURFACE_FORMS = (
+    "самий", "сама", "саме", "самого", "самої", "самому",
+    "самій", "саму", "самим", "самою",
+)
+
+# Родові назви, на які може посилатися зворот. Сюди входять ЛИШЕ окремі
+# військові частини та великі установи, які мають власний шифр (батальйон,
+# бригада, центр, база, госпіталь тощо). Підрозділи всередині частини —
+# рота, взвод, батарея, група, ескадрилья, відділ, відділення, служба,
+# ланка, екіпаж, штаб, командний пункт — свідомо НЕ включені: вони не є
+# військовою частиною, тому «цієї самої роти» лишається без змін.
+# Назва потрібна як запобіжник: без неї зворот на кшталт «цього самого
+# офіцера» помилково перетворювався б на військову частину.
+_MASC_UNIT_STEMS = (
+    "батальйон", "полк", "дивізіон", "загін", "загон", "корпус", "центр",
+    "вузол", "вузл", "полігон", "госпіталь", "госпітал", "арсенал",
+    "інститут", "університет",
+)
+_MASC_UNIT_ENDINGS = ("", "а", "у", "ю", "ом", "ем", "і", "ові", "еві", "я")
+
+_FEM_UNIT_STEMS = (
+    "бригад", "баз", "частин", "дивізі", "армі", "комендатур",
+    "академі", "флотилі",
+)
+_FEM_UNIT_ENDINGS = ("а", "и", "і", "у", "ою", "я", "ї", "ю", "єю", "ею")
+
+_NEUT_UNIT_STEMS = (
+    "управлінн", "з'єднанн", "командуванн", "училищ", "угрупованн",
+)
+_NEUT_UNIT_ENDINGS = ("я", "ю", "ям", "і", "е", "ем", "а")
+
+_UNIT_HEAD_NOUN_FORMS = sorted(
+    {stem + ending for stem in _MASC_UNIT_STEMS for ending in _MASC_UNIT_ENDINGS}
+    | {stem + ending for stem in _FEM_UNIT_STEMS for ending in _FEM_UNIT_ENDINGS}
+    | {stem + ending for stem in _NEUT_UNIT_STEMS for ending in _NEUT_UNIT_ENDINGS},
+    key=len,
+    reverse=True,
+)
+
+_UNIT_REFERENCE_PATTERN = re.compile(
+    r"\b(" + "|".join(re.escape(f) for f in sorted(_DETERMINER_LOOKUP, key=len, reverse=True)) + r")"
+    r"(?:\s+(ж|же))?"
+    r"(?:\s+(" + "|".join(re.escape(f) for f in sorted(_SAM_SURFACE_FORMS, key=len, reverse=True)) + r"))?"
+    r"\s+(?:" + "|".join(re.escape(f) for f in _UNIT_HEAD_NOUN_FORMS) + r")\b"
+    # ТЦК не є військовою частиною і в повідомленнях лишається відкритою
+    # назвою, тому «центру комплектування…» не перетворюємо.
+    r"(?!\s+комплектуванн)",
+    re.IGNORECASE | re.UNICODE,
+)
+
+
+def _replace_unit_reference_phrase(match: re.Match) -> str:
+    """Перетворює зворот-посилання на «…військової частини» у тому ж відмінку."""
+    determiner_raw = match.group(1).lower()
+    particle = match.group(2)
+    sam_raw = match.group(3)
+
+    lookup = _DETERMINER_LOOKUP.get(determiner_raw)
+    if not lookup:
+        return match.group(0)
+    lemma, case_label = lookup
+
+    # Неоднозначні короткі форми чіпаємо лише за наявності слова «сам…».
+    if determiner_raw in _DETERMINER_REQUIRES_SAM and not sam_raw:
+        return match.group(0)
+
+    parts = [_DETERMINER_FEMININE[lemma][case_label]]
+    if particle:
+        parts.append(particle.lower())
+    if sam_raw:
+        parts.append(_SAM_FEMININE[case_label])
+    parts.append(_UNIT_PHRASE_CASE_FORMS[case_label])
+
+    result = " ".join(parts)
+    # Зберігаємо велику літеру, якщо зворот стояв на початку речення
+    # (_match_case у викликачів обробляє лише суцільний ВЕРХНІЙ РЕГІСТР).
+    if match.group(0)[:1].isupper():
+        result = result[:1].upper() + result[1:]
+    return result
+
+
 _UNIT_PHRASE_REPLACEMENTS = [
-    # (цієї / цієї самої / зазначеної / вказаної / даної) (бригади / полку / батальйону ...)
-    (
-        re.compile(
-            r"\b(цієї|цієї\s+самої|цього|цього\s+самого|зазначеної|зазначеного|вказаної|вказаного|даної|даного)\s+(бригади|полку|батальйону|дивізіону|загону|корпусу|центру)\b",
-            re.IGNORECASE | re.UNICODE,
-        ),
-        lambda m: (
-            "цієї самої військової частини" if "само" in m.group(0).lower()
-            else ("цієї військової частини" if m.group(1).lower() in ("цієї", "цього")
-            else ("зазначеної військової частини" if "зазнач" in m.group(1).lower()
-            else ("вказаної військової частини" if "вказан" in m.group(1).lower()
-            else "даної військової частини")))
-        )
-    ),
-    # (цією / цією самою / цим / цим самим) (бригадою / полком ...)
-    (
-        re.compile(
-            r"\b(цією|цією\s+самою|цим|цим\s+самим|зазначеною|зазначеним|вказаною|вказаним|даною|даним)\s+(бригадою|полком|батальйоном|дивізіоном|загоном|корпусом)\b",
-            re.IGNORECASE | re.UNICODE,
-        ),
-        lambda m: (
-            "цією самою військовою частиною" if "само" in m.group(0).lower()
-            else ("цією військовою частиною" if m.group(1).lower() in ("цією", "цим")
-            else ("зазначеною військовою частиною" if "зазнач" in m.group(1).lower()
-            else ("вказаною військовою частиною" if "вказан" in m.group(1).lower()
-            else "даною військовою частиною")))
-        )
-    ),
-    # (у / в / по) (цій / цій самій / цьому / цьому самому) (бригаді / полку / батальйоні ...)
-    (
-        re.compile(
-            r"\b(у|в|по)\s+(цій|цій\s+самій|цьому|цьому\s+самому|зазначеній|зазначеному|вказаній|вказаному|даній|даному)\s+(бригаді|полку|батальйоні|дивізіоні|загоні|корпусі)\b",
-            re.IGNORECASE | re.UNICODE,
-        ),
-        lambda m: (
-            f"{m.group(1)} цій самій військовій частині" if "само" in m.group(0).lower()
-            else (f"{m.group(1)} цій військовій частині" if m.group(2).lower() in ("цій", "цьому")
-            else (f"{m.group(1)} зазначеній військовій частині" if "зазнач" in m.group(2).lower()
-            else (f"{m.group(1)} вказаній військовій частині" if "вказан" in m.group(2).lower()
-            else f"{m.group(1)} даній військовій частині")))
-        )
-    ),
+    (_UNIT_REFERENCE_PATTERN, _replace_unit_reference_phrase),
 ]
+
+
+def _table_cipher(mapped_val: dict | str | None, open_name: str = "") -> str:
+    """Шифр рівно зі стовпця B; порожній рядок, якщо B не заповнено.
+
+    `read_recipient_mapping` кладе у `cipher` відкриту назву, коли B порожній
+    (так будуються ключі витягів). Шифром це не є: підставити таку «заміну» в
+    закритий текст означає лишити в ньому відкриту назву (розд. 9.5.7).
+    """
+    if isinstance(mapped_val, dict):
+        cipher = str(mapped_val.get("cipher") or mapped_val.get("closed_name") or "").strip()
+        open_name = str(mapped_val.get("open_name") or open_name or "").strip()
+    else:
+        cipher = str(mapped_val or "").strip()
+    if not cipher:
+        return ""
+    if open_name and _fix_military_typos(cipher).casefold() == _fix_military_typos(open_name).casefold():
+        return ""
+    return cipher
+
+
+def is_tck_entry(mapped_val: dict | str) -> bool:
+    """Чи є рядок словника територіальним центром комплектування (ТЦК).
+
+    ТЦК не є закритою частиною: у змісті його назва лишається ПОВНОЮ
+    відкритою (розд. 9.5.6), тому шифрування його рядки просто оминає.
+    """
+    if isinstance(mapped_val, dict):
+        parts = (
+            mapped_val.get("open_name"),
+            mapped_val.get("cipher"),
+            mapped_val.get("closed_name"),
+            mapped_val.get("abbreviation"),
+        )
+    else:
+        parts = (mapped_val,)
+    haystack = " ".join(str(part or "") for part in parts).lower()
+    return "тцк" in haystack or "комплектування" in haystack
 
 
 def _format_full_closed_unit_text(mapped_val: dict | str, mapping_dict: dict) -> str:
@@ -1385,13 +2756,7 @@ def _format_full_closed_unit_text(mapped_val: dict | str, mapping_dict: dict) ->
         corps_name = ""
 
     # Перевірка на ТЦК (територіальний центр комплектування) — залишаємо як є
-    is_tck = (
-        "тцк" in open_name.lower()
-        or "комплектування" in open_name.lower()
-        or "тцк" in cipher.lower()
-        or "комплектування" in cipher.lower()
-    )
-    if is_tck:
+    if is_tck_entry(mapped_val):
         return cipher or open_name
 
     def _to_unit_phrase(raw: str) -> str:
@@ -1410,13 +2775,24 @@ def _format_full_closed_unit_text(mapped_val: dict | str, mapping_dict: dict) ->
     unit_code = _to_unit_phrase(cipher)
 
     if corps_name:
-        corps_entry = mapping_dict.get(corps_name)
-        if corps_entry:
-            corps_cipher = str(corps_entry.get("cipher") if isinstance(corps_entry, dict) else corps_entry)
-            corps_code = _to_unit_phrase(corps_cipher)
-        else:
-            corps_code = _to_unit_phrase(corps_name)
-        return f"{unit_code} {corps_code}"
+        # Стовпець D — це ПОСИЛАННЯ на рядок корпусу, і в ньому майже завжди
+        # стоїть СКОРОЧЕННЯ («22 АК»), а не стовпець A того рядка
+        # («22 армійський корпус»). Прямий `mapping_dict.get(corps_name)`
+        # такого посилання не розвʼязував, і в текст підставлялося саме
+        # скорочення: «військової частини А9999 військової частини 22 АК».
+        # Далі це скорочення знаходив ВЛАСНИЙ патерн корпусу й шифрував ще
+        # раз, через що виникали ланцюги «…22 АК військової частини А2222»
+        # та дублі «військової частини військової частини».
+        # Посилання розвʼязуємо тим самим `_find_corps_entry`, що й витяги.
+        corps_entry = _find_corps_entry(corps_name, _extract_corps_abbr(corps_name), mapping_dict)
+        corps_cipher = _table_cipher(corps_entry)
+        if corps_cipher:
+            return f"{unit_code} {_to_unit_phrase(corps_cipher)}"
+        # Рядка корпусу немає в таблиці (або в ньому порожній B). Раніше сюди
+        # йшов сам текст стовпця D — «військової частини 99 АК», тобто
+        # вигаданий шифр. Шифр береться лише з таблиці (розд. 9.5.7), тому
+        # ланка корпусу не додається; генератор повідомлень про це попереджає.
+        return unit_code
 
     return unit_code
 
@@ -1535,7 +2911,7 @@ def generate_decision_order(
             "summary": "Порожній текст наказу",
         }
 
-    text = _fix_military_typos(text)
+    text = normalize_item_numbering(_fix_military_typos(text))
     mapping_raw = mapping or {}
     mapping_dict = {}
     for k, v in mapping_raw.items():
@@ -1573,38 +2949,45 @@ def generate_decision_order(
     replaced_count = 0
     report_rows = []
 
-    # 2. Замінюємо відкриті назви частин на закриті формовані назви (із корпусом) та збереженням CAPS
-    for open_name, mapped_val in mapping_dict.items():
+    # 2. Замінюємо лише назви з колонки A. Номерні та повніші назви —
+    # першими, щоб загальний рядок не перехопив їх через порядок Excel.
+    ordered_mapping = sorted(
+        mapping_dict.items(),
+        key=lambda item: (
+            any(token.startswith("#") for token in _unit_name_signature(item[0])),
+            len(_unit_name_signature(item[0])),
+            len(str(item[0])),
+        ),
+        reverse=True,
+    )
+    for open_name, mapped_val in ordered_mapping:
         closed_code = _format_full_closed_unit_text(mapped_val, mapping_dict)
         if isinstance(mapped_val, dict):
             raw_cipher = str(mapped_val.get("cipher", ""))
             corps_info = str(mapped_val.get("corps", ""))
-            abbreviation = str(mapped_val.get("abbreviation", "")).strip()
         else:
             raw_cipher = str(mapped_val)
             corps_info = ""
-            abbreviation = ""
-
-        matched = False
 
         # Зіставляємо за сигнатурою відкриту назву
         pattern = _build_unit_fuzzy_pattern(open_name) if fuzzy_match else re.compile(re.escape(open_name), re.IGNORECASE)
-        matches = pattern.findall(body_text)
-        if matches:
-            replaced_count += len(matches)
-            body_text = pattern.sub(lambda m: _match_case(m.group(0), closed_code), body_text)
-            matched = True
+        routing_mask = _mask_anaphoric_unit_references(body_text)
+        hits = [0]
 
-        # Зіставляємо скорочення
-        if abbreviation and abbreviation != open_name:
-            abbr_pattern = _build_unit_fuzzy_pattern(abbreviation) if fuzzy_match else re.compile(re.escape(abbreviation), re.IGNORECASE)
-            abbr_matches = abbr_pattern.findall(body_text)
-            if abbr_matches:
-                replaced_count += len(abbr_matches)
-                body_text = abbr_pattern.sub(lambda m: _match_case(m.group(0), closed_code), body_text)
-                matched = True
+        def replace_explicit_name(match: re.Match) -> str:
+            matched_text = match.group(0)
+            masked_slice = routing_mask[match.start():match.end()]
+            if any(
+                original_char != masked_char and not original_char.isspace()
+                for original_char, masked_char in zip(matched_text, masked_slice)
+            ):
+                return matched_text
+            hits[0] += 1
+            return _match_case(matched_text, closed_code)
 
-        if matched:
+        body_text = pattern.sub(replace_explicit_name, body_text)
+        if hits[0]:
+            replaced_count += hits[0]
             report_rows.append((open_name, raw_cipher, corps_info or "—", closed_code))
 
     # 3. Замінюємо звороти "цієї самої бригади", "цього самого полку" тощо (із збереженням CAPS)
@@ -1616,10 +2999,69 @@ def generate_decision_order(
                 return lambda m: _match_case(m.group(0), r_func(m))
             body_text = pattern.sub(_make_phrase_rep(replacer), body_text)
 
+    # 3.1. Нормалізація повторів "військової частини" та однакових шифрів
+    # Згортання подвійних/потрійних "військової частини військової частини"
+    body_text = re.sub(
+        r"\b(?:військов(?:ої|а|у|ій|ою)\s+частин(?:и|а|у|і|ою)\s*){2,}",
+        "військової частини ",
+        body_text,
+        flags=re.IGNORECASE,
+    )
+    body_text = re.sub(
+        r"\b(?:ВІЙСЬКОВ(?:ОЇ|А|У|ІЙ|ОЮ)\s+ЧАСТИН(?:И|А|У|І|ОЮ)\s*){2,}",
+        "ВІЙСЬКОВОЇ ЧАСТИНИ ",
+        body_text,
+    )
+    # Згортання однакових повторів шифрів підряд: "військової частини А1111 військової частини А1111"
+    body_text = re.sub(
+        r"\b(військов\w+\s+частин\w+\s+[АA]\d+)(?:\s+\1\b)+",
+        r"\1",
+        body_text,
+        flags=re.IGNORECASE,
+    )
+    body_text = re.sub(
+        r"\b(ВІЙСЬКОВ\w+\s+ЧАСТИН\w+\s+[АA]\d+)(?:\s+\1\b)+",
+        r"\1",
+        body_text,
+    )
+
     # 4. Застосовуємо додаткові правила/виправлення з нижнього порту 'rules'
     if rules:
         body_text, custom_count = _apply_custom_rules(body_text, rules)
         replaced_count += custom_count
+
+    # 4.1. Повторна санітизація після користувацьких правил
+    body_text = re.sub(
+        r"\b(?:військов(?:ої|а|у|ій|ою)\s+частин(?:и|а|у|і|ою)\s*){2,}",
+        "військової частини ",
+        body_text,
+        flags=re.IGNORECASE,
+    )
+    body_text = re.sub(
+        r"\b(?:ВІЙСЬКОВ(?:ОЇ|А|У|ІЙ|ОЮ)\s+ЧАСТИН(?:И|А|У|І|ОЮ)\s*){2,}",
+        "ВІЙСЬКОВОЇ ЧАСТИНИ ",
+        body_text,
+    )
+
+    # 4.2. Гарантуємо рівно 1 порожній рядок (ентер) перед кожним пунктом наказу та рівно 2 перед підписантом
+    body_lines_cleaned = []
+    for idx, b_line in enumerate(body_text.splitlines()):
+        b_clean = b_line.strip()
+        is_item = bool(re.match(r"^\d{1,3}(?:\.\d{1,3})*[\.\)]\s+", b_clean))
+        is_signer = bool(_ORDER_SIGNER_START_RE.match(b_clean))
+
+        if is_signer and idx > 0 and body_lines_cleaned:
+            while body_lines_cleaned and body_lines_cleaned[-1].strip() == "":
+                body_lines_cleaned.pop()
+            body_lines_cleaned.append("")
+            body_lines_cleaned.append("")
+        elif is_item and idx > 0 and body_lines_cleaned:
+            while len(body_lines_cleaned) > 1 and body_lines_cleaned[-1].strip() == "" and body_lines_cleaned[-2].strip() == "":
+                body_lines_cleaned.pop()
+            if body_lines_cleaned[-1].strip() != "":
+                body_lines_cleaned.append("")
+        body_lines_cleaned.append(b_line)
+    body_text = "\n".join(body_lines_cleaned)
 
     # 5. Збираємо фінальний закритий наказ (нова шапка + закрите тіло)
     header_str = new_header.strip() if new_header.strip() else ""
@@ -1833,6 +3275,15 @@ def filter_transform_blocks(
         return {"blocks": [], "table": DataTable(("ID", "Тип", "Мітка", "Вміст"), ()), "modified_count": 0, "summary": "Порожній список блоків"}
 
     mapping_dict = mapping or {}
+    ordered_mapping = sorted(
+        mapping_dict.items(),
+        key=lambda item: (
+            any(token.startswith("#") for token in _unit_name_signature(item[0])),
+            len(_unit_name_signature(item[0])),
+            len(str(item[0])),
+        ),
+        reverse=True,
+    )
     types_set = {t.strip().casefold() for t in include_types.split(",") if t.strip()} if include_types.strip() else None
 
     result_blocks = []
@@ -1851,11 +3302,22 @@ def filter_transform_blocks(
         orig_text = text
 
         # 1. Заміна назв ВЧ та корпусів на форматовані шифри
-        for open_name, mapped_val in mapping_dict.items():
+        for open_name, mapped_val in ordered_mapping:
             closed_code = _format_full_closed_unit_text(mapped_val, mapping_dict)
             pattern = _build_unit_fuzzy_pattern(open_name)
-            if pattern.search(text):
-                text = pattern.sub(closed_code, text)
+            routing_mask = _mask_anaphoric_unit_references(text)
+
+            def replace_explicit_name(match: re.Match) -> str:
+                matched_text = match.group(0)
+                masked_slice = routing_mask[match.start():match.end()]
+                if any(
+                    original_char != masked_char and not original_char.isspace()
+                    for original_char, masked_char in zip(matched_text, masked_slice)
+                ):
+                    return matched_text
+                return closed_code
+
+            text = pattern.sub(replace_explicit_name, text)
 
         # 2. Заміна зворотів ("цієї самої бригади" -> "цієї самої військової частини")
         if replace_unit_phrases:
