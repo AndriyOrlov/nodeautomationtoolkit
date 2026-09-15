@@ -1,3 +1,8 @@
+# Анотації не обчислюються під час імпорту: без ttkbootstrap `tb` — це
+# `tkinter.ttk`, у якому немає `Window`, і `root: tb.Window` валив імпорт
+# модуля (а з ним — збирання всіх тестів на CI).
+from __future__ import annotations
+
 import os
 import sys
 import json
