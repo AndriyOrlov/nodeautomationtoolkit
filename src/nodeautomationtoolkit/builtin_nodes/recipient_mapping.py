@@ -759,6 +759,42 @@ _OBLAST_TO_CITY_MAP = {
 }
 
 
+def _row_is_the_recipient_itself(open_name: str, sender_key: str) -> bool:
+    """Чи є цей рядок словника САМИМ адресатом, а не тим, хто на нього розсилається.
+
+    У таблиці трапляється пара рядків з однаковою колонкою B: підпорядкована
+    установа (наприклад, регіональний центр соціального супроводу) і сам
+    обласний ТЦК. Для розрахунку потрібен другий: у наказі названо саме його.
+    Ознака проста — обидві назви про ТЦК і в них та сама область.
+    """
+    name_low = str(open_name or "").casefold()
+    key_low = str(sender_key or "").casefold()
+    if not name_low or not key_low:
+        return False
+
+    def looks_like_tck(value: str) -> bool:
+        # Навмисно ширше за `_TCK_KEYWORDS_RE`: у таблиці трапляються описки
+        # («Територіальний Центер Комплектування»), і через них рядок ОТЦК
+        # переставав вважатися ТЦК, а розрахунок брав назву підпорядкованого.
+        if "тцк" in value or "територіальн" in value:
+            return True
+        return ("комплектуванн" in value) and ("центр" in value or "центер" in value)
+
+    if not looks_like_tck(key_low) or not looks_like_tck(name_low):
+        return False
+
+    # Обидві назви починаються з тієї самої обласної ознаки: «Рівненський ОТЦК
+    # та СП» і «Рівненський обласний територіальний центр …». Порівняння за
+    # першим словом, а не за переліком областей: у переліку може не бути
+    # потрібної форми, а підпорядкований рядок («1 регіональний центр …»)
+    # однаково не збігається.
+    first_key = next(iter(re.findall(r"[а-яіїєґa-z'’\-]+", key_low)), "")
+    first_name = next(iter(re.findall(r"[а-яіїєґa-z'’\-]+", name_low)), "")
+    if first_key and first_name and first_key[:6] == first_name[:6]:
+        return True
+    return any(stem in key_low and stem in name_low for stem in _UKRAINE_OBLAST_STEMS)
+
+
 def _find_entry_in_mapping(norm_code: str, open_name: str, mapping_dict: dict) -> dict | None:
     """Знаходить рядок таблиці виключно за його пошуковою назвою зі стовпця A."""
     if not mapping_dict:
@@ -1295,6 +1331,8 @@ def map_military_units(
     # ── Компілюємо патерни для кожної ВЧ ──────────────────────────────────────
     unit_patterns: list[tuple[str, str, str, re.Pattern]] = []
     unit_abbr_map: dict[str, str] = {}
+    #: Ключі, для яких скорочення вже взято з «власного» рядка адресата.
+    own_abbr_sender_keys: set[str] = set()
 
     canonical_key_map: dict[str, str] = {}
     corps_map: dict[str, str] = {}
@@ -1369,7 +1407,18 @@ def map_military_units(
                     route_entry = corps_entry
             route_entries_by_sender_key[sender_key] = route_entry
 
-        unit_abbr_map[sender_key] = resolved_abbr or unit_abbr_map.get(sender_key, "")
+        # Кілька рядків таблиці можуть вести на ОДНОГО адресата: окремий центр,
+        # який розсилається на свій ОТЦК, і сам ОТЦК. Раніше скорочення для
+        # розрахунку діставалось тому рядку, у якого колонка C просто не
+        # порожня, — і в розрахунку зʼявлявся «1 рег. центр с.с.» замість
+        # «Рівненський ОТЦК та СП», хоча в наказі названо саме ОТЦК.
+        # Пріоритет має рядок, чия колонка A і Є цим адресатом; його колонку C
+        # беремо навіть порожньою — тоді показується сама закрита назва.
+        if _row_is_the_recipient_itself(open_name, sender_key):
+            unit_abbr_map[sender_key] = resolved_abbr
+            own_abbr_sender_keys.add(sender_key)
+        elif sender_key not in own_abbr_sender_keys:
+            unit_abbr_map[sender_key] = resolved_abbr or unit_abbr_map.get(sender_key, "")
 
         for variant in [open_name, closed_code, f"в/ч {short_cipher}", short_cipher, abbreviation, corps_col]:
             if variant:

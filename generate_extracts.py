@@ -600,16 +600,39 @@ _MESSAGE_ADDRESSEE_KIND_TAGS = ("{{тцк чі вч}}", "{{тцк чи вч}}")
 
 
 _ORDER_SIGNER_START_RE = re.compile(
-    r"^\s*(?:т\.?\s*в\.?\s*о\.?|тимчасово\s+виконуюч(?:ий|а)?|"
-    r"командувач|командир|начальник|заступник\s+командувача)\b",
+    # «в.о.» без «т» — окремий вживаний варіант, якого тут бракувало. Крапки
+    # обов'язкові: без них шаблон ловив би звичайне «в …» на початку рядка.
+    #
+    # Родові форми («командувача», «начальника») сюди додавати НЕ МОЖНА, хоч і
+    # спокусливо: підписний блок часто дворядковий — «Тимчасово виконуючий
+    # обов'язки / командувача військ …», — а `_analyze_order` шукає підписанта
+    # З КІНЦЯ і бере ОСТАННІЙ збіг. Тоді початком блока ставав його ж другий
+    # рядок, і в тег {{підписант}} потрапляла половина блока.
+    # Скорочення закінчується крапкою, тому кінцевий `\b` до нього не
+    # застосовний (між «.» і пробілом межі слова немає) — замість нього
+    # заглядання вперед на пробіл.
+    r"^\s*(?:"
+    r"(?:т\s*\.\s*)?в\s*\.\s*о\s*\.?(?=\s)"
+    r"|тимчасово\s+виконуюч(?:ий|а)?\b"
+    r"|(?:командувач|командир|начальник|заступник\s+командувача)\b"
+    r")",
     re.IGNORECASE | re.UNICODE,
 )
-_ORDER_SIGNER_RANK_RE = re.compile(
-    r"^\s*(генерал(?:[-\s](?:майор|лейтенант|полковник))?|адмірал(?:[-\s]\w+)?|"
+#: Перелік звань окремо: він потрібен і прив'язаним до початку рядка (звичайний
+#: підписний блок), і всередині рядка (коли звання стоїть поруч із посадою).
+_RANK_ALTERNATIVES = (
+    r"генерал(?:[-\s](?:майор|лейтенант|полковник))?|адмірал(?:[-\s]\w+)?|"
     r"полковник|підполковник|майор|капітан(?:[-\s](?:лейтенант|[1-3]\s+рангу))?|"
     r"старший\s+лейтенант|молодший\s+лейтенант|лейтенант|головний\s+сержант|"
     r"штаб[-\s]сержант|майстер[-\s]сержант|старший\s+сержант|молодший\s+сержант|"
-    r"сержант|старшина|солдат|матрос)\b",
+    r"сержант|старшина|солдат|матрос"
+)
+_ORDER_SIGNER_RANK_RE = re.compile(
+    r"^\s*(" + _RANK_ALTERNATIVES + r")\b",
+    re.IGNORECASE | re.UNICODE,
+)
+_ORDER_SIGNER_RANK_INLINE_RE = re.compile(
+    r"\b(" + _RANK_ALTERNATIVES + r")\b",
     re.IGNORECASE | re.UNICODE,
 )
 # Пронумерований пункт наказу: «1.», «2.3.», «10)». Та сама форма, що вже
@@ -796,6 +819,30 @@ def _find_order_signer(text: str) -> dict[str, str] | None:
                 break
             if any(char.isalpha() for char in line) and line.casefold() not in {"підпис", "м. п."}:
                 position_lines.append(line)
+
+        # Фолбек: звання стоїть не з початку рядка, а в тому ж рядку, що й
+        # посада («Командувач військ … генерал-лейтенант Іван ПРІЗВИЩЕНКО»).
+        # Без цього блок не впізнавався ЗОВСІМ: тіло наказу не обрізалося, а
+        # підписант не переносився у витяг.
+        for line_index in range(start_index, reference_index):
+            line = lines[line_index]
+            if not line:
+                continue
+            if any(marker in line.casefold() for marker in _DISTRIBUTION_CUTOFF_MARKERS):
+                break
+            inline_rank = _ORDER_SIGNER_RANK_INLINE_RE.search(line)
+            if not inline_rank or inline_rank.start() == 0:
+                continue
+            tail = line[inline_rank.end():].strip(" .\t–—-:")
+            name_words = re.findall(r"[A-Za-zА-Яа-яІіЇїЄєҐґ'’`-]+", tail)
+            if len(name_words) < 2:
+                continue
+            return {
+                "start_line": start_index,
+                "position": line[: inline_rank.start()].strip(" .\t–—-:"),
+                "rank": inline_rank.group(1),
+                "name": " ".join(name_words),
+            }
     return None
 
 
@@ -949,6 +996,78 @@ def force_quit_word(word, timeout: float = 5.0) -> None:
 #: Word повертає це значення замість властивості, яка в діапазоні НЕОДНАКОВА
 #: (наприклад, вирівнювання, якщо абзаци діапазону вирівняні по-різному).
 WD_UNDEFINED = 9999999
+
+
+#: Слова, які у журналі стоять поруч із числом, але частинами НЕ є.
+#: Без цього переліку знеособлення зʼїдало б корисну статистику
+#: («2 стор.», «13 пунктів», «+39 ентерів») разом із назвами частин.
+_LOG_MEASURE_WORDS = (
+    "стор", "сторінк", "сторінка", "сторінки", "сторінок", "односторінк", "багатосторінк",
+    "арк", "аркуш", "аркуша", "аркушів", "пункт", "пункту", "пунктів", "пунктами",
+    "витяг", "витягів", "витягах", "витяги", "абзац", "абзаців", "ентер", "ентерів",
+    "шт", "пт", "с", "сек", "секунд", "байт", "записів", "скорочень", "прим",
+    "рядк", "рядків", "разів", "файл", "файлів", "з", "із", "та", "і", "на", "від",
+)
+
+#: Одне правило знеособлення на всі випадки: перший збіг виграє, і вже
+#: підставлена мітка під наступні правила не потрапляє.
+_REDACT_RE = re.compile(
+    r"(?P<path>[A-Za-zА-ЯІЇЄҐ]:[\\/][^\n]*)"
+    r"|(?P<otck>[А-ЯІЇЄҐ][а-яіїєґ'’\-]+(?:ський|цький|зький)\s+"
+    r"(?:обласн\w+\s+|районн\w+\s+|міськ\w+\s+)?(?:О?М?Р?ТЦК|територіальн\w+)"
+    r"(?:[^\n,;.]{0,80}?підтримки)?(?:\s+та\s+СП)?)"
+    r"|(?P<cipher>\b[АA]\s?\d{3,4}\b)"
+    r"|(?P<unit>\b\d{1,3}\s?(?P<unit_word>[А-Яа-яІЇЄҐіїєґ]{1,12})\b)"
+    r"|(?P<upper>\b[А-ЯІЇЄҐ]{3,}\b)",
+    re.UNICODE,
+)
+
+#: ВЕЛИКІ слова, які в журналі є службовими, а не прізвищами.
+_LOG_UPPER_KEEP = {
+    "УВАГА", "ГЕНЕРАЦІЯ", "ВИТЯГІВ", "ВИТЯГ", "РОЗРАХУНОК", "РОЗСИЛКИ", "СТАТИСТИКА",
+    "ТА", "ДРУКУ", "ОТЦК", "ТЦК", "РТЦК", "МТЦК", "ОМТЦК", "СП", "АК", "ВЧ", "ЗС",
+    "ПОМИЛКА", "ЗБІЙ", "ГОТОВО", "DOCX", "XLSX", "COM", "ПІБ", "КОМУ", "КУДИ",
+}
+
+
+def redact_sensitive_text(text: str) -> str:
+    """Знеособлює журнал: назви частин, шифри, ПІБ і шляхи — на стабільні мітки.
+
+    Потрібно, щоб журнал збою можна було комусь показати. Структура (скільки
+    витягів, скільки сторінок, які попередження, скільки часу) лишається
+    незмінною — саме вона й потрібна для розбору. Мітки стабільні в межах
+    одного копіювання: та сама частина всюди буде тим самим «Ч-1».
+    """
+    counters: dict[str, dict[str, str]] = {}
+
+    def token(prefix: str, value: str) -> str:
+        bucket = counters.setdefault(prefix, {})
+        key = value.casefold().strip()
+        if key not in bucket:
+            bucket[key] = f"{prefix}-{len(bucket) + 1}"
+        return bucket[key]
+
+    def replace(match: re.Match) -> str:
+        if match.lastgroup == "path":
+            return "<шлях>"
+        if match.lastgroup == "otck":
+            return token("ОТЦК", match.group(0))
+        if match.lastgroup == "cipher":
+            return token("Ш", match.group(0))
+        if match.lastgroup == "unit":
+            word = match.group("unit_word").casefold().rstrip(".")
+            if word in _LOG_MEASURE_WORDS:
+                return match.group(0)
+            return token("Ч", match.group(0))
+        word = match.group(0)
+        return word if word in _LOG_UPPER_KEEP else token("ПІБ", word)
+
+    # ОДИН прохід: інакше мітка, яка сама містить число («ОТЦК-1»), потрапляла
+    # під наступне правило й перетворювалась на «ОТЦК-Ч-2».
+    text = _REDACT_RE.sub(replace, text)
+    # Ім'я з великої літери поруч із міткою ПІБ («полковник Петро ПІБ-1»).
+    text = re.sub(r"\b[А-ЯІЇЄҐ][а-яіїєґ'’\-]+(?=\s+ПІБ-\d)", "<імʼя>", text)
+    return text
 
 
 def iter_paragraphs(container) -> list:
@@ -1727,6 +1846,12 @@ class App:
         ).pack(side=LEFT, padx=(0, 4))
         tb.Button(
             log_toolbar,
+            text="🔒 Копіювати знеособлено",
+            bootstyle="warning-outline",
+            command=lambda: self.copy_log(self.log_text, redacted=True),
+        ).pack(side=LEFT, padx=(0, 4))
+        tb.Button(
+            log_toolbar,
             text="🧹 Очистити",
             bootstyle="secondary-outline",
             command=self.clear_log,
@@ -1975,6 +2100,12 @@ class App:
         ).pack(side=LEFT, padx=(0, 4))
         tb.Button(
             p2_log_toolbar,
+            text="🔒 Копіювати знеособлено",
+            bootstyle="warning-outline",
+            command=lambda: self.copy_log(self.p2_log_text, redacted=True),
+        ).pack(side=LEFT, padx=(0, 4))
+        tb.Button(
+            p2_log_toolbar,
             text="🧹 Очистити",
             bootstyle="secondary-outline",
             command=lambda: self.p2_log_text.delete(1.0, tk.END),
@@ -2077,6 +2208,12 @@ class App:
             text="📋 Скопіювати журнал",
             bootstyle="info-outline",
             command=lambda: self.copy_log(self.log_text),
+        ).pack(side=LEFT, padx=(0, 4))
+        tb.Button(
+            msg_log_toolbar,
+            text="🔒 Копіювати знеособлено",
+            bootstyle="warning-outline",
+            command=lambda: self.copy_log(self.log_text, redacted=True),
         ).pack(side=LEFT, padx=(0, 4))
         tb.Button(
             msg_log_toolbar,
@@ -2236,14 +2373,22 @@ class App:
     def clear_log(self):
         self.log_text.delete(1.0, tk.END)
 
-    def copy_log(self, text_widget=None):
+    def copy_log(self, text_widget=None, redacted: bool = False):
         widget = text_widget or self.log_text
         content = widget.get("1.0", tk.END).strip()
-        if content:
-            self.root.clipboard_clear()
-            self.root.clipboard_append(content)
-            self.root.update()
-            self.log("📋 Текст журналу успішно скопійовано в буфер обміну!")
+        if not content:
+            return
+        if redacted:
+            content = redact_sensitive_text(content)
+        self.root.clipboard_clear()
+        self.root.clipboard_append(content)
+        self.root.update()
+        self.log(
+            "🔒 Журнал скопійовано ЗНЕОСОБЛЕНО: назви частин, шифри, ПІБ і шляхи "
+            "замінено мітками (Ч-1, Ш-1, ПІБ-1). Такий текст можна показувати."
+            if redacted
+            else "📋 Текст журналу успішно скопійовано в буфер обміну!"
+        )
 
     def _setup_text_copy_menu(self, text_widget):
         """Додає контекстне меню (ПКМ) та гарячі клавіші для легкого копіювання логів."""
@@ -2377,6 +2522,44 @@ class App:
                 find_obj = document.Content.Find
                 find_obj.Text = tag
         return executor_blocks
+
+    @staticmethod
+    def _replace_executor_in_headers(document, value: str) -> int:
+        """Підставляє `{{виконавець}}` у КОЛОНТИТУЛАХ і повертає кількість замін.
+
+        Колонтитул — окрема «історія» Word: `document.Content` бачить лише
+        основну частину документа, тому тег, поставлений у колонтитул зразка,
+        лишався незаповненим і друкувався як є.
+
+        Позицію тут не підбираємо: колонтитул і так унизу сторінки, а блок
+        виконавця в тілі документа працює як раніше — його закладку й
+        вирівнювання ця функція не чіпає.
+        """
+        tag = "{{виконавець}}"
+        replaced = 0
+        try:
+            sections = list(document.Sections)
+        except TypeError:
+            sections = [document.Sections(index) for index in range(1, document.Sections.Count + 1)]
+        for section in sections:
+            for collection in (section.Headers, section.Footers):
+                try:
+                    stories = list(collection)
+                except TypeError:
+                    # Первинний, першої сторінки та парних сторінок.
+                    stories = [collection(index) for index in (1, 2, 3)]
+                for header_footer in stories:
+                    for _ in range(20):  # запобіжник від вічного циклу
+                        try:
+                            find_obj = header_footer.Range.Find
+                            find_obj.Text = tag
+                            if not find_obj.Execute():
+                                break
+                            find_obj.Parent.Text = value
+                        except Exception:
+                            break
+                        replaced += 1
+        return replaced
 
     @staticmethod
     def _position_message_executor_at_page_bottom(document, bookmark_name: str):
@@ -2957,6 +3140,15 @@ class App:
         doc = word.Documents.Open(os.path.abspath(working_path), ReadOnly=False)
         try:
             executor_blocks = self._replace_message_tags(doc, replacements)
+            if "{{виконавець}}" in replacements:
+                header_hits = self._replace_executor_in_headers(
+                    doc, replacements["{{виконавець}}"]
+                )
+                if header_hits:
+                    self.log(
+                        f"  Виконавця підставлено в колонтитул: {header_hits} раз(и) "
+                        f"({os.path.basename(output_path)})."
+                    )
             executor_bookmarks = []
             for index, (start, end) in enumerate(executor_blocks):
                 bookmark_name = f"nat_message_executor_{index}"
@@ -3045,7 +3237,7 @@ class App:
             source_doc = word.Documents.Open(order_path, ReadOnly=True)
 
             source_text = source_doc.Content.Text
-            order_text, _ = text_before_order_signer(source_text)
+            order_text, order_signer = text_before_order_signer(source_text)
             order_num, order_date = extract_metadata_from_filename(os.path.basename(order_path))
             # У повідомленнях дата не розкривається словами (на відміну від витягів).
             order_date_formatted = format_message_date(order_date)
@@ -3075,6 +3267,48 @@ class App:
                 for kind_tag in _MESSAGE_ADDRESSEE_KIND_TAGS:
                     replacements[kind_tag] = addressee_kind
                 self.log(f"Тип адресата ({{{{тцк чі вч}}}}): {addressee_kind}.")
+            # Підписант наказу — ті самі теги, що у витягах. Реквізити беруться
+            # з наказу, а якщо користувач заповнив поля вручну — з полів.
+            gui_signer_position = self.order_signer_position.get().strip()
+            gui_signer_rank = self.order_signer_rank.get().strip()
+            gui_signer_name = self.order_signer_name.get().strip()
+            if gui_signer_position or gui_signer_rank or gui_signer_name:
+                order_signer = {
+                    "position": gui_signer_position.replace(" / ", chr(10)) or order_signer.get("position", ""),
+                    "rank": gui_signer_rank or order_signer.get("rank", ""),
+                    "name": gui_signer_name or order_signer.get("name", ""),
+                }
+            signer_position = _slash_to_lines(str(order_signer.get("position", "")).strip())
+            signer_rank = str(order_signer.get("rank", "")).strip()
+            signer_name = str(order_signer.get("name", "")).strip()
+            if signer_position:
+                replacements["{{підписант_посада}}"] = signer_position
+            if signer_rank:
+                replacements["{{підписант_звання}}"] = signer_rank
+            if signer_name:
+                replacements["{{підписант_піб}}"] = signer_name
+            signer_tail = " ".join(part for part in (signer_rank, signer_name) if part)
+            signer_block = chr(13).join(part for part in (signer_position, signer_tail) if part)
+            if signer_block:
+                replacements["{{підписант}}"] = signer_block
+
+            # Засвідчувач — СПІЛЬНІ поля з витягами (AGENT.md 11.2).
+            replacements["{{згідно_з_оригіналом}}"] = "Згідно з оригіналом"
+            replacements["{{засвідчення}}"] = "Згідно з оригіналом"
+            if self.certifier_position.get().strip():
+                certifier_position = _slash_to_lines(self.certifier_position.get().strip())
+                replacements["{{засвідчувач_посада}}"] = certifier_position
+                replacements["{{згідно_з_оригіналом_посада}}"] = certifier_position
+            if self.certifier_rank.get().strip():
+                certifier_rank = self.certifier_rank.get().strip()
+                replacements["{{засвідчувач_звання}}"] = certifier_rank
+                replacements["{{згідно_з_оригіналом_звання}}"] = certifier_rank
+            if self.certifier_name.get().strip():
+                certifier_name = self.certifier_name.get().strip()
+                replacements["{{засвідчувач_піб}}"] = certifier_name
+                replacements["{{згідно_з_оригіналом_піб}}"] = certifier_name
+                replacements["{{засвідчувач}}"] = certifier_name
+
             if self.message_executor.get().strip():
                 replacements["{{виконавець}}"] = self.message_executor.get().strip()
 
@@ -3568,12 +3802,29 @@ class App:
 
         source_text = self._read_word_text(self.doc_path.get())
         text, _detected_order_signer = self._refresh_order_signer(source_text)
-        # Тимчасове правило користувача: у витягах блок підписанта оригіналу
-        # наказу повністю вимкнений. Тіло однаково обрізається перед ним, але
-        # реквізити не переносяться до шаблону. «Згідно з оригіналом» та
-        # засвідчувач нижче лишаються.
-        order_signer = {"position": "", "rank": "", "name": ""}
-        self.log("Блок підписанта оригіналу у витягах тимчасово вимкнено.")
+        # Реквізити підписанта беремо з ПОЛІВ інтерфейсу, а не з розпізнаного
+        # напряму: `_refresh_order_signer` щойно заповнив їх із самого наказу,
+        # але користувач має право виправити розпізнане — так само, як для
+        # засвідчувача. (Тимчасове правило «підписанта у витягах не переносимо»
+        # скасоване користувачем 04.09.2026.)
+        order_signer = {
+            "position": self.order_signer_position.get().strip(),
+            "rank": self.order_signer_rank.get().strip(),
+            "name": self.order_signer_name.get().strip(),
+        }
+        if any(order_signer.values()):
+            signer_summary = " ".join(
+                part for part in (order_signer["rank"], order_signer["name"]) if part
+            )
+            self.log(
+                "Підписант оригіналу наказу переноситься у витяг"
+                + (f": {signer_summary}." if signer_summary else ".")
+            )
+        else:
+            self.log(
+                "УВАГА: реквізитів підписанта наказу немає — теги {{підписант_…}} "
+                "буде прибрано з витягу разом із їхніми рядками."
+            )
         filename = os.path.basename(self.doc_path.get())
         order_num, order_date = extract_metadata_from_filename(filename)
         if not order_num:
@@ -3813,7 +4064,13 @@ class App:
                         tail_paragraph = last_paragraph(doc)
                         if not is_blank_paragraph(tail_paragraph):
                             break
+                        # Останній знак абзацу документа (і останній у комірці)
+                        # Word не видаляє й помилки не кидає. Без перевірки, що
+                        # документ справді скоротився, цикл був би вічним.
+                        length_before = doc.Content.End
                         tail_paragraph.Range.Delete()
+                        if doc.Content.End >= length_before:
+                            break
                 except Exception:
                     pass
 
@@ -4066,6 +4323,30 @@ class App:
                 except Exception:
                     return None
 
+            def paragraph_in_table(paragraph):
+                """Чи стоїть абзац усередині таблиці (wdWithInTable)."""
+                try:
+                    return bool(paragraph.Range.Information(12))
+                except Exception:
+                    # Не змогли визначити — вважаємо, що в таблиці: чіпати
+                    # невідомий абзац небезпечніше, ніж лишити його на місці.
+                    return True
+
+            def delete_paragraph_if_possible(paragraph):
+                """Видаляє абзац і повертає True, лише якщо він СПРАВДІ зник.
+
+                Word мовчки ігнорує видалення знака абзацу, який прибрати не
+                можна: останнього в документі та останнього в комірці таблиці.
+                Помилки при цьому не буде, тож цикл, який спирається на
+                `Delete()`, без перевірки прогресу крутиться вічно.
+                """
+                try:
+                    before = doc.Content.End
+                    paragraph.Range.Delete()
+                    return doc.Content.End < before
+                except Exception:
+                    return False
+
             def position_executor_at_page_bottom(bookmark_name=None, signer_start=None, needs_manual_review=False):
                 """Вирівнює виконавця до низу сторінки, окрім випадків, де це неможливо
                 без наставляння штучних порожніх абзаців — тоді лишаємо позицію зі зразка
@@ -4088,21 +4369,38 @@ class App:
                 # Запам'ятовуємо кількість порожніх абзаців зі зразка перед виконавцем,
                 # щоб мати змогу відновити цю позицію, якщо автоматичне вирівнювання
                 # донизу не вдасться виконати чисто (без переходу на іншу сторінку).
+                # Порожні комірки таблиці порожніми абзацами зразка НЕ рахуємо:
+                # у шаблоні з табличним підписантом (див. drop_blanks_before_executor)
+                # виконавцю передує саме комірка, а не відступ.
                 original_blank_count = 0
                 probe = previous_paragraph(executor)
-                while probe is not None and is_blank_paragraph(probe):
+                while (
+                    probe is not None
+                    and not paragraph_in_table(probe)
+                    and is_blank_paragraph(probe)
+                ):
                     original_blank_count += 1
                     probe = previous_paragraph(probe)
 
                 def drop_blanks_before_executor():
-                    """Знімає всі порожні абзаци безпосередньо перед виконавцем."""
+                    """Знімає порожні абзаци безпосередньо перед виконавцем.
+
+                    Зупиняємось на межі таблиці: якщо блок підписанта/засвідчувача
+                    у зразку зверстано таблицею, попередній абзац — це остання
+                    (часто порожня) КОМІРКА. Її знак абзацу Word не видаляє й не
+                    повідомляє про це помилкою, тож цикл крутився вічно — програма
+                    зависала на першому ж витягу. Комірка тут і не є відступом:
+                    зсовувати виконавця треба порожніми абзацами ПІСЛЯ таблиці.
+                    """
                     while True:
                         previous = previous_paragraph(executor)
-                        if previous is None or not is_blank_paragraph(previous):
+                        if (
+                            previous is None
+                            or paragraph_in_table(previous)
+                            or not is_blank_paragraph(previous)
+                        ):
                             return previous
-                        try:
-                            previous.Range.Delete()
-                        except Exception:
+                        if not delete_paragraph_if_possible(previous):
                             return previous
 
                 previous_before_executor = drop_blanks_before_executor()
@@ -4270,46 +4568,58 @@ class App:
                         find_obj.Text = tag
                     return replaced_paragraphs
 
+                signer_tags = (
+                    "{{підписант}}",
+                    "{{підписант_посада}}",
+                    "{{підписант_звання}}",
+                    "{{підписант_піб}}",
+                )
+
                 def remove_original_signer_template_block():
                     """Видаляє з шаблону весь блок тегів підписанта оригіналу.
 
-                    Якщо тег стоїть у таблиці, видаляється відповідний рядок,
-                    щоб після вимкненого блока не лишалися порожні комірки.
+                    Викликається лише тоді, коли реквізитів підписанта немає
+                    зовсім. Якщо тег стоїть у таблиці, видаляється відповідний
+                    рядок, щоб не лишалися порожні комірки.
                     """
-                    signer_tags = (
-                        "{{підписант}}",
-                        "{{підписант_посада}}",
-                        "{{підписант_звання}}",
-                        "{{підписант_піб}}",
-                    )
                     # У зразку без цих тегів обходити абзаци нема сенсу.
                     if template_text is not None and not any(
                         tag.casefold() in template_text for tag in signer_tags
                     ):
                         return
-                    # Спершу збираємо абзаци-кандидати одним проходом, потім
-                    # видаляємо з кінця: після видалення рядка таблиці номери
-                    # абзаців зсуваються, а самі об'єкти лишаються чинними.
-                    doomed = [
-                        paragraph
-                        for paragraph in iter_paragraphs(doc)
-                        if any(
-                            tag.casefold() in str(paragraph.Range.Text or "").casefold()
-                            for tag in signer_tags
-                        )
-                    ]
-                    for paragraph in reversed(doomed):
-                        paragraph_range = paragraph.Range
+                    # Щоразу шукаємо ПЕРШИЙ абзац із тегом заново. Зібраний
+                    # наперед список тут не годиться: після видалення рядка
+                    # таблиці абзаци-об'єкти з наступних рядків «сповзають» на
+                    # сусідній рядок, і разом із підписантом зникав рядок
+                    # «Згідно з оригіналом». Тегів одиниці, а шаблон на цьому
+                    # кроці ще без змісту — перепрохід коштує копійки.
+                    for _ in range(len(signer_tags) * 4):  # запобіжник від вічного циклу
+                        target_range = None
+                        for paragraph in iter_paragraphs(doc):
+                            paragraph_range = paragraph.Range
+                            text_of_paragraph = str(paragraph_range.Text or "").casefold()
+                            if any(tag.casefold() in text_of_paragraph for tag in signer_tags):
+                                target_range = paragraph_range
+                                break
+                        if target_range is None:
+                            return
                         try:
-                            if paragraph_range.Information(12):  # wdWithInTable
-                                paragraph_range.Cells(1).Row.Delete()
+                            if target_range.Information(12):  # wdWithInTable
+                                target_range.Cells(1).Row.Delete()
                             else:
-                                paragraph_range.Delete()
+                                length_before = doc.Content.End
+                                target_range.Delete()
+                                if doc.Content.End >= length_before:
+                                    # Знак абзацу Word не віддав (останній у
+                                    # документі) — прибираємо принаймні тег.
+                                    target_range.Text = ""
                         except Exception:
                             try:
-                                paragraph_range.Text = ""
+                                # Абзац видалити не вдалось — прибираємо хоча б
+                                # текст, інакше наступний прохід знайде той самий.
+                                target_range.Text = ""
                             except Exception:
-                                pass
+                                return
 
                 rec_to_val = data.get("recipient_to") or cipher
                 dest_where_val = (data.get("destination_where") or "").strip()
@@ -4330,8 +4640,24 @@ class App:
                     replace_tag("{{номер_наказу}}", f"№{order_num}",
                                 bold_pattern=r"(?<=№).+")
 
-                # Підписант оригіналу наказу тимчасово не переноситься.
-                remove_original_signer_template_block()
+                # Підписант оригіналу наказу
+                if any(order_signer.values()):
+                    if order_signer["position"]:
+                        replace_tag("{{підписант_посада}}", _slash_to_lines(order_signer["position"]))
+                    if order_signer["rank"]:
+                        replace_tag("{{підписант_звання}}", order_signer["rank"])
+                    if order_signer["name"]:
+                        replace_tag("{{підписант_піб}}", order_signer["name"])
+                        replace_tag("{{підписант}}", order_signer["name"])
+                    # Реквізит, якого в наказі немає (буває звання), просто
+                    # стираємо. Видаляти тут рядок таблиці НЕ можна: у ньому
+                    # стоять сусідні, вже заповнені теги підписанта.
+                    for empty_tag in signer_tags:
+                        replace_tag(empty_tag, "")
+                else:
+                    # Реквізитів немає зовсім — прибираємо блок разом з
+                    # абзацами та рядками таблиці, щоб не лишити порожнечі.
+                    remove_original_signer_template_block()
 
                 # Особа, яка засвідчує витяг («Згідно з оригіналом» / Засвідчувач)
                 replace_tag("{{згідно_з_оригіналом}}", "Згідно з оригіналом")
@@ -4540,6 +4866,44 @@ class App:
                     # самий пункт двома копіями поспіль.
                     inserted_source_spans = set()
 
+                    # Найбільший рядок наказу, який уже перенесено у витяг.
+                    # Пункти йдуть у порядку документа, тож усе, що не нижче
+                    # цієї межі, у витягу ВЖЕ Є.
+                    max_inserted_line = -1
+
+                    def trim_to_new_lines(start_line, end_line, what):
+                        """Обрізає діапазон до рядків наказу, яких у витягу ще немає.
+
+                        Інваріант: кожен рядок наказу потрапляє у витяг
+                        щонайбільше один раз. Перевірки на ТОЧНИЙ збіг
+                        діапазонів для цього не досить — класичний випадок
+                        пункт «ВИКЛАСТИ В ТАКІЙ РЕДАКЦІЇ»: усередині нього
+                        цитується цілий § з преамбулою, маршрутизація бачить
+                        там і «шапку», і окремий пункт, і їхні діапазони
+                        ПЕРЕКРИВАЮТЬСЯ зі вступним абзацом. Через це пункт
+                        друкувався у витягу двічі.
+
+                        Повертає (початок, кінець, «усе вже перенесено»).
+                        """
+                        if start_line is None or end_line is None:
+                            return start_line, end_line, False
+                        if start_line > max_inserted_line:
+                            return start_line, end_line, False
+                        new_start = max_inserted_line + 1
+                        fully_covered = new_start > end_line
+                        message = (
+                            f"{what}: рядки {start_line}–"
+                            f"{min(end_line, max_inserted_line)} наказу вже перенесено вище — "
+                            + ("пропущено повністю" if fully_covered
+                               else f"переносимо лише {new_start}–{end_line}")
+                            + " (щоб не задвоїти текст)."
+                        )
+                        self.log(f"  ⚠️ {cipher}: {message}")
+                        layout_warnings.append(f"{cipher}: {message}")
+                        if fully_covered:
+                            return None, None, True
+                        return new_start, end_line, False
+
                     def span_already_inserted(start_line, end_line):
                         # Пункт без відомих рядків наказу (вставляється резервним
                         # текстом) дублем НЕ вважається: у таких пунктів «діапазон»
@@ -4623,11 +4987,18 @@ class App:
                             for heading_key in heading_keys[common_len:]:
                                 if span_already_inserted(heading_key[0], heading_key[1]):
                                     continue
+                                heading_start, heading_end, heading_covered = trim_to_new_lines(
+                                    heading_key[0], heading_key[1], f"шапка перед {item_label}"
+                                )
+                                if heading_covered:
+                                    continue
                                 heading_range = insert_source_span(
-                                    heading_key[0], heading_key[1], item.get("parent_heading", ""), "заголовка"
+                                    heading_start, heading_end, item.get("parent_heading", ""), "заголовка"
                                 )
                                 if heading_range:
                                     inserted_source_spans.add((heading_key[0], heading_key[1]))
+                                    if heading_end is not None:
+                                        max_inserted_line = max(max_inserted_line, heading_end)
                                     inserted_heading_ranges.append(heading_range)
                                     new_heading_ranges.append(heading_range)
                                     # §, основна шапка та підшапка — окремі
@@ -4635,12 +5006,19 @@ class App:
                                     insert_empty_paragraph()
                         copied_heading_keys = heading_keys
 
+                        item_start, item_end, item_covered = trim_to_new_lines(
+                            item.get("source_start_line"), item.get("source_end_line"), item_label
+                        )
+                        if item_covered:
+                            continue
                         item_range = insert_source_span(
-                            item.get("source_start_line"), item.get("source_end_line"),
+                            item_start, item_end,
                             item.get("original_text") or item.get("text", ""), "пункту"
                         )
                         if item_range:
                             inserted_source_spans.add(item_span)
+                            if item_end is not None:
+                                max_inserted_line = max(max_inserted_line, item_end)
                             inserted_item_ranges.append(item_range)
                             inserted_item_labels.append(item_label)
                             heading_item_pairs.extend(
@@ -4939,7 +5317,13 @@ class App:
                             paragraph = last_paragraph(target_doc).Range
                             if (paragraph.Text or "").strip(chr(13) + chr(7) + chr(11) + chr(12) + chr(32) + chr(9)):
                                 break
+                            # Той самий захист, що й у clean_redundant_blanks:
+                            # знак абзацу, який Word видалити не може, мовчки
+                            # лишається на місці й зациклює обрізання хвоста.
+                            length_before = target_doc.Content.End
                             paragraph.Delete()
+                            if target_doc.Content.End >= length_before:
+                                break
                     except Exception:
                         pass
 

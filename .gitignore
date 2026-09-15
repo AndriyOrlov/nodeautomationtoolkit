@@ -19,3 +19,6 @@ node_modules/
 
 # Local working settings: real names, unit ciphers and personal paths
 config.json
+
+# portable-інтерпретатор поруч із програмою (див. scripts/portable/README.md)
+python/

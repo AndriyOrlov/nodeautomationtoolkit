@@ -89,6 +89,20 @@ for pattern, why in (
     for match in re.finditer(pattern, body, re.IGNORECASE):
         problems.append(f"{why}: …{body[max(0, match.start() - 45):match.end() + 25]}…")
 
+# Супровід: у колонтитулі теж не має лишитись незаповнених тегів. Колонтитул —
+# окрема «історія» Word, тому заміна тегів у тілі документа його не зачіпає.
+cover_paths = sorted(glob.glob(os.path.join(OUT, "Повідомлення_супровід*.docx")))
+if cover_paths:
+    cover = docx.Document(cover_paths[0])
+    for section_index, section in enumerate(cover.sections, 1):
+        for part_name, part in (("нижній", section.footer), ("верхній", section.header)):
+            for paragraph in part.paragraphs:
+                if "{{" in paragraph.text:
+                    problems.append(
+                        f"{part_name} колонтитул супроводу (розділ {section_index}): "
+                        f"тег лишився незаповненим — {paragraph.text.strip()!r}"
+                    )
+
 print("Шрифти ЗМІСТУ з наказу (символів):", fonts)
 print("Шрифти власних рядків шаблону:", template_fonts)
 print("Стиль Normal шаблона:", normal_font)

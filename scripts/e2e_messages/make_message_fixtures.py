@@ -193,6 +193,18 @@ def message_template(path, with_content):
         para(tpl)
     para(tpl, "{{виконавець}}")
     para(tpl, "ВІДКРИТА ІНФОРМАЦІЯ")
+
+    if not with_content:
+        # У бойовому зразку СУПРОВОДУ виконавець стоїть ще й у колонтитулі.
+        # Колонтитул — окрема «історія» Word, і теги в ньому не замінювались
+        # (`document.Content` бачить лише основну частину документа).
+        sect.footer.is_linked_to_previous = False
+        footer_paragraph = (sect.footer.paragraphs[0] if sect.footer.paragraphs
+                            else sect.footer.add_paragraph())
+        footer_run = footer_paragraph.add_run("{{виконавець}}")
+        footer_run.font.name = "Times New Roman"
+        footer_run.font.size = Pt(8)
+
     tpl.save(path)
 
 

@@ -167,6 +167,37 @@ def main() -> int:
                       " переліках — найчастіше пункт поглинула шапка або сусідній пункт)")
     report.append("")
 
+    if routes.get("unmatched_items"):
+        report.append("== ЧОМУ ПУНКТ ЛИШИВСЯ БЕЗ АДРЕСАТА ==")
+        from nodeautomationtoolkit.builtin_nodes import recipient_mapping as rm
+
+        for item in routes.get("unmatched_items", []):
+            block = str(item.get("text") or "")
+            report.append(f"  {item.get('label', '')}: {item.get('reason', '')}")
+            report.append(
+                f"      ознака ТЦК у тексті: {bool(rm._TCK_KEYWORDS_RE.search(block))}"
+                f" | розпізнаний ТЦК: {rm._extract_tck_sender(block)!r}"
+            )
+            sender = rm._extract_tck_sender(block)
+            if sender:
+                found = rm._find_entry_in_mapping(sender, sender, mapping)
+                report.append(
+                    f"      такий рядок у словнику: {'Є' if found else 'НЕМАЄ'}"
+                    + (f" (колонка A довж. {len(str(found.get('open_name') or ''))}, "
+                       f"B {'заповнена' if str(found.get('cipher') or '').strip() else 'порожня'}, "
+                       f"C {'заповнена' if str(found.get('abbreviation') or '').strip() else 'порожня'})"
+                       if found else "")
+                )
+            # Скільки записів словника взагалі зачепилося за текст пункту.
+            hits = 0
+            for value in {id(v): v for v in mapping.values() if isinstance(v, dict)}.values():
+                name = str(value.get("open_name") or "")
+                if name and rm._build_unit_fuzzy_pattern(name).search(block):
+                    hits += 1
+            report.append(f"      записів словника, що збіглися з текстом: {hits}")
+            report.append(f"      довжина тексту пункту: {len(block)} символів, рядків: {len(block.splitlines())}")
+        report.append("")
+
     report.append("== РЯДКИ (лише ознаки, без тексту) ==")
     interesting = set()
     for item in (
