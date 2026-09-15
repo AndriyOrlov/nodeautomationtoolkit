@@ -199,6 +199,35 @@ def test_order_block_constructor_pipeline():
     assert "Підстава: рапорт командира" in final_text
 
 
+def test_legacy_text_transformers_use_specific_column_a_name_first():
+    from nodeautomationtoolkit.builtin_nodes.recipient_mapping import (
+        filter_transform_blocks,
+        generate_decision_order,
+    )
+
+    mapping = {
+        "окремий центр підготовки": {
+            "cipher": "А0002",
+            "abbreviation": "оцп",
+        },
+        "907 центр підготовки": {
+            "cipher": "А0907",
+            "abbreviation": "907 цп",
+        },
+    }
+    source = "1. Офіцера 907 окремого центру підготовки призначити."
+
+    decision = generate_decision_order(text=source, mapping=mapping)["decision_text"]
+    transformed = filter_transform_blocks(
+        blocks=[{"id": "1", "type": "item", "text": source, "lines": [source]}],
+        mapping=mapping,
+    )["blocks"][0]["text"]
+
+    for result in (decision, transformed):
+        assert "А0907" in result
+        assert "А0002" not in result
+
+
 def test_tck_is_not_inferred_from_column_c_when_column_a_does_not_match():
     mapping = {
         "99 окремий розвідувальний батальйон": {

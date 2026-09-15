@@ -12,6 +12,7 @@ import importlib.util
 import sys
 from pathlib import Path
 
+import pytest
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SRC_PATH = PROJECT_ROOT / "src"
 if str(SRC_PATH) not in sys.path:
@@ -79,3 +80,50 @@ def test_different_units_get_different_labels():
 def test_empty_and_clean_text_is_unchanged():
     assert redact("") == ""
     assert redact("Готовий до роботи.") == "Готовий до роботи."
+
+
+@pytest.mark.parametrize("name", [
+    "Петро Вигаданко", "Вигаданко Петро Іванович",
+    "ВИГАДАНКО Петро Іванович", "Петро Іванович ВИГАДАНКО",
+    "Петро ВИГАДАНКО", "Анна-Марія Вигаданко",
+])
+def test_full_name_is_removed_in_both_orders_and_cases(name):
+    safe = redact(f"Підписант: полковник {name}.")
+    for word in name.split():
+        assert word not in safe
+    assert "Підписант: полковник" in safe
+
+
+@pytest.mark.parametrize("name", [
+    "Тестівського обласного територіального центру комплектування та соціальної підтримки",
+    "Тестівському обласному ТЦК та СП", "ТЕСТІВСЬКОГО ОБЛАСНОГО ТЦК ТА СП",
+])
+def test_tck_name_is_removed_in_declined_forms(name):
+    safe = redact(f"Адресат: {name}.")
+    assert "тестів" not in safe.casefold()
+    assert "Адресат:" in safe
+
+
+def test_routing_version_after_a_path_stays_readable():
+    """Шлях прибирається, а те, що стоїть після « · », лишається.
+
+    Раніше правило шляху з'їдало рядок до кінця, і в знеособленому журналі не
+    було видно навіть версії модуля маршрутизації — єдиної ознаки того, що
+    програму перезапущено після оновлення.
+    """
+    line = (
+        "Модуль маршрутизації: C:\\Users\\Тест\\Нова папка\\nat\\src\\recipient_mapping.py"
+        " · версія 2026-09-15-v12-internal-context-only"
+    )
+    assert redact(line) == "Модуль маршрутизації: <шлях> · версія 2026-09-15-v12-internal-context-only"
+
+
+def test_excel_reference_keeps_date_and_size_but_not_the_path():
+    safe = redact("Еталон Excel: E:/Робота/Нова папка/словник.xlsx · змінено 15.09.2026 12:11:52 · 5470 байт.")
+    assert "Робота" not in safe and "словник" not in safe
+    assert safe.startswith("Еталон Excel: <шлях> · змінено 15.09.2026 12:11:52")
+
+
+def test_path_without_separator_is_removed_to_the_end_of_line():
+    safe = redact("Збережено файл: E:\\Робота\\Накази\\Витяги наказу № 999.docx\nДалі звичайний рядок.")
+    assert safe.splitlines() == ["Збережено файл: <шлях>", "Далі звичайний рядок."]

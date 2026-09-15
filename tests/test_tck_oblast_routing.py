@@ -237,3 +237,55 @@ def test_a_plain_training_centre_is_still_not_a_tck():
     from nodeautomationtoolkit.builtin_nodes.recipient_mapping import _extract_tck_sender
 
     assert _extract_tck_sender("навчального центру Сухопутних військ") is None
+
+
+def test_anaphoric_tck_phrase_does_not_match_a_generic_table_row():
+    exact = (
+        "Львівський обласний територіальний центр комплектування "
+        "та соціальної підтримки"
+    )
+    generic = "центр комплектування та соціальної підтримки"
+    mapping = {
+        exact: _entry(exact, "Львівський ОТЦК та СП", "м. Львів"),
+        generic: _entry(generic, "Чужий загальний центр", "м. Інше"),
+    }
+    order = (
+        "§ 1\nПРИЗНАЧИТИ:\n"
+        f"1. Майора ТЕСТЕНКА, офіцера {exact}, "
+        "начальником відділення цього самого центру комплектування та "
+        "соціальної підтримки."
+    )
+
+    routes = map_military_units(text=order, mapping=mapping)
+
+    assert list(routes["unit_paragraphs"]) == ["Львівський ОТЦК та СП"]
+
+
+def test_unrelated_oblast_before_tck_does_not_become_a_second_recipient():
+    mapping = {
+        OBLAST: _entry(OBLAST, "Волинський ОТЦК та СП", "м. Луцьк"),
+        LVIV_OBLAST: _entry(LVIV_OBLAST, "Львівський ОТЦК та СП", "м. Львів"),
+    }
+    order = (
+        "§ 1\nПРИЗНАЧИТИ:\n"
+        "1. Майора ТЕСТЕНКА, який раніше проходив службу у Волинській області. "
+        f"Призначити офіцером {LVIV_OBLAST}."
+    )
+
+    routes = map_military_units(text=order, mapping=mapping)
+
+    assert list(routes["unit_paragraphs"]) == ["Львівський ОТЦК та СП"]
+
+
+def test_district_table_row_without_word_territorial_still_redirects_to_oblast():
+    oblast = "Волинський обласний центр комплектування та соціальної підтримки"
+    district = "Ковельський районний центр комплектування та соціальної підтримки"
+    mapping = {
+        oblast: _entry(oblast, "Волинський ОТЦК та СП", "м. Луцьк"),
+        district: _entry(district, "Ковельський РТЦК та СП"),
+    }
+    order = f"§ 1\n1. Майора ТЕСТЕНКА призначити до {district}."
+
+    routes = map_military_units(text=order, mapping=mapping)
+
+    assert list(routes["unit_paragraphs"]) == ["Волинський ОТЦК та СП"]

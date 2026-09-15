@@ -70,6 +70,45 @@ def test_no_mapping_keeps_text_readable():
     assert "55" in result
 
 
+@pytest.mark.parametrize("reverse", [False, True])
+def test_numbered_column_a_name_wins_over_longer_generic_name(reverse):
+    entries = [
+        ("902 центр підготовки", {"cipher": "А0902", "abbreviation": "902 цп"}),
+        ("окремий центр підготовки", {"cipher": "А0002", "abbreviation": "оцп"}),
+    ]
+    mapping = dict(reversed(entries) if reverse else entries)
+
+    result, _, _ = cipher_unit_names(
+        "офіцера 902 окремого центру підготовки", mapping
+    )
+
+    assert result == "офіцера військової частини А0902"
+
+
+def test_column_c_abbreviation_is_not_a_search_key_for_ciphering():
+    mapping = {
+        "902 окремий тестовий полк": {
+            "cipher": "А0902",
+            "abbreviation": "особливе скорочення",
+        }
+    }
+    source = "офіцера особливого скорочення"
+
+    result, count, rows = cipher_unit_names(source, mapping)
+
+    assert result == source
+    assert count == 0
+    assert rows == []
+
+
+def test_generic_table_name_does_not_cipher_anaphoric_reference():
+    mapping = {"центр": {"cipher": "А0903", "abbreviation": "ц"}}
+
+    result, _, _ = cipher_unit_names("перевести до цього самого центру", mapping)
+
+    assert result == "перевести до цієї самої військової частини"
+
+
 @pytest.mark.parametrize(
     "text, expected_line",
     [

@@ -585,6 +585,10 @@ def format_signature_line(doc, paragraph_range, underline: bool) -> None:
         paragraph_range.Font.Underline = _WD_UNDERLINE_SINGLE
 
 
+_ITEM_RE = re.compile(r"^\d{1,3}(?:\.\d{1,3})*[\.\)]\s")
+_LIST_NUMBER_RE = re.compile(r"^\d{1,3}(?:\.\d{1,3})*[\.\)]?$")
+
+
 def apply_keep_together_rules(
     doc, content_start: int, content_end: int, signer_inside: bool = True
 ) -> None:
@@ -605,24 +609,41 @@ def apply_keep_together_rules(
     лишалася сама внизу сторінки.
     """
     content_range = doc.Range(content_start, content_end)
-    spans = [
-        (content_range.Paragraphs(i).Range.Start, content_range.Paragraphs(i).Range.End)
-        for i in range(1, content_range.Paragraphs.Count + 1)
-    ]
+    # FormattedText іноді переносить KeepWithNext із вихідного наказу. Наші
+    # правила нижче є повними, тому спершу прибираємо випадкове успадковане
+    # зчеплення, щоб сусідні пункти не ставали одним великим блоком.
+    content_range.ParagraphFormat.KeepWithNext = False
+    # Один прохід колекцією: `Paragraphs(i)` щоразу йде від початку документа.
+    paragraphs = []
+    for paragraph in content_range.Paragraphs:
+        paragraph_range = paragraph.Range
+        paragraph_text = paragraph_range.Text or ""
+        list_string = ""
+        clean = paragraph_text.strip()
+        if clean and not _ITEM_RE.match(clean):
+            try:
+                list_string = str(paragraph_range.ListFormat.ListString or "")
+            except Exception:
+                list_string = ""
+        paragraphs.append((paragraph_range.Start, paragraph_range.End, paragraph_text, list_string))
 
-    def kind_of(text: str) -> str:
-        clean = (text or "").strip()
+    def kind_of(paragraph_text: str, list_string: str) -> str:
+        clean = (paragraph_text or "").strip()
         if not clean:
             return "blank"
         if clean.startswith("§"):
             return "heading"
-        if re.match(r"^\d{1,3}(?:\.\d{1,3})*[\.\)]\s", clean):
+        # Номер пункту буває набраний у тексті або згенерований автонумерацією
+        # Word — тоді в тексті абзацу його НЕМАЄ. Такий пункт вважався
+        # «продовженням», увесь наказ зчіплювався в один ланцюг, виконати який
+        # Word не може, і нерозривність «іноді не працювала».
+        if _ITEM_RE.match(clean) or _LIST_NUMBER_RE.match(list_string.strip()):
             return "item"
         if clean.endswith(":"):
             return "heading"
         return "continuation"
 
-    kinds = [kind_of(doc.Range(start, end).Text) for start, end in spans]
+    kinds = [kind_of(paragraph_text, list_string) for _s, _e, paragraph_text, list_string in paragraphs]
 
     # Останній непорожній абзац — підписант наказу, але лише якщо він узагалі
     # є в цьому діапазоні (див. `signer_inside`).
@@ -632,25 +653,153 @@ def apply_keep_together_rules(
         else None
     )
 
-    for index, (start, end) in enumerate(spans):
-        if kinds[index] == "blank":
+    # (KeepTogether або None — не чіпати, KeepWithNext) для кожного абзацу.
+    flags: list[tuple | None] = [None] * len(paragraphs)
+    for index, kind in enumerate(kinds):
+        if kind == "blank":
             continue
-        paragraph_format = doc.Range(start, end).ParagraphFormat
-        paragraph_format.KeepTogether = True
-
         next_meaningful = next(
             (j for j in range(index + 1, len(kinds)) if kinds[j] != "blank"), None
         )
-        if next_meaningful is None:
-            paragraph_format.KeepWithNext = False
-        elif next_meaningful == signer_index:
+        if next_meaningful is None or next_meaningful == signer_index:
             # Підписант починає власний блок і не тягне за собою весь
             # останній пункт із біографією.
-            paragraph_format.KeepWithNext = False
-        elif kinds[index] == "heading":
-            paragraph_format.KeepWithNext = True
+            keep_with_next = False
+        elif kind == "heading":
+            keep_with_next = True
         else:
-            paragraph_format.KeepWithNext = kinds[next_meaningful] == "continuation"
+            keep_with_next = kinds[next_meaningful] == "continuation"
+        flags[index] = (True, keep_with_next)
+        # Порожні абзаци до наступного блоку несуть ТЕ САМЕ зчеплення. Інакше
+        # ланцюг рвався саме на порожньому рядку: шапка трималась за порожній
+        # абзац, а він — ні за що, і сторінка розривалась одразу за ним.
+        gap_end = next_meaningful if next_meaningful is not None else len(kinds)
+        for blank in range(index + 1, gap_end):
+            flags[blank] = (None, keep_with_next)
+
+    def apply(group_start: int, group_end: int, group_flags: tuple) -> None:
+        paragraph_format = doc.Range(group_start, group_end).ParagraphFormat
+        keep_together, keep_with_next = group_flags
+        if keep_together is not None:
+            paragraph_format.KeepTogether = keep_together
+        paragraph_format.KeepWithNext = keep_with_next
+
+    # Сусідні абзаци з однаковими ознаками пишемо одним діапазоном.
+    group = None
+    for (paragraph_start, paragraph_end, _t, _l), paragraph_flags in zip(paragraphs, flags):
+        if paragraph_flags is not None and group and group[2] == paragraph_flags and group[1] == paragraph_start:
+            group = (group[0], paragraph_end, paragraph_flags)
+            continue
+        if group:
+            apply(*group)
+        group = (paragraph_start, paragraph_end, paragraph_flags) if paragraph_flags is not None else None
+    if group:
+        apply(*group)
+
+
+_WD_UNDEFINED = 9999999
+_GEOMETRY_PROPS = ("Alignment", "LeftIndent", "RightIndent", "FirstLineIndent")
+
+
+def _read_font(range_object) -> tuple[str, float] | None:
+    """Діючий шрифт діапазону або `None`, якщо він мішаний."""
+    try:
+        font = range_object.Font
+        name = str(font.Name or "").strip()
+        size = float(font.Size)
+    except Exception:
+        return None
+    if not name or not 0 < size < 1000:  # 9999999 — мішаний розмір
+        return None
+    return name, size
+
+
+def _read_geometry(range_object) -> tuple | None:
+    """Діюча геометрія абзаців діапазону або `None`, якщо вона різна."""
+    try:
+        paragraph_format = range_object.ParagraphFormat
+        values = tuple(getattr(paragraph_format, prop) for prop in _GEOMETRY_PROPS)
+    except Exception:
+        return None
+    if any(value == _WD_UNDEFINED for value in values):
+        return None
+    return values
+
+
+def _write_font(range_object, font: tuple[str, float]) -> None:
+    try:
+        range_object.Font.Name, range_object.Font.Size = font
+    except Exception:
+        pass
+
+
+def _write_geometry(range_object, geometry: tuple) -> None:
+    try:
+        paragraph_format = range_object.ParagraphFormat
+    except Exception:
+        return
+    for prop, value in zip(_GEOMETRY_PROPS, geometry):
+        try:
+            setattr(paragraph_format, prop, value)
+        except Exception:
+            pass
+
+
+def _paragraph_spans(range_object) -> list[tuple[int, int, object]]:
+    """`(початок, кінець, Range)` абзаців діапазону — один прохід колекцією."""
+    spans = []
+    for paragraph in range_object.Paragraphs:
+        paragraph_range = paragraph.Range
+        spans.append((paragraph_range.Start, paragraph_range.End, paragraph_range))
+    return spans
+
+
+def carry_effective_formatting(source_range, destination_range) -> None:
+    """Переносить ДІЮЧИЙ шрифт і геометрію наказу на вставлений зміст.
+
+    `FormattedText` не переносить властивість, яку в наказі задає стиль:
+    абзац зі шрифтом зі стилю `Normal` наказу отримує `Normal` ЗАГОТОВКИ. У
+    пакеті частина наказів має шрифт, заданий прямо, а частина — стилем, тож
+    гарнітура й розмір «стрибали» від примірника до примірника. У витягах і
+    повідомленнях так само переноситься вже давно (`_carry_source_formatting`).
+
+    Спершу — весь діапазон одним читанням: у більшості наказів шрифт один.
+    Поабзацно — лише коли він мішаний, і однакових сусідів пишемо разом.
+    """
+    document = destination_range.Document
+    whole_font = _read_font(source_range)
+    whole_geometry = _read_geometry(source_range)
+    if whole_font:
+        _write_font(destination_range, whole_font)
+    if whole_geometry:
+        _write_geometry(destination_range, whole_geometry)
+    if whole_font and whole_geometry:
+        return
+
+    source_spans = _paragraph_spans(source_range)
+    destination_spans = _paragraph_spans(destination_range)
+    if len(source_spans) != len(destination_spans):
+        # Абзаців не порівну (таблиця, зноска) — поабзацно не зіставити,
+        # лишаємо те, що переніс FormattedText.
+        return
+
+    def write_groups(read, write) -> None:
+        group_start = group_end = group_value = None
+        for (_s, _e, source_paragraph), (start, end, _range) in zip(source_spans, destination_spans):
+            value = read(source_paragraph)
+            if value is not None and value == group_value and group_end == start:
+                group_end = end
+                continue
+            if group_value is not None:
+                write(document.Range(group_start, group_end), group_value)
+            group_start, group_end, group_value = start, end, value
+        if group_value is not None:
+            write(document.Range(group_start, group_end), group_value)
+
+    if not whole_font:
+        write_groups(_read_font, _write_font)
+    if not whole_geometry:
+        write_groups(_read_geometry, _write_geometry)
 
 
 def copy_order_body(doc, tag_range, source_doc, first_para: int, last_para: int) -> tuple[int, int]:
@@ -678,14 +827,15 @@ def copy_order_body(doc, tag_range, source_doc, first_para: int, last_para: int)
     destination.FormattedText = source_range.FormattedText
     content_end = destination.End
 
-    # Ручні розриви сторінок з наказу у примірник не переносяться.
     copied = doc.Range(content_start, content_end)
-    for index in range(1, copied.Paragraphs.Count + 1):
-        try:
-            copied.Paragraphs(index).Range.ParagraphFormat.PageBreakBefore = False
-        except Exception:
-            continue
+    # Ручні розриви сторінок з наказу у примірник не переносяться. Один запис
+    # на весь діапазон: Word застосовує ParagraphFormat до кожного абзацу.
+    try:
+        copied.ParagraphFormat.PageBreakBefore = False
+    except Exception:
+        pass
 
+    carry_effective_formatting(source_range, copied)
     return content_start, content_end
 
 
@@ -736,12 +886,12 @@ def _paragraph_index(doc, paragraph) -> int:
     return doc.Paragraphs.Count
 
 
-def format_certifier_block(doc) -> bool:
+def format_certifier_block(doc, underline_signature: bool = False) -> bool:
     """Форматує блок засвідчувача, що починається з «Згідно з оригіналом».
 
     Блок суцільний — порожніх абзаців усередині немає, тому його кінцем є
-    перший порожній абзац. Останній рядок (звання та прізвище) підкреслюється
-    повністю, а прізвище відсувається до правого краю.
+    перший порожній абзац. Оформлення останнього рядка за замовчуванням
+    повністю лишається із таблиці заготовки; примусове підкреслення вимкнене.
     """
     finder = doc.Content.Find
     finder.Text = "Згідно з оригіналом"
@@ -778,7 +928,11 @@ def format_certifier_block(doc) -> bool:
             break
         last_index = index
 
-    format_signature_line(doc, doc.Paragraphs(last_index).Range, underline=True)
+    format_signature_line(
+        doc,
+        doc.Paragraphs(last_index).Range,
+        underline=underline_signature,
+    )
 
     # Підписант і «Згідно з оригіналом» — один неподільний блок: інакше
     # засвідчувач відривається на наступну сторінку (правило 5.4 AGENT.md).
@@ -865,8 +1019,10 @@ def replace_tags(doc, values: dict[str, str], bold_patterns: dict | None = None)
     """
     patterns = BOLD_TAG_PATTERNS if bold_patterns is None else bold_patterns
 
-    for tag, value in values.items():
-        pattern = patterns.get(tag)
+    from .template_tags import expand_common_tags, tag_aliases
+
+    for tag, value in expand_common_tags(values).items():
+        pattern = next((patterns[a] for a in tag_aliases(tag) if a in patterns), None)
         find_obj = doc.Content.Find
         find_obj.Text = tag
         iterations = 0
@@ -975,6 +1131,15 @@ def build_copy_document(
             content_start, content_end = copy_order_body(
                 doc, find_obj.Parent, source_doc, body_start, signer_index
             )
+            # Порожні білі зображення наказу в примірник не переносимо. Межі
+            # змісту після видалення перечитуємо з Range.
+            from .blank_images import remove_blank_images
+
+            pasted = doc.Range(content_start, content_end)
+            removed_images = remove_blank_images(doc, pasted)
+            if removed_images:
+                content_start, content_end = pasted.Start, pasted.End
+                note(f"  Прибрано порожніх білих зображень: {removed_images}.")
             apply_keep_together_rules(
                 doc, content_start, content_end, signer_inside=signer_inside
             )
@@ -1007,9 +1172,10 @@ def build_copy_document(
 
         with steps.step("блок «Згідно з оригіналом»"):
             # Блок засвідчувача («Згідно з оригіналом» + посада + звання/прізвище)
-            # іде суцільно, без порожніх абзаців. Форматуємо його ОСТАННІЙ рядок.
+            # іде суцільно, без порожніх абзаців. Підкреслення й інше оформлення
+            # бере із таблиці заготовки — користувацький макет не перезаписуємо.
             if format_certifier_block(doc):
-                note("  Блок «Згідно з оригіналом» оформлено.")
+                note("  Блок «Згідно з оригіналом» взято з оформленням заготовки.")
             else:
                 note("  УВАГА: блок «Згідно з оригіналом» у документі не знайдено.")
 

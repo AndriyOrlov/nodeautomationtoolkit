@@ -1,9 +1,18 @@
+import inspect
+
 from generate_extracts import (
     extract_metadata_from_filename,
     format_ukr_date,
     build_extracts_filename,
     plan_2up_page_layout,
 )
+from nodeautomationtoolkit.builtin_nodes.copy_generator import format_certifier_block
+
+
+def test_copy_certifier_keeps_template_underline_by_default():
+    """Примірник не нав'язує підкреслення блоку засвідчувача поверх таблиці."""
+    parameter = inspect.signature(format_certifier_block).parameters["underline_signature"]
+    assert parameter.default is False
 
 
 def test_metadata_extraction_variants():

@@ -173,7 +173,7 @@ def test_unmatched_item_is_returned_for_excel_control():
     assert result["routing_audit"][0]["final_recipients"] == "—"
 
 
-def test_internal_reference_keeps_explicitly_named_tck_as_recipient():
+def test_reference_phrase_keeps_explicit_tck_without_calling_it_internal_movement():
     from nodeautomationtoolkit.builtin_nodes.recipient_mapping import map_military_units
 
     mapping = {
@@ -192,7 +192,32 @@ def test_internal_reference_keeps_explicitly_named_tck_as_recipient():
 
     assert result["unmatched_items"] == []
     assert len(result["unit_paragraphs"]) == 1
-    assert "підтверджено названим адресатом" in result["routing_audit"][0]["applied_rules"]
+    assert "адресат знайдено в пункті" in result["routing_audit"][0]["applied_rules"]
+    assert "внутрішнє переміщення" not in result["routing_audit"][0]["applied_rules"]
+
+
+def test_internal_movement_is_reported_only_when_route_comes_from_heading():
+    from nodeautomationtoolkit.builtin_nodes.recipient_mapping import map_military_units
+
+    mapping = {
+        "911 окремий тестовий полк": {
+            "open_name": "911 окремий тестовий полк",
+            "cipher": "А0911",
+            "abbreviation": "911 отп",
+        },
+    }
+    text = (
+        "§ 1\n"
+        "Військовослужбовців 911 окремого тестового полку ПРИЗНАЧИТИ:\n"
+        "1. Майора ТЕСТЕНКА призначити начальником служби цього самого полку."
+    )
+
+    result = map_military_units(text, mapping=mapping)
+
+    audit = result["routing_audit"][0]
+    assert audit["item_recipients"] == "—"
+    assert audit["context_recipients"] != "—"
+    assert "внутрішнє переміщення: адресат із контексту" in audit["applied_rules"]
 
 
 def test_unrouted_management_change_is_excluded_not_reported_as_missing():

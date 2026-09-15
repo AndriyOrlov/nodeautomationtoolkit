@@ -60,6 +60,14 @@ app.message_cover_template_path = Var(os.path.join(E2E, "message_cover.docx"))
 app.message_content_template_path = Var(os.path.join(E2E, "message_content.docx"))
 app.message_out_folder = Var(out_folder)
 app.message_executor = Var("Тест Тестенко 00-000")
+# run_generate_messages читає підписанта наказу й засвідчувача так само, як
+# run_extracts; без цих полів прогін падав ще до генерації.
+app.order_signer_position = Var("")
+app.order_signer_rank = Var("")
+app.order_signer_name = Var("")
+app.certifier_position = Var("Начальник відділу /штабу військової частини А0001")
+app.certifier_rank = Var("підполковник")
+app.certifier_name = Var("Іван ЗАСВІДЧУВАЧ")
 app.btn_generate_messages = Button()
 
 

@@ -600,6 +600,8 @@ def generate_decision_order_docx(
     from docx import Document
     from nodeautomationtoolkit.builtin_nodes.recipient_mapping import (
         _build_unit_fuzzy_pattern,
+        _mask_anaphoric_unit_references,
+        _unit_name_signature,
         _UNIT_PHRASE_REPLACEMENTS,
         _format_full_closed_unit_text,
         _match_case,
@@ -613,6 +615,18 @@ def generate_decision_order_docx(
 
     doc = Document(source_path)
     mapping_dict = mapping or {}
+    # Назви для пошуку походять лише з колонки A. Порядок рядків Excel не
+    # повинен вирішувати, хто переможе: номерна й конкретніша назва завжди
+    # обробляється раніше за загальний рядок на кшталт «окремий центр».
+    ordered_mapping = sorted(
+        mapping_dict.items(),
+        key=lambda item: (
+            any(token.startswith("#") for token in _unit_name_signature(item[0])),
+            len(_unit_name_signature(item[0])),
+            len(str(item[0])),
+        ),
+        reverse=True,
+    )
     replaced_count = 0
     report_rows = []
 
@@ -634,7 +648,7 @@ def generate_decision_order_docx(
             continue
 
         # Заміна відкритих назв ВЧ (із збереженням CAPS)
-        for open_name, mapped_val in mapping_dict.items():
+        for open_name, mapped_val in ordered_mapping:
             closed_code = _format_full_closed_unit_text(mapped_val, mapping_dict)
             pattern = _build_unit_fuzzy_pattern(open_name)
 
@@ -642,10 +656,25 @@ def generate_decision_order_docx(
                 matched = False
                 for run in p.runs:
                     if run.text and pattern.search(run.text):
-                        matches = len(pattern.findall(run.text))
-                        replaced_count += matches
-                        run.text = pattern.sub(lambda m: _match_case(m.group(0), closed_code), run.text)
-                        matched = True
+                        run_mask = _mask_anaphoric_unit_references(run.text)
+                        hits = [0]
+
+                        def replace_explicit_name(match):
+                            matched_text = match.group(0)
+                            masked_slice = run_mask[match.start():match.end()]
+                            if any(
+                                original_char != masked_char
+                                and not original_char.isspace()
+                                for original_char, masked_char
+                                in zip(matched_text, masked_slice)
+                            ):
+                                return matched_text
+                            hits[0] += 1
+                            return _match_case(matched_text, closed_code)
+
+                        run.text = pattern.sub(replace_explicit_name, run.text)
+                        replaced_count += hits[0]
+                        matched = matched or bool(hits[0])
                 if matched:
                     raw_cipher = str(mapped_val.get("cipher", "")) if isinstance(mapped_val, dict) else str(mapped_val)
                     corps_info = str(mapped_val.get("corps", "")) if isinstance(mapped_val, dict) else ""
@@ -679,13 +708,29 @@ def generate_decision_order_docx(
                     if not p_text.strip():
                         continue
 
-                    for open_name, mapped_val in mapping_dict.items():
+                    for open_name, mapped_val in ordered_mapping:
                         closed_code = _format_full_closed_unit_text(mapped_val, mapping_dict)
                         pattern = _build_unit_fuzzy_pattern(open_name)
                         if pattern.search(p_text):
                             for run in p.runs:
                                 if run.text and pattern.search(run.text):
-                                    run.text = pattern.sub(closed_code, run.text)
+                                    run_mask = _mask_anaphoric_unit_references(run.text)
+
+                                    def replace_explicit_name(match):
+                                        matched_text = match.group(0)
+                                        masked_slice = run_mask[match.start():match.end()]
+                                        if any(
+                                            original_char != masked_char
+                                            and not original_char.isspace()
+                                            for original_char, masked_char
+                                            in zip(matched_text, masked_slice)
+                                        ):
+                                            return matched_text
+                                        return closed_code
+
+                                    run.text = pattern.sub(
+                                        replace_explicit_name, run.text
+                                    )
 
                     if replace_unit_phrases:
                         for pattern, replacer in _UNIT_PHRASE_REPLACEMENTS:

@@ -24,6 +24,8 @@ from nodeautomationtoolkit.builtin_nodes.recipient_mapping import (
     _match_case,
     _short_closed_code,
     _format_full_closed_unit_text,
+    _mask_anaphoric_unit_references,
+    _unit_name_signature,
     is_tck_entry,
     _ORDER_SIGNER_START_RE,
 )
@@ -298,39 +300,50 @@ def cipher_unit_names(
         if isinstance(mapped_val, dict):
             raw_cipher = str(mapped_val.get("cipher") or "")
             corps_info = str(mapped_val.get("corps") or "")
-            abbreviation = str(mapped_val.get("abbreviation") or "").strip()
         else:
             raw_cipher = str(mapped_val)
             corps_info = ""
-            abbreviation = ""
 
         pattern = (
             _build_unit_fuzzy_pattern(open_name)
             if fuzzy_match
             else re.compile(rf"\b{re.escape(open_name)}\b", re.IGNORECASE)
         )
-        patterns_to_apply.append((len(open_name), pattern, closed_code, open_name, raw_cipher, corps_info))
-
-        if abbreviation and abbreviation != open_name:
-            abbr_pattern = (
-                _build_unit_fuzzy_pattern(abbreviation)
-                if fuzzy_match
-                else re.compile(rf"\b{re.escape(abbreviation)}\b", re.IGNORECASE)
+        signature = _unit_name_signature(open_name)
+        patterns_to_apply.append(
+            (
+                any(token.startswith("#") for token in signature),
+                len(signature),
+                len(open_name),
+                pattern,
+                closed_code,
+                open_name,
+                raw_cipher,
+                corps_info,
             )
-            patterns_to_apply.append(
-                (len(abbreviation), abbr_pattern, closed_code, abbreviation, raw_cipher, corps_info)
-            )
+        )
 
-    # Найдовші назви — першими, щоб коротша не «з'їла» частину довшої.
-    patterns_to_apply.sort(key=lambda x: x[0], reverse=True)
+    # Пошук виконується лише за колонкою A. Номерні та повніші назви мають
+    # пріоритет над загальними рядками, навіть якщо загальний рядок довший.
+    patterns_to_apply.sort(key=lambda row: row[:3], reverse=True)
 
-    for _, pat, fc, op_name, raw_c, c_info in patterns_to_apply:
+    for _has_number, _signature_len, _name_len, pat, fc, op_name, raw_c, c_info in patterns_to_apply:
         hits = [0]
+        routing_mask = _mask_anaphoric_unit_references(text)
 
         def _replace(match, code=fc, hits=hits):
             matched = match.group(0)
             if _spans_source_and_destination(matched):
                 return matched  # збіг перетнув межу пункту — не чіпаємо текст
+            # «цього самого центру/батальйону...» — посилання на вже названу
+            # частину, а не новий рядок A. Нижче воно перетвориться на
+            # граматичну форму «цієї самої військової частини».
+            masked_slice = routing_mask[match.start():match.end()]
+            if any(
+                original_char != masked_char and not original_char.isspace()
+                for original_char, masked_char in zip(matched, masked_slice)
+            ):
+                return matched
             hits[0] += 1
             return _match_case(
                 matched,

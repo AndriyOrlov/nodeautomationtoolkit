@@ -200,3 +200,71 @@ def test_shortened_word_form_is_still_matched():
     pattern = _build_unit_fuzzy_pattern("208 окремий ремонтно-відновлювальний полк")
 
     assert pattern.search("208 окремого ремонтно-відновного полку")
+
+
+def test_recruiting_center_special_case_does_not_add_every_same_number_alias():
+    exact = "17 центр рекрутингу"
+    reversed_name = "центр рекрутингу № 17"
+    mapping = {
+        exact: {
+            "cipher": "А0017", "abbreviation": "17 цр",
+            "recipient_to": "EXACT_TO", "destination_where": "EXACT_WHERE",
+        },
+        reversed_name: {
+            "cipher": "А0117", "abbreviation": "інший 17 цр",
+            "recipient_to": "OTHER_TO", "destination_where": "OTHER_WHERE",
+        },
+    }
+    order = "§ 1\n1. Майора ТЕСТЕНКА призначити до 17 центру рекрутингу."
+
+    routes = map_military_units(text=order, mapping=mapping)
+
+    assert list(routes["unit_paragraphs"]) == ["17 цр А0017"]
+
+
+def test_multiple_army_corps_abbreviations_derived_from_column_a_are_all_found():
+    first = "31 армійський корпус"
+    second = "32 армійський корпус"
+    mapping = {
+        first: {
+            "cipher": "А0031", "abbreviation": "31 АК",
+            "recipient_to": "FIRST_TO", "destination_where": "FIRST_WHERE",
+        },
+        second: {
+            "cipher": "А0032", "abbreviation": "32 АК",
+            "recipient_to": "SECOND_TO", "destination_where": "SECOND_WHERE",
+        },
+    }
+    order = "§ 1\n1. Матеріали направити до 31 АК та 32 АК."
+
+    routes = map_military_units(text=order, mapping=mapping)
+
+    assert set(routes["unit_paragraphs"]) == {"31 АК А0031", "32 АК А0032"}
+
+
+def test_unnumbered_generic_name_does_not_stitch_across_another_unit_head():
+    false_name = "окрема бригада підтримки"
+    real_brigade = "окрема бригада зв'язку"
+    real_center = "центр підтримки"
+    mapping = {
+        false_name: {
+            "cipher": "А0100", "abbreviation": "хибна",
+            "recipient_to": "FALSE_TO", "destination_where": "FALSE_WHERE",
+        },
+        real_brigade: {
+            "cipher": "А0101", "abbreviation": "бр зв",
+            "recipient_to": "BRIGADE_TO", "destination_where": "BRIGADE_WHERE",
+        },
+        real_center: {
+            "cipher": "А0102", "abbreviation": "ц підтримки",
+            "recipient_to": "CENTER_TO", "destination_where": "CENTER_WHERE",
+        },
+    }
+    order = (
+        "§ 1\n1. Матеріали передати з окремої бригади зв'язку "
+        "до центру підтримки."
+    )
+
+    routes = map_military_units(text=order, mapping=mapping)
+
+    assert set(routes["unit_paragraphs"]) == {"бр зв А0101", "ц підтримки А0102"}
