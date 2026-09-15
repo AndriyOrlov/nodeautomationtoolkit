@@ -136,6 +136,8 @@ class QtShellMixin:
     `handle_drag_and_drop`."""
 
     legacy = None  # модуль generate_extracts; задається в create_qt_app_class
+    # Нові частини з наказу дописуються в таблицю заготовками (AGENT.md 9.5.7).
+    ADD_NEW_UNITS_TO_TABLE = True
 
     def __init__(self):
         self.main_window = GeneratorWindow(self)

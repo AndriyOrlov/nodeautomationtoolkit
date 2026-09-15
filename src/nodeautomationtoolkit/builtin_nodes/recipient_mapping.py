@@ -2706,6 +2706,25 @@ _UNIT_PHRASE_REPLACEMENTS = [
 ]
 
 
+def _table_cipher(mapped_val: dict | str | None, open_name: str = "") -> str:
+    """Шифр рівно зі стовпця B; порожній рядок, якщо B не заповнено.
+
+    `read_recipient_mapping` кладе у `cipher` відкриту назву, коли B порожній
+    (так будуються ключі витягів). Шифром це не є: підставити таку «заміну» в
+    закритий текст означає лишити в ньому відкриту назву (розд. 9.5.7).
+    """
+    if isinstance(mapped_val, dict):
+        cipher = str(mapped_val.get("cipher") or mapped_val.get("closed_name") or "").strip()
+        open_name = str(mapped_val.get("open_name") or open_name or "").strip()
+    else:
+        cipher = str(mapped_val or "").strip()
+    if not cipher:
+        return ""
+    if open_name and _fix_military_typos(cipher).casefold() == _fix_military_typos(open_name).casefold():
+        return ""
+    return cipher
+
+
 def is_tck_entry(mapped_val: dict | str) -> bool:
     """Чи є рядок словника територіальним центром комплектування (ТЦК).
 
@@ -2766,12 +2785,14 @@ def _format_full_closed_unit_text(mapped_val: dict | str, mapping_dict: dict) ->
         # та дублі «військової частини військової частини».
         # Посилання розвʼязуємо тим самим `_find_corps_entry`, що й витяги.
         corps_entry = _find_corps_entry(corps_name, _extract_corps_abbr(corps_name), mapping_dict)
-        if corps_entry:
-            corps_cipher = str(corps_entry.get("cipher") if isinstance(corps_entry, dict) else corps_entry)
-            corps_code = _to_unit_phrase(corps_cipher)
-        else:
-            corps_code = _to_unit_phrase(corps_name)
-        return f"{unit_code} {corps_code}"
+        corps_cipher = _table_cipher(corps_entry)
+        if corps_cipher:
+            return f"{unit_code} {_to_unit_phrase(corps_cipher)}"
+        # Рядка корпусу немає в таблиці (або в ньому порожній B). Раніше сюди
+        # йшов сам текст стовпця D — «військової частини 99 АК», тобто
+        # вигаданий шифр. Шифр береться лише з таблиці (розд. 9.5.7), тому
+        # ланка корпусу не додається; генератор повідомлень про це попереджає.
+        return unit_code
 
     return unit_code
 

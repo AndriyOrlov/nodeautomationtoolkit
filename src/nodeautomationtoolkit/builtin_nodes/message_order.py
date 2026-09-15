@@ -19,8 +19,12 @@ from nodeautomationtoolkit.core.definition import node
 from nodeautomationtoolkit.core.table_types import DataTable
 from nodeautomationtoolkit.builtin_nodes.recipient_mapping import (
     _build_unit_fuzzy_pattern,
+    _MILITARY_TYPO_DICTIONARY,
     _UNIT_PHRASE_REPLACEMENTS,
+    _extract_corps_abbr,
+    _find_corps_entry,
     _fix_military_typos,
+    _table_cipher,
     _match_case,
     _short_closed_code,
     _format_full_closed_unit_text,
@@ -233,6 +237,44 @@ def _apply_custom_rules(text: str, rules_input: str | list | dict | None) -> tup
     return res_text, count
 
 
+def _normalize_typos_with_offsets(text: str) -> tuple[str, list[int], list[int]]:
+    """Виправляє описки для ПОШУКУ й памʼятає, звідки взявся кожен символ.
+
+    Повертає `(виправлений текст, starts, ends)`: символ `fixed[i]` походить
+    з `text[starts[i]:ends[i]]`. Замінений фрагмент привʼязується до всього
+    вихідного фрагмента, тож збіг у виправленому тексті переводиться в цілі
+    слова оригіналу — і в документ іде саме оригінал (розд. 9.5.7).
+    """
+    current = text
+    starts = list(range(len(text)))
+    ends = [index + 1 for index in range(len(text))]
+    for pattern, replacement in _MILITARY_TYPO_DICTIONARY:
+        pieces: list[str] = []
+        new_starts: list[int] = []
+        new_ends: list[int] = []
+        position = 0
+        for match in pattern.finditer(current):
+            if match.start() == match.end():
+                continue
+            pieces.append(current[position:match.start()])
+            new_starts.extend(starts[position:match.start()])
+            new_ends.extend(ends[position:match.start()])
+            replaced = match.expand(replacement)
+            source_start, source_end = starts[match.start()], ends[match.end() - 1]
+            pieces.append(replaced)
+            new_starts.extend([source_start] * len(replaced))
+            new_ends.extend([source_end] * len(replaced))
+            position = match.end()
+        if not pieces:
+            continue
+        pieces.append(current[position:])
+        new_starts.extend(starts[position:])
+        new_ends.extend(ends[position:])
+        current = "".join(pieces)
+        starts, ends = new_starts, new_ends
+    return current, starts, ends
+
+
 def find_content_start_line(text: str) -> int:
     """Номер рядка, з якого починається змістовна частина наказу (після шапки)."""
     for idx, line in enumerate(str(text or "").splitlines()):
@@ -256,6 +298,7 @@ def cipher_unit_names(
     mapping: dict | None = None,
     fuzzy_match: bool = True,
     rules: str | list | dict | None = None,
+    problems: list | None = None,
 ) -> tuple[str, int, list]:
     """Замінює відкриті назви частин на шифри, НЕ змінюючи структуру рядків.
 
@@ -265,11 +308,20 @@ def cipher_unit_names(
     зміст повідомлення переноситься тим самим способом, що й у витягах.
 
     Повертає `(текст, кількість замін, рядки звіту)`.
+
+    Шифр береться СТРОГО з таблиці (розд. 9.5.7): рядок із порожнім
+    стовпцем B нічого не шифрує, а корпус зі стовпця D, якого немає в
+    таблиці, не додає вигаданої ланки. Такі збіги дописуються в `problems`
+    (якщо список передано), щоб генератор показав їх користувачу:
+    `("no_cipher", назва)` або `("corps_missing", назва, стовпець D)`.
     """
     if not text:
         return "", 0, []
 
-    text = _fix_military_typos(text)
+    # Описки виправляються ЛИШЕ для пошуку: у документ іде текст наказу як є,
+    # змінюються тільки знайдені назви частин.
+    source_text = text
+    search_text, source_starts, source_ends = _normalize_typos_with_offsets(source_text)
     mapping_dict = {}
     for key, value in (mapping or {}).items():
         clean_key = _fix_military_typos(str(key))
@@ -297,12 +349,11 @@ def cipher_unit_names(
             # Для маршрутизації ці рядки далі потрібні — там вони не змінені.
             continue
         closed_code = _format_full_closed_unit_text(mapped_val, mapping_dict)
-        if isinstance(mapped_val, dict):
-            raw_cipher = str(mapped_val.get("cipher") or "")
-            corps_info = str(mapped_val.get("corps") or "")
-        else:
-            raw_cipher = str(mapped_val)
-            corps_info = ""
+        raw_cipher = _table_cipher(mapped_val, open_name)
+        corps_info = str(mapped_val.get("corps") or "").strip() if isinstance(mapped_val, dict) else ""
+        corps_unresolved = bool(corps_info) and not _table_cipher(
+            _find_corps_entry(corps_info, _extract_corps_abbr(corps_info), mapping_dict)
+        )
 
         pattern = (
             _build_unit_fuzzy_pattern(open_name)
@@ -320,6 +371,7 @@ def cipher_unit_names(
                 open_name,
                 raw_cipher,
                 corps_info,
+                corps_unresolved,
             )
         )
 
@@ -327,14 +379,26 @@ def cipher_unit_names(
     # пріоритет над загальними рядками, навіть якщо загальний рядок довший.
     patterns_to_apply.sort(key=lambda row: row[:3], reverse=True)
 
-    for _has_number, _signature_len, _name_len, pat, fc, op_name, raw_c, c_info in patterns_to_apply:
-        hits = [0]
-        routing_mask = _mask_anaphoric_unit_references(text)
+    routing_mask = _mask_anaphoric_unit_references(search_text)
+    taken_spans: list[tuple[int, int]] = []
+    replacements: list[tuple[int, int, str]] = []
+    problem_keys: set[tuple] = set()
 
-        def _replace(match, code=fc, hits=hits):
+    def _note_problem(problem: tuple) -> None:
+        if problems is not None and problem not in problem_keys:
+            problem_keys.add(problem)
+            problems.append(problem)
+
+    for (
+        _has_number, _signature_len, _name_len, pat, fc, op_name, raw_c, c_info, corps_unresolved
+    ) in patterns_to_apply:
+        hits = 0
+        for match in pat.finditer(search_text):
+            if match.start() == match.end():
+                continue
             matched = match.group(0)
             if _spans_source_and_destination(matched):
-                return matched  # збіг перетнув межу пункту — не чіпаємо текст
+                continue  # збіг перетнув межу пункту — не чіпаємо текст
             # «цього самого центру/батальйону...» — посилання на вже названу
             # частину, а не новий рядок A. Нижче воно перетвориться на
             # граматичну форму «цієї самої військової частини».
@@ -343,17 +407,34 @@ def cipher_unit_names(
                 original_char != masked_char and not original_char.isspace()
                 for original_char, masked_char in zip(matched, masked_slice)
             ):
-                return matched
-            hits[0] += 1
-            return _match_case(
-                matched,
-                _apply_case_to_closed_text(code, _detect_grammatical_case(matched)),
-            )
-
-        text = pat.sub(_replace, text)
-        if hits[0]:
-            replaced_count += hits[0]
+                continue
+            start, end = source_starts[match.start()], source_ends[match.end() - 1]
+            if any(start < taken_end and taken_start < end for taken_start, taken_end in taken_spans):
+                continue  # ділянку вже зайняла точніша назва з таблиці
+            # Ділянка займається навіть без шифру: інакше загальніший рядок
+            # таблиці зашифрував би шматок цієї назви.
+            taken_spans.append((start, end))
+            if not raw_c:
+                _note_problem(("no_cipher", op_name))
+                continue  # порожній стовпець B — шифр не вигадуємо
+            if corps_unresolved:
+                _note_problem(("corps_missing", op_name, c_info))
+            hits += 1
+            replacements.append((
+                start,
+                end,
+                _match_case(
+                    source_text[start:end],
+                    _apply_case_to_closed_text(fc, _detect_grammatical_case(matched)),
+                ),
+            ))
+        if hits:
+            replaced_count += hits
             report_rows.append((op_name, raw_c or "(немає)", c_info or "(немає)", fc))
+
+    text = source_text
+    for start, end, replacement in sorted(replacements, reverse=True):
+        text = text[:start] + replacement + text[end:]
 
     # 1.1. Почесне найменування в лапках лишається після шифру — прибираємо
     # його ДО згортання повторів, інакше воно розділяє два однакові шифри
