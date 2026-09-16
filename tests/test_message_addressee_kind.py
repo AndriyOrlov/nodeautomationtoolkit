@@ -36,7 +36,7 @@ def test_only_corps_still_counts_as_units():
 
 def test_only_tck_gives_heads():
     groups = {"corps": [], "units": [], "tck": ["Начальнику Львівського ОТЦК та СП"]}
-    assert build_addressee_kind_text(groups) == "Начальникам ТЦК"
+    assert build_addressee_kind_text(groups) == "Начальникам ОТЦК та СП"
 
 
 def test_units_and_tck_gives_both():
@@ -47,7 +47,7 @@ def test_units_and_tck_gives_both():
     }
     assert (
         build_addressee_kind_text(groups)
-        == "Командирам військових частин та Начальникам ТЦК"
+        == "Командирам військових частин та Начальникам ОТЦК та СП"
     )
 
 
@@ -59,7 +59,7 @@ def test_corps_units_and_tck_gives_both():
     }
     assert (
         build_addressee_kind_text(groups)
-        == "Командирам військових частин та Начальникам ТЦК"
+        == "Командирам військових частин та Начальникам ОТЦК та СП"
     )
 
 

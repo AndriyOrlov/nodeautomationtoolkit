@@ -230,6 +230,41 @@ def _unit_core_name(open_name: str) -> str:
     return core
 
 
+# Вид Збройних Сил після зашифрованої частини: «…А0088 Сухопутних військ
+# Збройних Сил України». Саме обʼєднання (оперативне/повітряне командування)
+# шифрується як звичайний рядок таблиці, а цей хвіст інформації не несе й у
+# закритому повідомленні не потрібен (розд. 9.5.8).
+_SERVICE_BRANCH = (
+    r"(?:Сухопутних\s+військ|Повітряних\s+Сил|Десантно-штурмових\s+військ"
+    r"|Військово-Морських\s+Сил|Сил\s+спеціальних\s+операцій"
+    r"|Сил\s+територіальної\s+оборони|Сил\s+підтримки|Медичних\s+сил)"
+)
+_SERVICE_BRANCH_TAIL_RE = re.compile(
+    rf"((?:{_CLOSED_UNIT_PHRASE})(?:\s+{_CLOSED_UNIT_PHRASE})*)"
+    rf"(?:\s+{_SERVICE_BRANCH}(?:\s+Збройних\s+Сил\s+України)?"
+    rf"|\s+Збройних\s+Сил\s+України)",
+    re.IGNORECASE | re.UNICODE,
+)
+
+
+# Осиротілий закривальний лапковий знак: шаблон назви зі стовпця A
+# («оперативне командування «Тест»») закінчується на слові ВСЕРЕДИНІ лапок,
+# тому » лишається вже після шифру й заважає прибрати вид Збройних Сил.
+_ORPHAN_CLOSING_QUOTE_RE = re.compile(
+    rf"((?:{_CLOSED_UNIT_PHRASE})(?:\s+{_CLOSED_UNIT_PHRASE})*)\s*[»”\"]",
+    re.IGNORECASE | re.UNICODE,
+)
+
+
+def _strip_orphan_closing_quote(text: str) -> str:
+    """Прибирає лапку, що лишилась від назви в лапках: «…А0088»» → «…А0088»."""
+    return _ORPHAN_CLOSING_QUOTE_RE.sub(r"\1", str(text or ""))
+
+def _strip_service_branch_after_closed_unit(text: str) -> str:
+    """Прибирає «Сухопутних військ Збройних Сил України» одразу після шифру."""
+    return _SERVICE_BRANCH_TAIL_RE.sub(r"\1", str(text or ""))
+
+
 def _strip_honorific_after_closed_unit(text: str) -> str:
     """Прибирає почесне найменування в лапках одразу після шифру частини."""
     previous = None
@@ -239,6 +274,8 @@ def _strip_honorific_after_closed_unit(text: str) -> str:
         previous = result
         result = _HONORIFIC_AFTER_CLOSED_UNIT_RE.sub(r"\1", result)
         result = _strip_unquoted_honorific_after_closed_unit(result)
+        result = _strip_orphan_closing_quote(result)
+        result = _strip_service_branch_after_closed_unit(result)
     return result
 
 

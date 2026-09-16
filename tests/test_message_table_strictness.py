@@ -421,6 +421,84 @@ def test_repeat_run_with_formula_table_points_to_separate_file(tmp_path):
     assert not any("уже є в таблиці" in line for line in logs)
 
 
+# ── Підпорядкування після шифру (розд. 9.5.8) ───────────────────────────────
+
+
+_COMMAND_MAPPING = {
+    "77 окрема тестова бригада": _entry("77 окрема тестова бригада", "А0077"),
+    "оперативне командування «Тест»": _entry("оперативне командування «Тест»", "А0088"),
+}
+
+
+def test_command_is_ciphered_and_service_branch_is_dropped():
+    text = (
+        "командира роти 77 окремої тестової бригади оперативного командування «Тест» "
+        "Сухопутних військ Збройних Сил України"
+    )
+    result, _, _ = cipher_unit_names(text, _COMMAND_MAPPING)
+    assert result == "командира роти військової частини А0077 військової частини А0088"
+
+
+def test_service_branch_is_dropped_in_uppercase_half():
+    text = (
+        "– КОМАНДИРОМ РОТИ 77 ОКРЕМОЇ ТЕСТОВОЇ БРИГАДИ ОПЕРАТИВНОГО КОМАНДУВАННЯ «ТЕСТ» "
+        "СУХОПУТНИХ ВІЙСЬК ЗБРОЙНИХ СИЛ УКРАЇНИ"
+    )
+    result, _, _ = cipher_unit_names(text, _COMMAND_MAPPING)
+    assert result == "– КОМАНДИРОМ РОТИ ВІЙСЬКОВОЇ ЧАСТИНИ А0077 ВІЙСЬКОВОЇ ЧАСТИНИ А0088"
+
+
+def test_bare_armed_forces_tail_after_cipher_is_dropped():
+    mapping = {"3 тестовий центр": _entry("3 тестовий центр", "А0033")}
+    result, _, _ = cipher_unit_names("начальника 3 тестового центру Збройних Сил України", mapping)
+    assert result == "начальника військової частини А0033"
+
+
+def test_service_branch_without_cipher_before_it_is_kept():
+    """Прибирається лише хвіст ПІСЛЯ шифру — решта тексту наказу недоторкана."""
+    mapping = {"77 окрема тестова бригада": _entry("77 окрема тестова бригада", "А0077")}
+    text = "офіцера відділу Сухопутних військ Збройних Сил України"
+    result, _, _ = cipher_unit_names(text, mapping)
+    assert result == text
+
+
+def test_command_missing_from_table_stays_open_and_is_highlighted():
+    mapping = {"77 окрема тестова бригада": _entry("77 окрема тестова бригада", "А0077")}
+    text = "командира роти 77 окремої тестової бригади оперативного командування «Тест»"
+    result, _, _ = cipher_unit_names(text, mapping)
+    assert result == "командира роти військової частини А0077 оперативного командування «Тест»"
+    spans = generator.find_unmatched_open_unit_spans(result)
+    assert [result[start:end] for start, end in spans] == ["оперативного командування «Тест»"]
+    assert generator.collect_new_unit_names(text, mapping) == ["оперативного командування «Тест»"]
+
+
+# ── Види частин зі словника користувача (номери вигадані) ───────────────────
+
+
+@pytest.mark.parametrize(
+    "text, expected",
+    [
+        ("офіцера 12 станції фельд`єгерсько-поштового зв`язку", "12 станції"),
+        ("начальника 5 окремої ремонтної майстерні засобів зв'язку", "5 окремої ремонтної майстерні"),
+        ("начальника 10 командного пункту протиповітряної оборони", "10 командного пункту"),
+        ("офіцера 7 командно-розвідувального пункту", "7 командно-розвідувального пункту"),
+        ("офіцера 3 картографічної частини", "картографічної частини"),
+        ("офіцера 44 інформаційно-телекомунікаційного вузла", "44 інформаційно-телекомунікаційного вузла"),
+        ("офіцера 9 артилерійської бази боєприпасів", "9 артилерійської бази"),
+        ("офіцера 1 батальйону резерву", "1 батальйону"),
+    ],
+)
+def test_kinds_from_the_users_table_are_highlighted(text, expected):
+    spans = generator.find_unmatched_open_unit_spans(text)
+    assert [text[start:end] for start, end in spans] == [expected]
+
+
+def test_order_reference_to_statute_part_is_not_a_unit():
+    """«частина» як вид частини не годиться: ловилося б «до пункту 2 частини четвертої»."""
+    text = "відповідно до пункту 2 частини четвертої статті 26 Закону України"
+    assert generator.find_unmatched_open_unit_spans(text) == []
+
+
 def test_only_qt_shell_adds_units_to_table():
     pytest.importorskip("PySide6")
     from nodeautomationtoolkit.generator_qt.main_window import create_qt_app_class
