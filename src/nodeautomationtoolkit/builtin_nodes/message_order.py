@@ -147,6 +147,89 @@ _HONORIFIC_AFTER_CLOSED_UNIT_RE = re.compile(
 )
 
 
+# Почесне найменування БЕЗ лапок: «…А0000 імені Героя Тестенка», «…ордена …».
+# У наказах (додаток 53) воно стоїть одразу після роду частини, а за ним —
+# підпорядкування («оперативного командування «…» Сухопутних військ …»).
+_UNQUOTED_HONORIFIC_RE = re.compile(
+    rf"((?:{_CLOSED_UNIT_PHRASE})(?:\s+{_CLOSED_UNIT_PHRASE})*)(\s+(?:імені|ім\.|ордена|орденів))(?=\s)",
+    re.IGNORECASE | re.UNICODE,
+)
+_HONORIFIC_WORD_RE = re.compile(r"\s+([^\s,.;:()«»“”„\"–—]+)")
+_HONORIFIC_STOP_RE = re.compile(
+    r"(?:оперативн|повітрян|командуванн|сухопутн|збройн|військ|морськ|десантн|ціє|цьо"
+    r"|(?:сил|сили|цих|цим|та|і|й|з|із|зі|до|у|в|на|по|для|від|за)$)",
+    re.IGNORECASE,
+)
+_HONORIFIC_MAX_WORDS = 6
+
+
+def _strip_unquoted_honorific_after_closed_unit(text: str) -> str:
+    """Прибирає «імені …»/«ордена …» одразу після шифру — не більше 6 слів.
+
+    Зупиняється на підпорядкуванні, розділових знаках, цифрах і на ВЕЛИКОМУ
+    слові після малого «імені» — там починається «КУДИ» або дієслово наказу
+    («… імені Героїв Тестівки ЗВІЛЬНИТИ»). Текст наказу втрачати не можна.
+    """
+    source = str(text or "")
+    pieces: list[str] = []
+    position = 0
+    for match in _UNQUOTED_HONORIFIC_RE.finditer(source):
+        if match.start() < position:
+            continue
+        marker_is_lower = match.group(2).strip().islower()
+        cursor = match.end()
+        consumed_end = None
+        for _ in range(_HONORIFIC_MAX_WORDS):
+            word_match = _HONORIFIC_WORD_RE.match(source, cursor)
+            if not word_match:
+                break
+            word = word_match.group(1)
+            letters = [char for char in word if char.isalpha()]
+            if not letters or any(char.isdigit() for char in word):
+                break
+            if _HONORIFIC_STOP_RE.match(word):
+                break
+            if marker_is_lower and len(letters) >= 3 and all(char.isupper() for char in letters):
+                break
+            cursor = consumed_end = word_match.end()
+        if consumed_end is None:
+            continue
+        pieces.append(source[position:match.end(1)])
+        position = consumed_end
+    pieces.append(source[position:])
+    return "".join(pieces)
+
+
+# ── Назва без почесного найменування — запасний пошук (розд. 9.5.7) ─────────
+#
+# У стовпці A найменування може бути, а в наказі — ні (і навпаки):
+# «77 окрема танкова Тестівська бригада імені Тестових Козаків» проти
+# «77 окремої танкової бригади». Повна назва вимагає всіх слів, тому для
+# повідомлень є запасний шаблон за «ядром»: без «імені/ордена …», без частини в
+# лапках і без прикметника-топоніма на -ськ/-цьк/-зьк.
+_HONORIFIC_TAIL_RE = re.compile(r"\s+(?:імені|ім\.|ордена|орденів)\s.*$", re.IGNORECASE | re.DOTALL)
+_QUOTED_PART_RE = re.compile(r"\s*[«“„\"][^«»“”„\"]*[»”\"]")
+_PLACE_ADJECTIVE_RE = re.compile(
+    r"\s+[А-ЯІЇЄҐ][а-яіїєґʼ'’]+(?:-[А-ЯІЇЄҐ][а-яіїєґʼ'’]+)?(?:ськ|цьк|зьк)[а-яіїєґ]*"
+)
+
+
+def _unit_core_name(open_name: str) -> str:
+    """Ядро назви частини або порожньо, якщо без найменування нічого не зміниться."""
+    source = str(open_name or "")
+    core = _HONORIFIC_TAIL_RE.sub("", source)
+    core = _QUOTED_PART_RE.sub("", core)
+    core = _PLACE_ADJECTIVE_RE.sub("", core)
+    core = re.sub(r"\s+", " ", core).strip()
+    if core == re.sub(r"\s+", " ", source).strip():
+        return ""
+    # Має лишитись номер і хоча б вид частини: інакше запасний шаблон ловив би
+    # будь-яку «окрему механізовану бригаду».
+    if not re.search(r"(?<!\d)\d{1,4}(?!\d)", core) or len(core.split()) < 2:
+        return ""
+    return core
+
+
 def _strip_honorific_after_closed_unit(text: str) -> str:
     """Прибирає почесне найменування в лапках одразу після шифру частини."""
     previous = None
@@ -155,6 +238,7 @@ def _strip_honorific_after_closed_unit(text: str) -> str:
     while previous != result:
         previous = result
         result = _HONORIFIC_AFTER_CLOSED_UNIT_RE.sub(r"\1", result)
+        result = _strip_unquoted_honorific_after_closed_unit(result)
     return result
 
 
@@ -237,6 +321,39 @@ def _apply_custom_rules(text: str, rules_input: str | list | dict | None) -> tup
     return res_text, count
 
 
+# ── Пом'якшувальний фільтр пошуку в повідомленнях ───────────────────────────
+#
+# Назва в наказі та в стовпці A однакова, але написана по-різному: апостроф
+# «’», «'» чи «ʼ» (останній Python вважає ЛІТЕРОЮ, тож «Камʼянець» був одним
+# словом і не збігався з «Кам’янець»), дефіс із пробілами в складному слові
+# («гірсько - штурмової»). Нормалізується лише копія для ПОШУКУ і назва з
+# таблиці — у документ іде текст наказу без змін (розд. 9.5.7).
+_APOSTROPHE_VARIANTS_RE = re.compile("[’ʼ`ʻ‘´]")
+
+
+def _join_compound_hyphen(match: re.Match) -> str | None:
+    """«гірсько - штурмової» → «гірсько-штурмової», але НЕ межа «звідки – КУДИ».
+
+    Склеюється лише дефіс після першої частини складного слова (на «-о/-е»),
+    і лише коли обидва боки в одному регістрі: межа пункту йде від малих до
+    ВЕЛИКИХ, і її склеювання повернуло б проковтування тексту (4.2.9).
+    """
+    source = match.string
+    left, right = source[match.start() - 1], source[match.end()]
+    return "-" if left.isupper() == right.isupper() else None
+
+
+_MESSAGE_SOFTENING_RULES = (
+    (_APOSTROPHE_VARIANTS_RE, "'"),
+    (re.compile(r"(?<=[^\W\d_][оеОЕ])[ \t]+[-‐‑][ \t]+(?=[^\W\d_])"), _join_compound_hyphen),
+)
+
+
+def soften_unit_text(text: str) -> str:
+    """Та сама нормалізація, що й у пошуку, — для назв із таблиці та збігів."""
+    return _normalize_typos_with_offsets(str(text or ""))[0]
+
+
 def _normalize_typos_with_offsets(text: str) -> tuple[str, list[int], list[int]]:
     """Виправляє описки для ПОШУКУ й памʼятає, звідки взявся кожен символ.
 
@@ -248,7 +365,7 @@ def _normalize_typos_with_offsets(text: str) -> tuple[str, list[int], list[int]]
     current = text
     starts = list(range(len(text)))
     ends = [index + 1 for index in range(len(text))]
-    for pattern, replacement in _MILITARY_TYPO_DICTIONARY:
+    for pattern, replacement in (*_MESSAGE_SOFTENING_RULES, *_MILITARY_TYPO_DICTIONARY):
         pieces: list[str] = []
         new_starts: list[int] = []
         new_ends: list[int] = []
@@ -256,10 +373,18 @@ def _normalize_typos_with_offsets(text: str) -> tuple[str, list[int], list[int]]
         for match in pattern.finditer(current):
             if match.start() == match.end():
                 continue
+            if callable(replacement):
+                replaced = replacement(match)
+                if replaced is None:
+                    continue  # правило вирішило цей збіг не чіпати
+            else:
+                # Регістр оригіналу зберігається: «ЗВ’ЯЗКУ» має лишитись ВЕЛИКИМ,
+                # інакше збіг «ОКРЕМОГО ПОЛКУ зв'язку» виглядав би мішаним, і
+                # запобіжник 9.5.5 відкидав би цілком правильну назву з таблиці.
+                replaced = _match_case(match.group(0), match.expand(replacement))
             pieces.append(current[position:match.start()])
             new_starts.extend(starts[position:match.start()])
             new_ends.extend(ends[position:match.start()])
-            replaced = match.expand(replacement)
             source_start, source_end = starts[match.start()], ends[match.end() - 1]
             pieces.append(replaced)
             new_starts.extend([source_start] * len(replaced))
@@ -336,6 +461,16 @@ def cipher_unit_names(
     replaced_count = 0
     report_rows = []
 
+    # Ядро назви береться лише тоді, коли воно однозначне: не збігається з
+    # повною назвою іншого рядка й не повторюється в кількох рядках.
+    full_name_keys = {soften_unit_text(name).casefold() for name in mapping_dict}
+    core_name_counts: dict[str, int] = {}
+    for name in mapping_dict:
+        core = _unit_core_name(name)
+        if core:
+            core_key = soften_unit_text(core).casefold()
+            core_name_counts[core_key] = core_name_counts.get(core_key, 0) + 1
+
     # 1. Патерни назв частин з урахуванням відмінків
     patterns_to_apply = []
     for open_name, mapped_val in mapping_dict.items():
@@ -355,29 +490,39 @@ def cipher_unit_names(
             _find_corps_entry(corps_info, _extract_corps_abbr(corps_info), mapping_dict)
         )
 
-        pattern = (
-            _build_unit_fuzzy_pattern(open_name)
-            if fuzzy_match
-            else re.compile(rf"\b{re.escape(open_name)}\b", re.IGNORECASE)
-        )
-        signature = _unit_name_signature(open_name)
-        patterns_to_apply.append(
-            (
-                any(token.startswith("#") for token in signature),
-                len(signature),
-                len(open_name),
-                pattern,
-                closed_code,
-                open_name,
-                raw_cipher,
-                corps_info,
-                corps_unresolved,
+        variants = [(True, open_name)]
+        core = _unit_core_name(open_name)
+        if core:
+            core_key = soften_unit_text(core).casefold()
+            if core_name_counts.get(core_key, 0) == 1 and core_key not in full_name_keys:
+                variants.append((False, core))
+        for is_full_name, variant in variants:
+            search_name = soften_unit_text(variant)
+            pattern = (
+                _build_unit_fuzzy_pattern(search_name)
+                if fuzzy_match
+                else re.compile(rf"\b{re.escape(search_name)}\b", re.IGNORECASE)
             )
-        )
+            signature = _unit_name_signature(variant)
+            patterns_to_apply.append(
+                (
+                    is_full_name,
+                    any(token.startswith("#") for token in signature),
+                    len(signature),
+                    len(variant),
+                    pattern,
+                    closed_code,
+                    open_name,
+                    raw_cipher,
+                    corps_info,
+                    corps_unresolved,
+                )
+            )
 
     # Пошук виконується лише за колонкою A. Номерні та повніші назви мають
     # пріоритет над загальними рядками, навіть якщо загальний рядок довший.
-    patterns_to_apply.sort(key=lambda row: row[:3], reverse=True)
+    # Повні назви з таблиці завжди раніше за запасні «ядра» (9.5.7).
+    patterns_to_apply.sort(key=lambda row: row[:4], reverse=True)
 
     routing_mask = _mask_anaphoric_unit_references(search_text)
     taken_spans: list[tuple[int, int]] = []
@@ -390,7 +535,8 @@ def cipher_unit_names(
             problems.append(problem)
 
     for (
-        _has_number, _signature_len, _name_len, pat, fc, op_name, raw_c, c_info, corps_unresolved
+        _is_full_name, _has_number, _signature_len, _name_len,
+        pat, fc, op_name, raw_c, c_info, corps_unresolved,
     ) in patterns_to_apply:
         hits = 0
         for match in pat.finditer(search_text):
