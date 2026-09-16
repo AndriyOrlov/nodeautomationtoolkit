@@ -545,11 +545,6 @@ _UNMATCHED_OPEN_UNIT_RE = re.compile(
     # «частини четвертої статті».
     r"(?:картографічн\w+\s+частин\w*)"
     r"|"
-    # «оперативного командування «Схід»» — обʼєднання без номера (додаток 53).
-    # Якщо його немає в таблиці, воно лишається відкритим, тож має бути видно.
-    r"(?:оперативн\w+|повітрян\w+|морськ\w+)\s+командуванн\w*"
-    r"(?:\s*[«“„\"][^«»“”„\"]{0,40}[»”\"])?"
-    r"|"
     # «окремої танкової Тестівської бригади» — топонім між словами назви (додаток 53)
     r"(?:окрем\w+\s+)(?:[\w’'ʼ-]+\s+){1,3}?(?:бригад\w*|полк\w*|батальйон\w*|дивізіон\w*|центр\w*)"
     r"|"
@@ -718,6 +713,48 @@ def _table_open_name_column(sheet) -> int:
     return 1
 
 
+def _append_rows_with_excel(source, names: list[str], column: int) -> bool:
+    """Дописує рядки-заготовки самим Excel і повертає, чи вдалося.
+
+    openpyxl зберігає формули, але НЕ їхні обчислені значення, а словник
+    читається саме за значеннями (розд. 2.2) — після такого запису шифри
+    з формул читались би порожніми. Excel під час збереження перераховує
+    книгу, тож результати формул лишаються на місці.
+    """
+    try:
+        import win32com.client
+    except Exception:
+        return False
+
+    excel = None
+    try:
+        excel = win32com.client.DispatchEx("Excel.Application")
+        excel.Visible = False
+        excel.DisplayAlerts = False
+        book = excel.Workbooks.Open(str(Path(source).resolve()))
+        try:
+            sheet = book.ActiveSheet
+            used = sheet.UsedRange
+            last_row = used.Row + used.Rows.Count - 1
+            for offset, name in enumerate(names, start=1):
+                row = last_row + offset
+                sheet.Cells(row, column).Value = name
+                for shift in (0, 1):
+                    sheet.Cells(row, column + shift).Interior.Color = 0x00FFFF  # жовтий (BGR)
+            book.Save()
+        finally:
+            book.Close(SaveChanges=False)
+        return True
+    except Exception:
+        return False
+    finally:
+        if excel is not None:
+            try:
+                excel.Quit()
+            except Exception:
+                pass
+
+
 def append_unit_stubs_to_table(table_path: str, names: list[str]) -> dict:
     """Дописує в словник рядки-заготовки для нових частин (розд. 9.5.7).
 
@@ -725,11 +762,11 @@ def append_unit_stubs_to_table(table_path: str, names: list[str]) -> dict:
     виправляє користувач), решта порожня. Такі рядки `read_recipient_mapping`
     пропускає, доки не заповнено шифр, тож маршрутизації вони не зачіпають.
 
-    Прямо в таблицю пише лише тоді, коли це безпечно: `.csv` або `.xlsx` БЕЗ
-    формул. openpyxl не зберігає обчислених значень, а таблиця читається саме
-    за ними (розд. 2.2) — після запису комірки з формулами читались би
-    порожніми. Тоді заготовки йдуть в окремий файл поруч. Перед записом у
-    таблицю робиться резервна копія.
+    `.csv` і `.xlsx` без формул дописує openpyxl. Таблицю З ФОРМУЛАМИ дописує
+    сам Excel (`_append_rows_with_excel`): openpyxl не зберігає обчислених
+    значень, а словник читається саме за ними (розд. 2.2). Якщо Excel
+    недоступний, заготовки йдуть в окремий файл поруч. Перед будь-яким записом
+    у таблицю робиться резервна копія.
 
     Повертає `{"added": [...], "path": ..., "backup": ..., "separate": bool}`.
     """
@@ -792,33 +829,44 @@ def append_unit_stubs_to_table(table_path: str, names: list[str]) -> dict:
             for row in sheet.iter_rows()
             for cell in row
         )
-        if not has_formulas:
-            sheet = workbook.active
-            column = _table_open_name_column(sheet)
-            existing = {
-                re.sub(r"\s+", " ", str(cell.value)).strip().casefold()
-                for (cell,) in sheet.iter_rows(min_col=column, max_col=column)
-                if cell.value is not None
-            }
-            added = [name for name in wanted if name.casefold() not in existing]
-            if added:
-                last_row = max(
-                    (cell.row for row in sheet.iter_rows() for cell in row if cell.value not in (None, "")),
-                    default=0,
-                )
-                fill = PatternFill(fill_type="solid", start_color="FFFF00", end_color="FFFF00")
-                for offset, name in enumerate(added, start=1):
-                    sheet.cell(row=last_row + offset, column=column, value=name).fill = fill
-                    sheet.cell(row=last_row + offset, column=column + 1).fill = fill
-                make_backup()
-                try:
-                    workbook.save(source)
-                except PermissionError:
-                    raise busy(source)
+        sheet = workbook.active
+        column = _table_open_name_column(sheet)
+        # Наявні назви беремо ЗА ЗНАЧЕННЯМИ: назва може бути результатом формули.
+        values_sheet = openpyxl.load_workbook(source, data_only=True).active
+        existing = {
+            re.sub(r"\s+", " ", str(cell.value)).strip().casefold()
+            for (cell,) in values_sheet.iter_rows(min_col=column, max_col=column)
+            if cell.value is not None
+        }
+        added = [name for name in wanted if name.casefold() not in existing]
+        if not added:
+            result["added"] = []
+            return result
+
+        make_backup()
+        if has_formulas:
+            # Таблицю з формулами дописує сам Excel — інакше зникнуть обчислені
+            # значення. Якщо Excel недоступний, нижче спрацює окремий файл.
+            if _append_rows_with_excel(source, added, column):
+                result["added"] = added
+                return result
+        else:
+            last_row = max(
+                (cell.row for row in sheet.iter_rows() for cell in row if cell.value not in (None, "")),
+                default=0,
+            )
+            fill = PatternFill(fill_type="solid", start_color="FFFF00", end_color="FFFF00")
+            for offset, name in enumerate(added, start=1):
+                sheet.cell(row=last_row + offset, column=column, value=name).fill = fill
+                sheet.cell(row=last_row + offset, column=column + 1).fill = fill
+            try:
+                workbook.save(source)
+            except PermissionError:
+                raise busy(source)
             result["added"] = added
             return result
 
-    # Таблиця з формулами або в іншому форматі — окремий файл поруч.
+    # Excel недоступний або формат не той — окремий файл поруч.
     separate = source.with_name(f"{source.stem} — нові частини.xlsx")
     if separate.is_file():
         stub_book = openpyxl.load_workbook(separate)
@@ -4000,8 +4048,9 @@ class App:
                 else:
                     if stubs["added"] and stubs["separate"]:
                         self.log(
-                            f"УВАГА: таблиця містить формули, тому нові частини ({len(stubs['added'])}) "
-                            f"записано окремо: {stubs['path']}. Перенесіть рядки в таблицю й заповніть шифри."
+                            f"УВАГА: дописати в таблицю не вдалося (потрібен Excel), тому нові частини "
+                            f"({len(stubs['added'])}) записано окремо: {stubs['path']}. "
+                            "Перенесіть рядки в таблицю й заповніть шифри."
                         )
                     elif stubs["added"]:
                         self.log(

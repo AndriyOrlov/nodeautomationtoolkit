@@ -208,8 +208,26 @@ def test_stubs_are_appended_to_table_without_formulas(tmp_path):
     assert generator.append_unit_stubs_to_table(str(path), ["169 батальйону резерву"])["added"] == []
 
 
-def test_table_with_formulas_is_not_touched(tmp_path):
+def test_formula_table_is_written_by_excel_when_available(tmp_path, monkeypatch):
+    """Таблицю з формулами дописує сам Excel: openpyxl стер би обчислені значення."""
     path = _xlsx(tmp_path, [[BRIGADE, '="А"&"0077"', "77 отбр", "", "", ""]])
+    calls = []
+    monkeypatch.setattr(
+        generator, "_append_rows_with_excel", lambda source, names, column: calls.append((str(source), list(names), column)) or True
+    )
+
+    result = generator.append_unit_stubs_to_table(str(path), ["169 батальйону резерву"])
+
+    assert result["added"] == ["169 батальйону резерву"]
+    assert result["separate"] is False
+    assert calls == [(str(path), ["169 батальйону резерву"], 1)]
+    assert result["backup"] and openpyxl.load_workbook(result["backup"]).active.max_row == 2
+
+
+def test_table_with_formulas_is_not_touched_without_excel(tmp_path, monkeypatch):
+    """Без Excel (як на CI) таблиця лишається недоторканою, заготовки — окремо."""
+    path = _xlsx(tmp_path, [[BRIGADE, '="А"&"0077"', "77 отбр", "", "", ""]])
+    monkeypatch.setattr(generator, "_append_rows_with_excel", lambda *args, **kwargs: False)
 
     result = generator.append_unit_stubs_to_table(str(path), ["169 батальйону резерву"])
 
@@ -402,9 +420,10 @@ def test_unnumbered_unit_with_place_adjective_is_highlighted():
     assert [text[start:end] for start, end in spans] == ["окремої танкової Тестівської бригади"]
 
 
-def test_repeat_run_with_formula_table_points_to_separate_file(tmp_path):
+def test_repeat_run_with_formula_table_points_to_separate_file(tmp_path, monkeypatch):
     """Повторний запуск писав «уже є в таблиці», хоча заготовки були в окремому файлі."""
     path = _xlsx(tmp_path, [[BRIGADE, '="А"&"0077"', "77 отбр", "", "", ""]])
+    monkeypatch.setattr(generator, "_append_rows_with_excel", lambda *args, **kwargs: False)
     app = generator.App.__new__(generator.App)
     logs = []
     app.log = logs.append
@@ -462,14 +481,15 @@ def test_service_branch_without_cipher_before_it_is_kept():
     assert result == text
 
 
-def test_command_missing_from_table_stays_open_and_is_highlighted():
+def test_command_missing_from_table_stays_open_without_marks():
+    """Рішення користувача 16.09.2026: командування лишається відкритим,
+    його НЕ підсвічують і не рахують як нову частину."""
     mapping = {"77 окрема тестова бригада": _entry("77 окрема тестова бригада", "А0077")}
     text = "командира роти 77 окремої тестової бригади оперативного командування «Тест»"
     result, _, _ = cipher_unit_names(text, mapping)
     assert result == "командира роти військової частини А0077 оперативного командування «Тест»"
-    spans = generator.find_unmatched_open_unit_spans(result)
-    assert [result[start:end] for start, end in spans] == ["оперативного командування «Тест»"]
-    assert generator.collect_new_unit_names(text, mapping) == ["оперативного командування «Тест»"]
+    assert generator.find_unmatched_open_unit_spans(result) == []
+    assert generator.collect_new_unit_names(text, mapping) == []
 
 
 # ── Види частин зі словника користувача (номери вигадані) ───────────────────
