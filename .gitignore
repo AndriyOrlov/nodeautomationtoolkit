@@ -22,3 +22,16 @@ config.json
 
 # portable-інтерпретатор поруч із програмою (див. scripts/portable/README.md)
 python/
+
+# Словник частин користувача: реальні назви й шифри — у git не потрапляє
+/список частин.xlsx
+/*список*.xlsx
+
+# Результати прогонів і чернетки: там бувають назви частин
+/output/
+/scratch/
+*.docx
+*.doc
+*.xlsx
+*.xls
+!examples/fake_recipient_mapping.xlsx
