@@ -533,6 +533,9 @@ _UNMATCHED_OPEN_UNIT_RE = re.compile(
     r"|"
     r"(?:армійськ\w+\s+корпус\w*|\b\d{1,3}\s*АК\b)"
     r"|"
+    # «окремої танкової Тестівської бригади» — топонім між словами назви (додаток 53)
+    r"(?:окрем\w+\s+)(?:[\w’'ʼ-]+\s+){1,3}?(?:бригад\w*|полк\w*|батальйон\w*|дивізіон\w*|центр\w*)"
+    r"|"
     r"(?<![\d./,:-])\d{1,4}(?:\s*-?\s*(?:й|го|му|ий|ого|ому|им))?\s+"
     rf"(?:{_NUMBERED_UNIT_GAP_WORD}\s+){{0,4}}?{_NUMBERED_UNIT_KIND}"
     r")\b",
@@ -570,8 +573,47 @@ def find_unmatched_open_unit_spans(text: str) -> list[tuple[int, int]]:
 # для заготовки в таблиці їх треба забрати разом із назвою.
 _UNIT_NAME_TAIL_WORD_RE = re.compile(
     r"[ \t]+(?!(?:військов\w*|частин\w*|цієї|цього|того|тієї|та|і|й|до|з|із|зі|на|у|в|для|від)\b)"
-    r"[а-яіїєґʼ'’-]+(?:у|ю|и|і|ї|ння|ня|ів|ей)(?=[\s,.;:)»”]|$)"
+    r"[а-яіїєґʼ'’-]+(?:у|ю|и|і|ї|ння|ня|ів|ей)(?=[\s,.;:)»”]|$)",
+    re.IGNORECASE,  # «КУДИ» пишеться ВЕЛИКИМИ — хвіст там такий самий
 )
+
+# Номер і вид частини — щоб відрізнити справді нову частину від ЗГАДКИ вже
+# наявної, яка в наказі написана не повністю («55 ОКРЕМОГО ПОЛКУ» при рядку
+# «55 окремий полк радіотехнічного забезпечення»). Шифрувати таку згадку не
+# можна (пошук лише за номером заборонений, 4.2.7), але й дописувати її в
+# таблицю дублем — теж.
+_UNIT_KIND_KEYS = (
+    ("бригада", r"бригад"), ("полк", r"полк"), ("батальйон", r"батальйон"),
+    ("дивізіон", r"дивізіон"), ("загін", r"заг[іо]н"), ("центр", r"центр"),
+    ("госпіталь", r"госпітал"), ("база", r"\bбаз[аиіуо]"), ("вузол", r"вуз(?:ол|л)"),
+    ("арсенал", r"арсенал"), ("корпус", r"корпус"), ("дивізія", r"дивізі[яїює]"),
+    ("комендатура", r"комендатур"),
+)
+
+
+def _unit_number_and_kind(name: str) -> tuple[str, str] | None:
+    text = str(name or "")
+    number = re.match(r"\s*(\d{1,4})(?!\d)", text)
+    if not number:
+        return None
+    found = []
+    for key, pattern in _UNIT_KIND_KEYS:
+        match = re.search(pattern, text, re.IGNORECASE)
+        if match:
+            found.append((match.start(), key))
+    return (number.group(1), min(found)[1]) if found else None
+
+
+def _similar_table_row(name: str, mapping: dict) -> str:
+    """Стовпець A рядка з тим самим номером і видом частини, або порожньо."""
+    wanted = _unit_number_and_kind(name)
+    if not wanted:
+        return ""
+    for key, value in (mapping or {}).items():
+        column_a = str(value.get("open_name") or key) if isinstance(value, dict) else str(key)
+        if _unit_number_and_kind(column_a) == wanted:
+            return column_a
+    return ""
 
 
 def _unit_name_tail_length(text: str, end: int, max_words: int = 3) -> int:
@@ -584,7 +626,7 @@ def _unit_name_tail_length(text: str, end: int, max_words: int = 3) -> int:
     return position - end
 
 
-def collect_new_unit_names(text: str, mapping: dict) -> list[str]:
+def collect_new_unit_names(text: str, mapping: dict, similar: list | None = None) -> list[str]:
     """Відкриті назви частин із наказу, яких немає в таблиці (стовпець A).
 
     Шукається так само, як жовта позначка в повідомленні: текст шифрується, і
@@ -592,8 +634,13 @@ def collect_new_unit_names(text: str, mapping: dict) -> list[str]:
     шифром сюди не потрапляє: частина в таблиці вже є, бракує лише шифру.
     """
     ciphered, _, _ = cipher_unit_names(text or "", mapping)
+    # Той самий пом'якшувальний фільтр, що й у шифруванні: апострофи, дефіси.
+    from nodeautomationtoolkit.builtin_nodes.message_order import soften_unit_text
+
     known_patterns = [
-        _build_unit_fuzzy_pattern(str(name)) for name in (mapping or {}) if str(name).strip()
+        _build_unit_fuzzy_pattern(soften_unit_text(str(name)))
+        for name in (mapping or {})
+        if str(name).strip()
     ]
     names: list[str] = []
     seen: set[str] = set()
@@ -604,7 +651,15 @@ def collect_new_unit_names(text: str, mapping: dict) -> list[str]:
         if not name or key in seen:
             continue
         seen.add(key)
-        if any(pattern.search(name) for pattern in known_patterns):
+        softened_name = soften_unit_text(name)
+        if any(pattern.search(softened_name) for pattern in known_patterns):
+            continue
+        # Частина з таким номером і видом у таблиці вже є — це неповна згадка,
+        # а не нова частина: у `similar` (для журналу), але не в заготовки.
+        close_row = _similar_table_row(name, mapping)
+        if close_row:
+            if similar is not None:
+                similar.append((name, close_row))
             continue
         names.append(name)
     return names
@@ -3899,7 +3954,13 @@ class App:
         for line in describe_cipher_problems(problems):
             self.log(line)
 
-        new_units = collect_new_unit_names(body, mapping)
+        similar: list = []
+        new_units = collect_new_unit_names(body, mapping, similar=similar)
+        for name, row in similar:
+            self.log(
+                f"УВАГА: «{name}» не зашифровано: у таблиці є схожий рядок «{row}», але назва "
+                "в наказі збігається з ним не повністю — перевірте написання в наказі або в стовпці A."
+            )
         if new_units:
             self.log(
                 f"УВАГА: частин немає в таблиці ({len(new_units)}): {'; '.join(new_units)}. "
@@ -3922,9 +3983,16 @@ class App:
                             f"шифр порожній). Резервна копія: {stubs['backup']}. "
                             "Заповніть шифр і за потреби «Кому»/«Куди», потім створіть повідомлення ще раз."
                         )
+                    elif stubs["separate"]:
+                        # Таблиця з формулами: заготовки лежать в окремому файлі,
+                        # а не в таблиці — інакше користувач шукав би їх не там.
+                        self.log(
+                            f"Заготовки для цих частин уже є в окремому файлі: {stubs['path']}. "
+                            "Перенесіть рядки в таблицю й заповніть шифри."
+                        )
                     else:
                         self.log("Заготовки для цих частин уже є в таблиці — заповніть у них шифри.")
-        return {"problems": len(problems), "new_units": len(new_units)}
+        return {"problems": len(problems) + len(similar), "new_units": len(new_units)}
 
     def run_generate_messages(self):
         self.save_config()

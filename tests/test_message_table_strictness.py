@@ -249,6 +249,178 @@ def test_report_table_gaps_adds_stubs_only_when_enabled(tmp_path):
     assert openpyxl.load_workbook(path).active.cell(row=3, column=1).value == "169 батальйону резерву"
 
 
+# ── «КУДИ» ВЕЛИКИМИ: частини з таблиці не стають «новими» ───────────────────
+
+
+_UPPER_MAPPING = {
+    "14 окремий полк зв'язку": _entry("14 окремий полк зв'язку", "А1414", "14 опз"),
+    "22 окремий полк забезпечення": _entry(
+        "22 окремий полк забезпечення", "22 окремий полк забезпечення", "22 опз"
+    ),
+    "55 окремий полк радіотехнічного забезпечення": _entry(
+        "55 окремий полк радіотехнічного забезпечення", "А5555", "55 опрз"
+    ),
+}
+
+
+def test_uppercase_name_with_typographic_apostrophe_is_ciphered():
+    """Виправлення описок робило «ЗВ’ЯЗКУ» малим, і збіг відкидався як мішаний."""
+    text = "командира взводу – КОМАНДИРОМ РОТИ 14 ОКРЕМОГО ПОЛКУ ЗВ’ЯЗКУ."
+    result, _, _ = cipher_unit_names(text, _UPPER_MAPPING)
+    assert result == "командира взводу – КОМАНДИРОМ РОТИ ВІЙСЬКОВОЇ ЧАСТИНИ А1414."
+    assert generator.collect_new_unit_names(text, _UPPER_MAPPING) == []
+
+
+def test_uppercase_row_without_cipher_is_not_a_new_unit():
+    text = "– КОМАНДИРОМ РОТИ 22 ОКРЕМОГО ПОЛКУ ЗАБЕЗПЕЧЕННЯ."
+    assert generator.collect_new_unit_names(text, _UPPER_MAPPING) == []
+
+
+def test_partial_mention_of_table_unit_is_reported_as_similar_not_new():
+    similar = []
+    names = generator.collect_new_unit_names(
+        "– НАЧАЛЬНИКОМ ШТАБУ 55 ОКРЕМОГО ПОЛКУ.", _UPPER_MAPPING, similar=similar
+    )
+    assert names == []
+    assert similar == [("55 ОКРЕМОГО ПОЛКУ", "55 окремий полк радіотехнічного забезпечення")]
+
+
+def test_uppercase_new_unit_keeps_full_name():
+    text = "– КОМАНДИРОМ ВЗВОДУ 169 БАТАЛЬЙОНУ РЕЗЕРВУ."
+    assert generator.collect_new_unit_names(text, _UPPER_MAPPING) == ["169 БАТАЛЬЙОНУ РЕЗЕРВУ"]
+
+
+# ── Пом'якшувальний фільтр: апострофи, дефіси, регістр ──────────────────────
+
+
+@pytest.mark.parametrize(
+    "table_name, text",
+    [
+        ("12 окремий Камʼянець-Подільський батальйон", "офіцера 12 окремого Кам’янець-Подільського батальйону"),
+        ("12 окремий Кам’янець-Подільський батальйон", "– ОФІЦЕРОМ 12 ОКРЕМОГО КАМ'ЯНЕЦЬ–ПОДІЛЬСЬКОГО БАТАЛЬЙОНУ"),
+        ("42 окрема гірсько-штурмова бригада", "командира 42 окремої гірсько - штурмової бригади"),
+        ("42 окрема гірсько-штурмова бригада", "– КОМАНДИРОМ 42 ОКРЕМОЇ ГІРСЬКО - ШТУРМОВОЇ БРИГАДИ"),
+        ("42 ОКРЕМА ГІРСЬКО-ШТУРМОВА БРИГАДА", "командира 42 окремої гірсько‑штурмової бригади"),
+    ],
+)
+def test_softened_search_ignores_apostrophe_dash_and_case_variants(table_name, text):
+    mapping = {table_name: _entry(table_name, "А4242")}
+    result, count, _ = cipher_unit_names(text, mapping)
+    assert count == 1
+    assert "А4242" in result
+    assert generator.collect_new_unit_names(text, mapping) == []
+
+
+def test_softening_keeps_original_text_outside_names():
+    mapping = {"42 окрема гірсько-штурмова бригада": _entry("42 окрема гірсько-штурмова бригада", "А4242")}
+    text = "командира зв’язку десантно - штурмового взводу 42 окремої гірсько - штурмової бригади"
+    result, _, _ = cipher_unit_names(text, mapping)
+    assert result == "командира зв’язку десантно - штурмового взводу військової частини А4242"
+
+
+def test_spaced_dash_between_source_and_destination_is_not_joined():
+    """Межа «звідки – КУДИ» (мале → ВЕЛИКЕ) не склеюється — інакше зникав би текст."""
+    mapping = {"42 окрема гірсько-штурмова бригада": _entry("42 окрема гірсько-штурмова бригада", "А4242")}
+    text = "командира взводу 42 окремої гірсько - ШТУРМОВОЇ БРИГАДИ"
+    result, count, _ = cipher_unit_names(text, mapping)
+    assert result == text
+    assert count == 0
+
+
+# ── Почесні найменування (форми з додатку 53, назви вигадані) ───────────────
+
+
+def _cipher(text, rows):
+    mapping = {name: _entry(name, cipher) for name, cipher in rows}
+    return cipher_unit_names(text, mapping)[0]
+
+
+@pytest.mark.parametrize(
+    "table_name",
+    [
+        "77 окрема танкова Тестівська бригада імені Тестових Козаків",
+        "77 окрема танкова бригада імені генерал-хорунжого Тестя Тестенка",
+        "77 окрема танкова бригада «Тестовий Яр»",
+        "77 окрема танкова Тестівська бригада",
+    ],
+)
+def test_honorific_only_in_table_still_ciphers(table_name):
+    assert _cipher("командира роти 77 окремої танкової бригади", [(table_name, "А7777")]) == (
+        "командира роти військової частини А7777"
+    )
+
+
+def test_full_table_name_wins_over_core_of_another_row():
+    rows = [("77 окрема танкова бригада", "А0001"), ("77 окрема танкова Тестівська бригада", "А0002")]
+    assert _cipher("командира 77 окремої танкової Тестівської бригади", rows) == "командира військової частини А0002"
+    assert _cipher("командира 77 окремої танкової бригади", rows) == "командира військової частини А0001"
+
+
+def test_ambiguous_core_is_not_guessed():
+    rows = [
+        ("77 окрема танкова Тестівська бригада", "А0001"),
+        ("77 окрема танкова Прикладівська бригада", "А0002"),
+    ]
+    text = "командира 77 окремої танкової бригади"
+    assert _cipher(text, rows) == text
+
+
+@pytest.mark.parametrize(
+    "text, expected",
+    [
+        (
+            "командира роти 77 окремої тестової бригади імені Тестових Козаків оперативного "
+            "командування «Тест» Сухопутних військ, ЗВІЛЬНИТИ",
+            "командира роти військової частини А0077 оперативного командування «Тест» Сухопутних військ, ЗВІЛЬНИТИ",
+        ),
+        (
+            "– КОМАНДИРОМ 77 ОКРЕМОЇ ТЕСТОВОЇ БРИГАДИ ІМЕНІ ТЕСТОВИХ КОЗАКІВ ОПЕРАТИВНОГО КОМАНДУВАННЯ",
+            "– КОМАНДИРОМ ВІЙСЬКОВОЇ ЧАСТИНИ А0077 ОПЕРАТИВНОГО КОМАНДУВАННЯ",
+        ),
+        (
+            "командира 77 окремої тестової бригади імені\x0bГероїв Тестівки ЗВІЛЬНИТИ з посади",
+            "командира військової частини А0077 ЗВІЛЬНИТИ з посади",
+        ),
+        (
+            "командира 77 окремої тестової бригади імені кошового отамана Тестя Тестенка, у запас",
+            "командира військової частини А0077, у запас",
+        ),
+    ],
+)
+def test_unquoted_honorific_after_cipher_is_removed(text, expected):
+    assert _cipher(text, [("77 окрема тестова бригада", "А0077")]) == expected
+
+
+def test_honorific_not_after_cipher_is_kept():
+    text = "освіта: Тестівський національний університет імені Тараса Тестенка у 2003 р."
+    assert _cipher(text, [("77 окрема тестова бригада", "А0077")]) == text
+
+
+def test_unnumbered_unit_with_place_adjective_is_highlighted():
+    text = "офіцера окремої танкової Тестівської бригади"
+    spans = generator.find_unmatched_open_unit_spans(text)
+    assert [text[start:end] for start, end in spans] == ["окремої танкової Тестівської бригади"]
+
+
+def test_repeat_run_with_formula_table_points_to_separate_file(tmp_path):
+    """Повторний запуск писав «уже є в таблиці», хоча заготовки були в окремому файлі."""
+    path = _xlsx(tmp_path, [[BRIGADE, '="А"&"0077"', "77 отбр", "", "", ""]])
+    app = generator.App.__new__(generator.App)
+    logs = []
+    app.log = logs.append
+    app.excel_path = _Var(str(path))
+    app.ADD_NEW_UNITS_TO_TABLE = True
+    mapping = read_recipient_mapping(str(path))["mapping"]
+    order = "НАКАЗ\n§ 1\n1. Лейтенанта ТЕСТЕНКА Теста Тестовича, офіцера 169 батальйону резерву.\n"
+
+    app._report_table_gaps(order, mapping)
+    logs.clear()
+    app._report_table_gaps(order, mapping)
+
+    assert any("нові частини.xlsx" in line for line in logs)
+    assert not any("уже є в таблиці" in line for line in logs)
+
+
 def test_only_qt_shell_adds_units_to_table():
     pytest.importorskip("PySide6")
     from nodeautomationtoolkit.generator_qt.main_window import create_qt_app_class
