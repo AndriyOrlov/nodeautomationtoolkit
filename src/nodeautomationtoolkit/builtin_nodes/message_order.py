@@ -69,6 +69,37 @@ _CASE_AGREEMENT_RULES = (
     (("у", "ю"), "З"),        # окрему механізовану бригаду
 )
 
+# Назва без прикметника («5 батальйону», «у 5 батальйоні», «із 5 батальйоном»)
+# не дає жодної прикметникової ознаки, і відмінок визначається за самим видом
+# частини. Раніше тут лишався родовий: «у 5 батальйоні» ставало
+# «у військової частини», «із 5 батальйоном» — «із військової частини».
+# Беруться лише однозначні закінчення; «батальйону» (родовий і давальний
+# збігаються) лишається родовим, як і раніше.
+_MASCULINE_UNIT_KIND_RE = re.compile(
+    r"^(?:батальйон|полк|центр|корпус|дивізіон|загон|госпітал|арсенал|вузл"
+    r"|пункт|склад|штаб)(?P<ending>ом|ем|і)$"
+)
+_FEMININE_UNIT_KIND_RE = re.compile(
+    r"^(?:бригад|баз|комендатур|майстерн|станці|дивізі)(?P<ending>ою|ею|єю|і|ї|у|ю)$"
+)
+_MASCULINE_NOUN_CASE = {"ом": "О", "ем": "О", "і": "Д"}
+_FEMININE_NOUN_CASE = {"ою": "О", "ею": "О", "єю": "О", "і": "Д", "ї": "Д", "у": "З", "ю": "З"}
+
+
+def _detect_case_by_unit_kind(words: list[str]) -> str | None:
+    """Відмінок за закінченням виду частини, коли прикметникових ознак немає."""
+    for word in words:
+        masculine = _MASCULINE_UNIT_KIND_RE.match(word)
+        if masculine:
+            return _MASCULINE_NOUN_CASE[masculine.group("ending")]
+        feminine = _FEMININE_UNIT_KIND_RE.match(word)
+        if feminine:
+            # «дивізії», «станції» — родовий і давальний збігаються: не вгадуємо.
+            if feminine.group("ending") == "ї":
+                continue
+            return _FEMININE_NOUN_CASE[feminine.group("ending")]
+    return None
+
 
 def _detect_grammatical_case(matched_text: str) -> str:
     """Визначає відмінок знайденої відкритої назви військової частини.
@@ -88,7 +119,7 @@ def _detect_grammatical_case(matched_text: str) -> str:
         if sum(1 for word in words if word.endswith(endings)) >= 2:
             return case_label
 
-    return "Р"
+    return _detect_case_by_unit_kind(words) or "Р"
 
 
 def _apply_case_to_closed_text(closed_text: str, case_label: str) -> str:
@@ -561,6 +592,40 @@ def cipher_unit_names(
     # Повні назви з таблиці завжди раніше за запасні «ядра» (9.5.7).
     patterns_to_apply.sort(key=lambda row: row[:4], reverse=True)
 
+    # Рядки, які можуть стояти ВСЕРЕДИНІ іншої клітинки A: повна назва з номером
+    # і власним шифром. Без номера рядок загальний («штурмова бригада») і
+    # трапляється всередині будь-якої назви — його не беремо.
+    nested_candidates = [
+        (row[4], row[5], row[6], row[7])
+        for row in patterns_to_apply
+        if row[0] and row[7] and re.search(r"\d", str(row[6]))
+    ]
+
+    def _nested_chain(matched: str, outer_name: str, outer_cipher: str) -> str:
+        """Ланки частин, назви яких записано в самій клітинці A знайденого рядка.
+
+        «5 батальйон 5 штурмової бригади» в одній клітинці забирав собі назву
+        бригади, і її шифр окремо вже не ставився — ланка зникала. Шифр такої
+        вкладеної частини береться з її власного рядка таблиці; повтори потім
+        прибирає `_collapse_unit_chain_repeats`.
+        """
+        found: list[tuple[int, str]] = []
+        outer_key = re.sub(r"\s+", "", str(outer_cipher)).upper()
+        for nested_pat, nested_code, nested_name, nested_cipher in nested_candidates:
+            if nested_name == outer_name:
+                continue
+            nested_match = nested_pat.search(matched)
+            if not nested_match or nested_match.group(0) == matched:
+                continue
+            if re.sub(r"\s+", "", str(nested_cipher)).upper() == outer_key:
+                # Клітинка з двома частинами має шифр лише однієї з них: першу
+                # частину зашифрувати нічим. Не вгадуємо — кажемо в журнал.
+                if matched[:nested_match.start()].strip():
+                    _note_problem(("merged_cell", outer_name, nested_name))
+                continue
+            found.append((nested_match.start(), nested_code))
+        return " ".join(code for _position, code in sorted(found))
+
     routing_mask = _mask_anaphoric_unit_references(search_text)
     taken_spans: list[tuple[int, int]] = []
     replacements: list[tuple[int, int, str]] = []
@@ -603,13 +668,14 @@ def cipher_unit_names(
             if corps_unresolved:
                 _note_problem(("corps_missing", op_name, c_info))
             hits += 1
+            closed_text = _apply_case_to_closed_text(fc, _detect_grammatical_case(matched))
+            nested_chain = _nested_chain(matched, op_name, raw_c)
+            if nested_chain:
+                closed_text = f"{closed_text} {nested_chain}"
             replacements.append((
                 start,
                 end,
-                _match_case(
-                    source_text[start:end],
-                    _apply_case_to_closed_text(fc, _detect_grammatical_case(matched)),
-                ),
+                _match_case(source_text[start:end], closed_text),
             ))
         if hits:
             replaced_count += hits
