@@ -12,7 +12,6 @@
 - `start_generator_qt.bat` — основне вікно (PySide6). Бере Python з теки `python`
   поруч (portable), з `.venv` або з системи; зміни в коді підхоплюються після
   перезапуску.
-- `start_generator.bat` — класичне вікно на Tk з тією самою логікою.
 - `build_generator_qt.bat` — збірка `dist\GeneratorVytyagivQt\GeneratorVytyagivQt.exe`
   (PyInstaller). Кожна збірка підвищує версію на 0.1.
 

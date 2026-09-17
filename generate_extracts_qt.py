@@ -1,8 +1,7 @@
-"""Запуск генератора в новій Qt-оболонці (PySide6, тема «Obsidian»).
+"""Запуск генератора (PySide6, тема «Obsidian»).
 
-Логіка генерації — та сама, що в `generate_extracts.py`: оболонка лише
-замінює інтерфейс. Стара Tk-версія лишається доступною через
-`start_generator.bat`.
+Логіка генерації — у `generate_extracts.py`, інтерфейс — у
+`nodeautomationtoolkit.generator_qt`. Tk-версії більше немає.
 """
 
 import sys

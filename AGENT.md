@@ -1664,3 +1664,26 @@ python scripts/e2e_messages/check_message_output.py <тека>/Messages_Output
   `tests.yml` — лише тести.
 - Розділи AGENT.md вище, що описують ноди, граф чи редактор, — історія; чинними лишаються
   правила генератора.
+
+## 2026-09-17 — Tk-версію генератора видалено (Claude)
+
+Рішення користувача: «tk версія також непотрібна вже». Єдиний інтерфейс — Qt-оболонка
+(`start_generator_qt.bat`, `generate_extracts_qt.py`, `generator_qt`).
+
+- **Видалено:** `start_generator.bat`, `Генератор_Витягів.spec`,
+  `Генератор_Витягів_Оновлений.spec`, Tk-вікно порівняння
+  `builtin_nodes/compare_window.py` (у Qt своє — `generator_qt/compare_window.py`), і з
+  класу `App` — 24 методи, які будували Tk-інтерфейс і які Qt-оболонка повністю
+  перекриває (`create_widgets`, `_build_tab_*`, `_build_samples_*`, `_make_scrollable`,
+  `toggle_theme`, Tk-журнал, Tk-порівняння тощо; ~1040 рядків). Перелік визначено
+  обходом AST: методи, які Qt-міксин перекриває без `super()`, і все, що викликалось
+  лише з них.
+- **Лишилось навмисно:** логіка `App` далі користується API tkinter (`tk.StringVar`,
+  `messagebox`, `filedialog`, константи з `tkinter.constants`) — Qt-оболонка підміняє їх
+  у `install_qt_bridge` перед створенням вікна. `tkinter` — стандартна бібліотека.
+  `App.create_widgets` тепер лише кидає `NotImplementedError`: інтерфейс будує
+  `QtShellMixin`. Запуск `generate_extracts.py` напряму відкриває Qt-оболонку.
+- Прибрано залежності `ttkbootstrap` і `windnd`, тему Tk у конфігу (`theme`) більше не
+  зберігаємо; `--collect-all ttkbootstrap` зі збірки.
+- e2e-скрипти (`scripts/e2e_*`) створюють `App` через `__new__` і власний `log` — як і
+  раніше, без GUI.

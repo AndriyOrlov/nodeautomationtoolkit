@@ -62,7 +62,6 @@ rem resolves relative ones against the spec folder, not the project root.
   --collect-submodules nodeautomationtoolkit.builtin_nodes ^
   --collect-submodules nodeautomationtoolkit.generator_qt ^
   --collect-all docx ^
-  --collect-all ttkbootstrap ^
   --hidden-import win32timezone ^
   --add-data "%ROOT%src\nodeautomationtoolkit\generator_qt\icons;nodeautomationtoolkit\generator_qt\icons" ^
   --add-data "%ROOT%src\nodeautomationtoolkit\personnel\dictionaries;nodeautomationtoolkit\personnel\dictionaries" ^

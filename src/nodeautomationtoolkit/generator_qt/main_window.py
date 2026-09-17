@@ -79,7 +79,6 @@ def install_qt_bridge(legacy) -> None:
     legacy.tk = compat.make_tk_namespace()
     legacy.messagebox = compat.MessageBoxBridge
     legacy.filedialog = compat.FileDialogBridge
-    legacy.HAS_WINDND = False
     legacy.DISABLED = compat.DISABLED
     legacy.NORMAL = compat.NORMAL
 
@@ -769,10 +768,6 @@ class QtShellMixin:
 
     def _preview_pause(self, seconds: float) -> None:
         compat.sleep_responsive(seconds)
-
-    def toggle_theme(self):
-        # Тема одна — «Obsidian». Значення теми Tk у конфігу не чіпаємо.
-        return None
 
     def open_samples_window(self):
         if self._samples_dialog is None:
