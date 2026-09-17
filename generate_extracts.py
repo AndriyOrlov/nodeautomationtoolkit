@@ -44,6 +44,7 @@ if src_path not in sys.path:
 from nodeautomationtoolkit.builtin_nodes.recipient_mapping import (
     read_recipient_mapping,
     _build_unit_fuzzy_pattern,
+    keep_open_names_of,
     _table_cipher,
     map_military_units,
     normalize_item_numbering,
@@ -647,6 +648,32 @@ def _unit_name_tail_length(text: str, end: int, max_words: int = 3) -> int:
     return position - end
 
 
+def unmatched_open_unit_spans(text: str, mapping=None) -> list[tuple[int, int]]:
+    """`find_unmatched_open_unit_spans` без назв рядків таблиці з позначкою «$».
+
+    Такі назви лишаються відкритими навмисно, тож жовтої позначки не отримують.
+    """
+    spans = find_unmatched_open_unit_spans(text)
+    kept_names = keep_open_names_of(mapping)
+    if not spans or not kept_names:
+        return spans
+    from nodeautomationtoolkit.builtin_nodes.message_order import soften_unit_text
+
+    kept_patterns = [_build_unit_fuzzy_pattern(soften_unit_text(name)) for name in kept_names]
+    result = []
+    for start, end in spans:
+        span_text = soften_unit_text(text[start:end]).casefold()
+        window = soften_unit_text(text[max(0, start - 200):end + 200])
+        if any(
+            span_text in match.group(0).casefold()
+            for pattern in kept_patterns
+            for match in pattern.finditer(window)
+        ):
+            continue
+        result.append((start, end))
+    return result
+
+
 def collect_new_unit_names(text: str, mapping: dict, similar: list | None = None) -> list[str]:
     """Відкриті назви частин із наказу, яких немає в таблиці (стовпець A).
 
@@ -660,12 +687,12 @@ def collect_new_unit_names(text: str, mapping: dict, similar: list | None = None
 
     known_patterns = [
         _build_unit_fuzzy_pattern(soften_unit_text(str(name)))
-        for name in (mapping or {})
+        for name in (*(mapping or {}), *keep_open_names_of(mapping))
         if str(name).strip()
     ]
     names: list[str] = []
     seen: set[str] = set()
-    for start, end in find_unmatched_open_unit_spans(ciphered):
+    for start, end in unmatched_open_unit_spans(ciphered, mapping):
         tail = _unit_name_tail_length(ciphered, end)
         name = re.sub(r"\s+", " ", ciphered[start:end + tail]).strip()
         key = name.casefold()
@@ -3721,7 +3748,7 @@ class App:
                 doc.Range(start, start + len(core)).Text = ciphered
 
             # Відкриті назви, які лишилися без шифру, підсвічуємо жовтим.
-            for span_start, span_end in find_unmatched_open_unit_spans(ciphered):
+            for span_start, span_end in unmatched_open_unit_spans(ciphered, mapping):
                 doc.Range(start + span_start, start + span_end).HighlightColorIndex = 7  # wdYellow
                 highlighted += 1
         return highlighted
@@ -3871,7 +3898,7 @@ class App:
         parts = App._analyze_order(source_doc)
         return parts["body_start"], parts["last_paragraph"]
 
-    def _insert_plain_content(self, doc, tag_range, encrypted_content: str) -> int:
+    def _insert_plain_content(self, doc, tag_range, encrypted_content: str, mapping=None) -> int:
         """Запасний спосіб вставки змісту — простим текстом.
 
         Використовується ЛИШЕ тоді, коли перенести форматування з наказу не
@@ -3929,7 +3956,7 @@ class App:
                 p_format.SpaceAfter = 6
 
         highlighted = 0
-        for span_start, span_end in find_unmatched_open_unit_spans(formatted_content):
+        for span_start, span_end in unmatched_open_unit_spans(formatted_content, mapping):
             doc.Range(content_start + span_start, content_start + span_end).HighlightColorIndex = 7
             highlighted += 1
         return highlighted
@@ -4007,7 +4034,10 @@ class App:
 
                     if not copied_with_formatting:
                         highlighted_count = self._insert_plain_content(
-                            doc, find_obj.Parent, encrypted_content
+                            doc,
+                            find_obj.Parent,
+                            encrypted_content,
+                            (content_source or {}).get("mapping"),
                         )
             for bookmark_name in executor_bookmarks:
                 self._position_message_executor_at_page_bottom(doc, bookmark_name)

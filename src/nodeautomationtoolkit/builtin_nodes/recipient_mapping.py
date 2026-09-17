@@ -117,6 +117,27 @@ def _read_xlsx(path: Path, sheet_name: str = "") -> list[list[str]]:
         return rows
 
 
+# Позначка рядка таблиці «не закривати» (рішення користувача 17.09.2026).
+KEEP_OPEN_MARK = "$"
+
+
+class RecipientMapping(dict):
+    """Словник таблиці частин і назви рядків із позначкою «$».
+
+    Рядки з «$» лишаються у словнику звичайними (позначку прибрано), тож
+    маршрутизація витягів працює як раніше. Повідомлення беруть назви з
+    `keep_open_names`: такі назви лишаються відкритими й не шифруються.
+    """
+
+    def __init__(self, *args, keep_open_names: list[str] | tuple[str, ...] = (), **kwargs):
+        super().__init__(*args, **kwargs)
+        self.keep_open_names = tuple(keep_open_names)
+
+
+def keep_open_names_of(mapping) -> tuple[str, ...]:
+    return tuple(getattr(mapping, "keep_open_names", ()) or ())
+
+
 def _read_rows(path: Path, sheet_name: str = "") -> list[list[str]]:
     if path.suffix.casefold() == ".xlsx":
         return _read_xlsx(path, sheet_name)
@@ -194,12 +215,24 @@ def read_recipient_mapping(
     mapping: dict[str, dict[str, str]] = {}
     table_rows = []
 
+    keep_open_names: list[str] = []
+
     for row in data_rows:
         if not any(row):
             continue
         prow = [str(cell or "").strip() for cell in row]
         while len(prow) < 10:
             prow.append("")
+
+        # «$» у будь-якій клітинці рядка — у повідомленнях частина НЕ шифрується
+        # (рішення користувача 17.09.2026: «тільки в шифрах»). Для витягів рядок
+        # лишається звичайним: сама позначка з клітинок прибирається.
+        keep_open = any(KEEP_OPEN_MARK in cell for cell in prow)
+        if keep_open:
+            prow = [cell.replace(KEEP_OPEN_MARK, "").strip() for cell in prow]
+            kept_name = prow[col_a_idx if col_a_idx >= 0 else 0]
+            if kept_name:
+                keep_open_names.append(kept_name)
 
         open_name = prow[col_a_idx if col_a_idx >= 0 else 0]
         cipher = prow[col_b_idx if col_b_idx >= 0 else 1]
@@ -250,7 +283,8 @@ def read_recipient_mapping(
         "Таблиця відповідностей ВЧ",
     )
     return {
-        "mapping": mapping,
+        "mapping": RecipientMapping(mapping, keep_open_names=keep_open_names),
+        "keep_open": keep_open_names,
         "markers": list(mapping),
         "table": table,
         "count": len(table_rows),

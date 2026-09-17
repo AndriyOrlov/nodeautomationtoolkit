@@ -30,7 +30,9 @@ from nodeautomationtoolkit.builtin_nodes.recipient_mapping import (
     _format_full_closed_unit_text,
     _mask_anaphoric_unit_references,
     _unit_name_signature,
+    RecipientMapping,
     is_tck_entry,
+    keep_open_names_of,
     _ORDER_SIGNER_START_RE,
 )
 
@@ -541,9 +543,14 @@ def cipher_unit_names(
 
     # 1. Патерни назв частин з урахуванням відмінків
     patterns_to_apply = []
+    kept_open_keys = {
+        soften_unit_text(_fix_military_typos(name)).casefold() for name in keep_open_names_of(mapping)
+    }
     for open_name, mapped_val in mapping_dict.items():
         if not open_name or not str(open_name).strip():
             continue
+        if soften_unit_text(str(open_name)).casefold() in kept_open_keys:
+            continue  # рядок із «$»: шаблон без шифру додається нижче
         if is_tck_entry(mapped_val) or is_tck_entry(open_name):
             # ТЦК не шифрується: у змісті його назва лишається ПОВНОЮ
             # відкритою (розд. 9.5.6). Підстановка короткої форми зі словника
@@ -586,6 +593,29 @@ def cipher_unit_names(
                     corps_unresolved,
                 )
             )
+
+    # Рядки таблиці з «$»: назва лишається відкритою. Шаблон потрібен, щоб зайняти
+    # її ділянку — інакше загальніший рядок зашифрував би шматок цієї назви.
+    for kept_name in keep_open_names_of(mapping):
+        search_name = soften_unit_text(_fix_military_typos(kept_name))
+        pattern = (
+            _build_unit_fuzzy_pattern(search_name)
+            if fuzzy_match
+            else re.compile(rf"\b{re.escape(search_name)}\b", re.IGNORECASE)
+        )
+        signature = _unit_name_signature(kept_name)
+        patterns_to_apply.append((
+            True,
+            any(token.startswith("#") for token in signature),
+            len(signature),
+            len(kept_name),
+            pattern,
+            None,  # закритого тексту немає: назва не шифрується
+            kept_name,
+            "",
+            "",
+            False,
+        ))
 
     # Пошук виконується лише за колонкою A. Номерні та повніші назви мають
     # пріоритет над загальними рядками, навіть якщо загальний рядок довший.
@@ -662,6 +692,8 @@ def cipher_unit_names(
             # Ділянка займається навіть без шифру: інакше загальніший рядок
             # таблиці зашифрував би шматок цієї назви.
             taken_spans.append((start, end))
+            if fc is None:
+                continue  # рядок із «$» — назва лишається відкритою
             if not raw_c:
                 _note_problem(("no_cipher", op_name))
                 continue  # порожній стовпець B — шифр не вигадуємо
@@ -833,7 +865,10 @@ def generate_decision_order(
     body_text = "\n".join(body_lines)
 
     body_text, replaced_count, report_rows = cipher_unit_names(
-        body_text, mapping_dict, fuzzy_match=fuzzy_match, rules=rules
+        body_text,
+        RecipientMapping(mapping_dict, keep_open_names=keep_open_names_of(mapping)),
+        fuzzy_match=fuzzy_match,
+        rules=rules,
     )
 
     # 4.2. Порожні рядки: 1 перед пунктом, 2 перед підписантом
