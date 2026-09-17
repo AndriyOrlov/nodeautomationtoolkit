@@ -34,8 +34,18 @@ echo Iнтерпретатор: %PY%
 "%PY%" -m PyInstaller --version >nul 2>nul
 if errorlevel 1 goto :nopyinstaller
 
+rem Version shown in the program goes up by 0.1 (0.4.0 -> 0.5.0) before every
+rem build. If the build fails, the previous version is written back.
+set "OLD_VERSION="
+set "NEW_VERSION="
+for /f "usebackq delims=" %%V in (`"%PY%" scripts\bump_version.py --show`) do set "OLD_VERSION=%%V"
+if not defined OLD_VERSION goto :noversion
+for /f "usebackq delims=" %%V in (`"%PY%" scripts\bump_version.py`) do set "NEW_VERSION=%%V"
+if not defined NEW_VERSION goto :noversion
+echo Версiя: %OLD_VERSION% -^> %NEW_VERSION%
+
 echo.
-echo Збираю %APP_NAME% ...
+echo Збираю %APP_NAME% %NEW_VERSION% ...
 echo.
 
 rem --add-data / --paths use absolute paths: with --specpath PyInstaller
@@ -55,21 +65,31 @@ rem resolves relative ones against the spec folder, not the project root.
   --collect-all ttkbootstrap ^
   --hidden-import win32timezone ^
   --add-data "%ROOT%src\nodeautomationtoolkit\generator_qt\icons;nodeautomationtoolkit\generator_qt\icons" ^
+  --add-data "%ROOT%src\nodeautomationtoolkit\personnel\dictionaries;nodeautomationtoolkit\personnel\dictionaries" ^
   "%ROOT%generate_extracts_qt.py"
 if errorlevel 1 goto :failed
 
 if not exist "dist\%APP_NAME%\%APP_NAME%.exe" goto :failed
 
 echo.
-echo Готово: dist\%APP_NAME%\%APP_NAME%.exe
+echo Готово: dist\%APP_NAME%\%APP_NAME%.exe  (версiя %NEW_VERSION%)
 echo Запускати треба разом з усiєю текою dist\%APP_NAME%.
 echo.
 pause
 exit /b 0
 
 :failed
+if defined OLD_VERSION "%PY%" scripts\bump_version.py --set %OLD_VERSION% >nul
 echo.
 echo Збiрка не вдалася - дивiться повiдомлення вище.
+if defined OLD_VERSION echo Версiю повернуто на %OLD_VERSION%.
+echo.
+pause
+exit /b 1
+
+:noversion
+echo.
+echo Не вдалося прочитати або змiнити версiю - scripts\bump_version.py.
 echo.
 pause
 exit /b 1
