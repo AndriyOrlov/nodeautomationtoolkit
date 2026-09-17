@@ -211,6 +211,73 @@ def hint_bar(note: str = "") -> QFrame:
     return bar
 
 
+ORDER_EXTENSIONS = (".docx", ".doc")
+
+
+def dropped_order_paths(urls) -> list[str]:
+    """Локальні файли наказів із перетягування: DOCX/DOC, без тимчасових «~$…» Word."""
+    paths = []
+    for url in urls:
+        if not url.isLocalFile():
+            continue
+        path = url.toLocalFile()
+        name = os.path.basename(path)
+        if name.lower().endswith(ORDER_EXTENSIONS) and not name.startswith("~$") and os.path.isfile(path):
+            paths.append(path)
+    return paths
+
+
+class OrderDropZone(QFrame):
+    """Рамка, у яку перетягують наказ: `on_drop(шлях)` викликається з першим наказом.
+
+    Перетягування, які рамка приймає, не доходять до обробника всього вікна —
+    тож наказ у рамці не підміняє зразки й інші налаштування вкладки.
+    """
+
+    def __init__(self, text: str, on_drop: Callable[[str], None], parent: QWidget | None = None):
+        super().__init__(parent)
+        self.setObjectName("OrderDropZone")
+        self.setProperty("active", False)
+        self.setAcceptDrops(True)
+        self.setMinimumHeight(64)
+        self._on_drop = on_drop
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(12, 10, 12, 10)
+        caption = label(text, "DropZoneText")
+        caption.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        caption.setWordWrap(True)
+        layout.addWidget(caption, 1)
+
+    def _set_active(self, active: bool) -> None:
+        self.setProperty("active", active)
+        self.style().unpolish(self)
+        self.style().polish(self)
+
+    def dragEnterEvent(self, event) -> None:  # noqa: N802 - назва з Qt
+        if dropped_order_paths(event.mimeData().urls()):
+            event.acceptProposedAction()
+            self._set_active(True)
+        else:
+            event.ignore()
+
+    def dragMoveEvent(self, event) -> None:  # noqa: N802
+        if dropped_order_paths(event.mimeData().urls()):
+            event.acceptProposedAction()
+
+    def dragLeaveEvent(self, event) -> None:  # noqa: N802
+        self._set_active(False)
+        super().dragLeaveEvent(event)
+
+    def dropEvent(self, event) -> None:  # noqa: N802
+        self._set_active(False)
+        paths = dropped_order_paths(event.mimeData().urls())
+        if not paths:
+            event.ignore()
+            return
+        event.acceptProposedAction()
+        self._on_drop(paths[0])
+
+
 def run_params_card(
     title: str,
     *,

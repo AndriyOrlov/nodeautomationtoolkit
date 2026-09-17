@@ -534,6 +534,19 @@ QFrame#HintBar {{
     border: 1px solid {c["border_soft"]};
     border-radius: 4px;
 }}
+QFrame#OrderDropZone {{
+    background: rgba(15, 23, 42, 0.9);
+    border: 2px dashed {c["border"]};
+    border-radius: 6px;
+}}
+QFrame#OrderDropZone[active="true"] {{
+    background: rgba(20, 184, 166, 0.12);
+    border: 2px dashed {c["teal_soft"]};
+}}
+QLabel#DropZoneText {{
+    color: {c["text_muted"]};
+    font-size: 10pt;
+}}
 QLabel#HintText {{
     color: {c["text_muted"]};
     font-size: 8pt;

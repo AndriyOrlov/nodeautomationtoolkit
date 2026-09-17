@@ -66,6 +66,7 @@ rem resolves relative ones against the spec folder, not the project root.
   --hidden-import win32timezone ^
   --add-data "%ROOT%src\nodeautomationtoolkit\generator_qt\icons;nodeautomationtoolkit\generator_qt\icons" ^
   --add-data "%ROOT%src\nodeautomationtoolkit\personnel\dictionaries;nodeautomationtoolkit\personnel\dictionaries" ^
+  --add-data "%ROOT%src\nodeautomationtoolkit\generator_qt\instruction.md;nodeautomationtoolkit\generator_qt" ^
   "%ROOT%generate_extracts_qt.py"
 if errorlevel 1 goto :failed
 

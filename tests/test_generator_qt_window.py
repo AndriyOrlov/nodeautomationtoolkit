@@ -416,3 +416,89 @@ def test_old_config_with_single_file_opens_in_single_mode(shell, legacy, tmp_pat
     legacy.App.load_config(shell)
     assert shell.p2_source_mode.get() == "file"
     assert shell._selected_p2_order_paths() == [order]
+
+
+# ── Інструкція, папки результату, рамка перетягування наказу ────────────────
+
+
+def _find_buttons(widget, text_part):
+    from nodeautomationtoolkit.generator_qt.compat import TkButton
+
+    return [child for child in widget.findChildren(TkButton) if text_part in child.text()]
+
+
+def test_instruction_button_opens_dialog_with_text(shell, qt_app):
+    from nodeautomationtoolkit.generator_qt.instruction_dialog import INSTRUCTION_FILE
+
+    assert INSTRUCTION_FILE.is_file()
+    [instruction_button] = _find_buttons(shell.main_window, "Інструкція")
+    instruction_button.click()
+    qt_app.processEvents()
+    dialog = shell._instruction_dialog
+    assert dialog is not None and dialog.isVisible()
+    text = dialog.viewer.toPlainText()
+    assert "Таблиця частин" in text and "Повідомлення" in text
+    dialog.close()
+
+
+def test_result_folder_buttons_on_extracts_and_messages(shell, tmp_path, monkeypatch, dialogs):
+    opened = []
+    monkeypatch.setattr(os, "startfile", lambda path: opened.append(path), raising=False)
+    assert _find_buttons(shell.tab_extracts_page, "Папка результату")
+    assert _find_buttons(shell.tab_messages_page, "Папка результату")
+
+    shell.out_folder.set(str(tmp_path))
+    shell.open_extracts_output_folder()
+    assert opened == [str(tmp_path)]
+
+    order = _order(tmp_path, "Наказ № 40 від 01.09.2026.docx")
+    shell.message_out_folder.set("")
+    shell.doc_path.set(order)
+    shell.open_message_output_folder()  # Messages_Output ще немає — попередження
+    assert dialogs and dialogs[-1][0] == "showwarning"
+
+    (tmp_path / "Messages_Output").mkdir()
+    shell.open_message_output_folder()
+    assert opened[-1] == str(tmp_path / "Messages_Output")
+
+
+def test_order_dropped_into_zone_is_selected_and_messages_start(shell, tmp_path, monkeypatch):
+    from PySide6.QtCore import QMimeData, QPointF, QUrl
+    from PySide6.QtGui import QDropEvent
+
+    from nodeautomationtoolkit.generator_qt.widgets import OrderDropZone
+
+    started = []
+    monkeypatch.setattr(type(shell), "run_generate_messages", lambda self: started.append(self.doc_path.get()))
+    order = _order(tmp_path, "Наказ № 41 від 01.09.2026.docx")
+    [zone] = shell.tab_messages_page.findChildren(OrderDropZone)
+
+    mime = QMimeData()
+    mime.setUrls([QUrl.fromLocalFile(str(tmp_path / "~$Наказ.docx")), QUrl.fromLocalFile(order)])
+    event = QDropEvent(
+        QPointF(5, 5), Qt.DropAction.CopyAction, mime, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier
+    )
+    zone.dropEvent(event)
+
+    assert shell.manual_order_paths == [os.path.abspath(order)]
+    assert started == [os.path.abspath(order)]
+
+
+def test_zone_ignores_non_orders_and_busy_state(shell, tmp_path, monkeypatch):
+    from PySide6.QtCore import QUrl
+
+    from nodeautomationtoolkit.generator_qt.widgets import dropped_order_paths
+
+    table = tmp_path / "словник.xlsx"
+    table.write_bytes(b"")
+    assert dropped_order_paths([QUrl.fromLocalFile(str(table))]) == []
+
+    started = []
+    monkeypatch.setattr(type(shell), "run_generate_messages", lambda self: started.append(True))
+    order = _order(tmp_path, "Наказ № 42 від 01.09.2026.docx")
+    shell._busy_depth = 1
+    try:
+        shell.generate_messages_for_dropped_order(order)
+    finally:
+        shell._busy_depth = 0
+    assert started == [] and shell.manual_order_paths == []
