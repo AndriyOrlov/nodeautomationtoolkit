@@ -1638,3 +1638,29 @@ python scripts/e2e_messages/check_message_output.py <тека>/Messages_Output
   у саму рамку не доходить до загального обробника вікна, тож зразки не підміняються.
   Перетягування в інше місце вікна працює як раніше (лише обирає наказ).
 - Тести — `tests/test_generator_qt_window.py` (останні чотири).
+
+## 2026-09-17 — редактор нод видалено (Claude)
+
+Рішення користувача: «видали повністю редактор нод, він нам більше не знадобиться, залиш
+тільки те, над чим ми працюємо». Проєкт тепер — лише генератор витягів, примірників і
+повідомлень (`generate_extracts.py`, Qt-оболонка, Tk-оболонка) і пакет `personnel`.
+
+- **Видалено:** `app.py`, `__main__.py`, `ui/`; з `core/` — виконавець графа, реєстр,
+  моделі, прев'ю, патчі, LLM-помічники, шаблони графів; з `builtin_nodes/` — ноди, які
+  генератор не імпортує (`files`, `text`, `text_analysis`, `logic`, `output`,
+  `excel_nodes`, `windows_*`, `word`, `word_batch`, `order_ai`); `plugins/`, `graphs/`,
+  `examples/`, `patch.json`, `scripts/create_patch.py`, `scripts/windows_ui_smoke.py`,
+  `NodeAutomationToolkit.spec`, `THIRD_PARTY_NOTICES.md` (лише про Qwen/llama.cpp);
+  тести цих модулів.
+- **Що лишилось визначено за імпортами** генератора, Qt-оболонки, `personnel` і скриптів
+  `scripts/e2e_*`, `scripts/diagnostics`, `scripts/bump_version.py`. Декоратор `@node`
+  (`core/definition.py`) лишився: ним позначені функції в модулях логіки, на роботу
+  генератора він не впливає.
+- Три перевірки маршрутизації з тестів редактора перенесено в
+  `tests/test_routing_basics.py`. Зламаний `test_military_preamble_extraction` стосувався
+  видаленого `word_batch` — його більше немає, повний прогін без винятків.
+- `pyproject.toml`: без NodeGraphQt і pydantic, без консольної команди редактора.
+  CI (`.github/workflows/release-windows.yml`, збирав і публікував редактор) замінено на
+  `tests.yml` — лише тести.
+- Розділи AGENT.md вище, що описують ноди, граф чи редактор, — історія; чинними лишаються
+  правила генератора.
