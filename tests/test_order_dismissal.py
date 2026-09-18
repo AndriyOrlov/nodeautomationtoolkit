@@ -24,7 +24,12 @@ from nodeautomationtoolkit.order_generator.compose import (  # noqa: E402
     birth_in_words,
     compose_order,
 )
-from nodeautomationtoolkit.order_generator.record import MANUAL, PersonRecord, Position, Value  # noqa: E402
+from nodeautomationtoolkit.order_generator.record import (  # noqa: E402
+    MANUAL,
+    PersonRecord,
+    Position,
+    Value,
+)
 from nodeautomationtoolkit.personnel import dismissal  # noqa: E402
 
 NBSP = " "
