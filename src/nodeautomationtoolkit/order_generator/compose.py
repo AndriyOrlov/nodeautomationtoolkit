@@ -31,7 +31,7 @@ from dataclasses import dataclass, field
 
 from ..builtin_nodes.typography import apply_ukrainian_typography, clean_duplicated_units
 from ..personnel import appointment, declension, dismissal
-from .names import FullName, accusative
+from .names import FullName, accusative, dative
 from .record import PersonRecord
 
 #: Стала частина шапки — з усіх зразків додатка 53.
@@ -46,6 +46,7 @@ DEFAULT_KIND = "осіб офіцерського складу"
 
 APPOINTMENT = "призначення"
 DISMISSAL = "звільнення"
+RANK = "присвоєння звання"
 
 #: Місяці у формі «Народився 11 серпня 1976 року».
 MONTHS_IN_WORDS = (
@@ -302,6 +303,96 @@ def _dismissal_order(params: OrderParams) -> dict[str, int]:
     return {ground.key: index for index, ground in enumerate(table)}
 
 
+def rank_dative(rank: str, folder: str = "") -> tuple[str, bool]:
+    """«капітан» → «капітану» — для наказу про присвоєння звання."""
+    result = declension.decline_rank(_clean(rank), "Д", folder or None)
+    return result.text, result.found
+
+
+def position_dative(position: str, folder: str = "") -> tuple[str, bool]:
+    """«старший офіцер відділу» → «старшому офіцеру відділу»."""
+    result = declension.decline_position(_clean(position), "Д", folder or None)
+    return result.text, result.found
+
+
+def rank_item_lines(record: PersonRecord, params: OrderParams) -> list[str]:
+    """Пункт наказу про присвоєння звання (зразки додатка 53).
+
+    «Капітану НАЗАРЕНКУ Олександру Васильовичу, старшому офіцеру відділу … .»
+    «1978 р.н., вислуга у званні - 11 років, 2859220555.»
+    «Строк перебування у військовому званні рахувати з 04.12.2013.»
+    """
+    folder = params.dictionary_folder
+    rank, _ = rank_dative(str(record.rank), folder)
+    full_name = dative(
+        FullName(str(record.surname), str(record.name), str(record.patronymic))
+    )
+    position, _ = position_dative(str(record.current.text), folder)
+    first = " ".join(part for part in (rank[:1].upper() + rank[1:] if rank else "", full_name) if part)
+    if position:
+        first += f", {position}"
+    lines = [first.rstrip(" ,") + "."]
+
+    second = []
+    if record.birth:
+        second.append(f"{_clean(record.birth)} р.н.")
+    if record.rank_seniority:
+        second.append(f"вислуга у званні - {_clean(record.rank_seniority)}")
+    if record.rank_note:
+        second.append(_clean(record.rank_note))
+    if record.ipn:
+        second.append(_clean(record.ipn))
+    if record.target.shpk or record.current.shpk:
+        shpk = _clean(record.target.shpk) or _clean(record.current.shpk)
+        second.append(f"шпк «{appointment.shpk_key(shpk)}»")
+    if second:
+        lines.append(", ".join(second) + ".")
+    if record.rank_since:
+        lines.append(
+            f"Строк перебування у військовому званні рахувати з {_clean(record.rank_since)}."
+        )
+    return [apply_ukrainian_typography(clean_duplicated_units(line)) for line in lines]
+
+
+def rank_heading_lines(params: OrderParams) -> list[str]:
+    """«Відповідно до … нижчепойменованим особам … ПРИСВОЇТИ чергові військові звання:»"""
+    lines = []
+    if _clean(params.section):
+        lines.append(_clean(params.section))
+    bases = "".join(f", {_clean(base)}" for base in params.bases if _clean(base))
+    who = _clean(params.kind) or "особам офіцерського складу"
+    unit = _clean(params.unit)
+    text = (
+        f"Відповідно до {_clean(params.points)} {REGULATION}{bases} "
+        f"нижчепойменованим {who}"
+        + (f" {unit}" if unit else "")
+        + " ПРИСВОЇТИ чергові військові звання:"
+    )
+    lines.append(apply_ukrainian_typography(clean_duplicated_units(text)))
+    return lines
+
+
+def compose_rank_order(records: list[PersonRecord], params: OrderParams) -> OrderDraft:
+    """Наказ про присвоєння звань: пункти згруповані самим званням («МАЙОР»)."""
+    draft = OrderDraft(params=params, heading=rank_heading_lines(params))
+    people = list(records)
+    people.sort(key=lambda record: (str(record.new_rank).casefold(), record.sort_key()))
+    number = params.numbering_start
+    for record in people:
+        new_rank = _clean(record.new_rank)
+        draft.items.append(
+            OrderItem(
+                number=number,
+                lines=rank_item_lines(record, params),
+                record=record,
+                subheading=f"«{new_rank.upper()}»" if new_rank else "",
+            )
+        )
+        number += 1
+    draft.footer = _footer_lines(params)
+    return draft
+
+
 def heading_lines(params: OrderParams) -> list[str]:
     """Шапка розділу: «§ …» окремим рядком і «Відповідно до …:»."""
     lines = []
@@ -398,6 +489,8 @@ def compose_order(records: list[PersonRecord], params: OrderParams | None = None
         return draft
     if params.action == DISMISSAL:
         return compose_dismissal_order(people, params)
+    if params.action == RANK:
+        return compose_rank_order(people, params)
 
     if len(people) == 1 and not _clean(params.section):
         record = people[0]

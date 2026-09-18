@@ -77,6 +77,11 @@ class PersonRecord:
     registration: Value = field(default_factory=Value)  # ТЦК, куди стає на облік
     uniform: Value = field(default_factory=Value)  # «так» / «ні» — право носіння форми
     dismissal_note: Value = field(default_factory=Value)  # «Чинність контракту припиняється …»
+    # Присвоєння військового звання (зразки додатка 53).
+    new_rank: Value = field(default_factory=Value)  # звання, яке присвоюють
+    rank_seniority: Value = field(default_factory=Value)  # «вислуга у званні - 11 років»
+    rank_since: Value = field(default_factory=Value)  # «строк рахувати з 04.12.2013»
+    rank_note: Value = field(default_factory=Value)  # «достроково на 6 місяців»
     previous_item: Value = field(default_factory=Value)  # текст пункту, з якого переносили
     problems: list[str] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)

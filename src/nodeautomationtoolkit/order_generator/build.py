@@ -65,6 +65,10 @@ def _kind(line: str) -> str:
         return "signer"
     if clean.endswith(":"):
         return "heading"
+    # Підзаголовок групи в наказі про звання — саме звання ВЕЛИКИМИ в лапках
+    # («МАЙОР»). Крапки в кінці він не має, тому окреме правило.
+    if clean.startswith("«") and clean.endswith("»") and clean == clean.upper():
+        return "heading"
     return "continuation"
 
 

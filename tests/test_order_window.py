@@ -303,3 +303,55 @@ def test_a_scan_without_tesseract_says_so(shell, unlock, tmp_path, monkeypatch):
     shell.run_order_compose()
 
     assert any("розпізнати скан" in message for message in messages)
+
+def test_rank_order_from_the_window(shell, unlock, tmp_path, monkeypatch):
+    from nodeautomationtoolkit.generator_qt import orders_window
+
+    shell.open_orders_window()
+    shell.new_order_action.set("присвоєння звання")
+    shell.new_order_points.set("пунктів 45, 50")
+    shell.new_order_kind.set("особам офіцерського складу")
+    values = {
+        "rank": "капітан",
+        "surname": "НАЗАРЕНКО",
+        "name": "Олександр",
+        "patronymic": "Васильович",
+        "ipn": "2859220555",
+        "birth": "1978",
+        "current.text": "старший офіцер відділу комплектування офіцерами",
+        "new_rank": "майор",
+        "rank_seniority": "11 років",
+    }
+
+    class _Dialog:
+        def __init__(self, action, *_args, **_kwargs):
+            assert action == "присвоєння звання"
+
+        def exec(self):
+            from PySide6.QtWidgets import QDialog
+
+            return QDialog.DialogCode.Accepted
+
+        def values(self):
+            return values
+
+    monkeypatch.setattr(orders_window, "ManualPersonDialog", _Dialog)
+    shell.add_manual_person()
+    shell.new_order_out_folder.set(str(tmp_path / "звання"))
+    shell.run_order_compose()
+    assert shell._order_check.ready, [p.line() for p in shell._order_check.problems]
+
+    text = shell._order_draft.text.replace(" ", " ")
+    assert "ПРИСВОЇТИ чергові військові звання:" in text
+    assert "«МАЙОР»" in text
+    assert "Капітану НАЗАРЕНКУ Олександру Васильовичу" in text
+
+    shell.run_order_assemble()
+    assert [path.name for path in (tmp_path / "звання").glob("*.docx")]
+
+
+def test_all_three_kinds_are_offered(shell, unlock):
+    shell.open_orders_window()
+    assert [
+        shell.order_action_box.itemText(index) for index in range(shell.order_action_box.count())
+    ] == ["призначення", "звільнення", "присвоєння звання"]

@@ -45,6 +45,11 @@ _FIELD_PRIORITY = {
     "registration": (MANUAL, DOCUMENT, PLAN, ORDER),
     "uniform": (MANUAL, DOCUMENT, PLAN, ORDER),
     "dismissal_note": (MANUAL, DOCUMENT, PLAN, ORDER),
+    # Присвоєння звання: звання й вислуга у званні беруться з подання або вручну.
+    "new_rank": (MANUAL, DOCUMENT, PLAN, ORDER),
+    "rank_seniority": (MANUAL, DOCUMENT, PLAN, ORDER),
+    "rank_since": (MANUAL, DOCUMENT, PLAN, ORDER),
+    "rank_note": (MANUAL, DOCUMENT, PLAN, ORDER),
 }
 
 
@@ -73,6 +78,7 @@ def _merge_position(primary: Position | None, fallback: Position | None) -> Posi
 #: Види наказу: від нього залежить, чого вимагати від запису.
 APPOINTMENT = "призначення"
 DISMISSAL = "звільнення"
+RANK = "присвоєння звання"
 
 
 def build_record(
@@ -120,14 +126,16 @@ def _check(
             "ПІБ узято з пункту наказу, а там воно у знахідному відмінку "
             f"(«{record.full_name}») — звірте називний"
         )
-    if action != DISMISSAL and not record.target:
-        # У наказі про звільнення нової посади немає — вимагати її безглуздо.
+    if action == APPOINTMENT and not record.target:
+        # У наказах про звільнення та присвоєння звання нової посади немає.
         record.problems.append("немає посади, на яку призначається")
-    if not record.current:
+    if not record.current and action != RANK:
         record.problems.append(
             "немає посади, з якої звільняється" if action == DISMISSAL
             else "немає посади, з якої призначається"
         )
+    if action == RANK and not record.new_rank:
+        record.problems.append("немає звання, яке присвоюється")
     if not record.ipn:
         record.problems.append("немає РНОКПП")
     if not record.birth:

@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 
 from ..personnel import declension, dismissal
 from ..personnel.ipn import check_ipn
-from .compose import DISMISSAL, OrderDraft, OrderItem
+from .compose import DISMISSAL, RANK, OrderDraft, OrderItem
 
 ERROR = "помилка"
 WARNING = "увага"
@@ -104,23 +104,54 @@ def _check_dismissal(result: CheckResult, item: OrderItem, folder: str) -> None:
         )
 
 
+def _check_rank(result: CheckResult, item: OrderItem) -> None:
+    """Те, без чого пункт про присвоєння звання неповний."""
+    record = item.record
+    where = f"Пункт {item.number}"
+    person = record.full_name or "особа без ПІБ"
+
+    if not record.new_rank:
+        _add(
+            result, ERROR, where, person,
+            "не вказано, яке звання присвоюється",
+            "Впишіть звання — воно стане підзаголовком групи («МАЙОР»).",
+        )
+    if not record.rank_seniority and not record.rank_note:
+        _add(
+            result, WARNING, where, person,
+            "немає вислуги у званні",
+            "У зразках після року народження стоїть «вислуга у званні - …».",
+        )
+
+
 def _check_person(result: CheckResult, item: OrderItem, folder: str, action: str = "") -> None:
     record = item.record
     where = f"Пункт {item.number}"
     person = record.full_name or "особа без ПІБ"
     dismissing = action == DISMISSAL
+    assigning = action == RANK
+    appointing = action not in (DISMISSAL, RANK)
 
     if not record.surname or not record.name or not record.patronymic:
         _add(result, ERROR, where, person, "неповне ПІБ", "Допишіть прізвище, ім'я та по батькові.")
     if not record.rank:
         _add(result, ERROR, where, person, "немає військового звання", "Впишіть звання.")
     if not record.current.text:
-        _add(
-            result, ERROR, where, person,
-            "немає посади, з якої звільняється" if dismissing else "немає посади, з якої призначається",
-            "Візьміть її з попереднього наказу або впишіть вручну.",
-        )
-    if not dismissing and not record.target.text:
+        if assigning:
+            # У наказі про звання посада бажана, але без неї пункт лишається чинним.
+            _add(
+                result, WARNING, where, person,
+                "не вказано посаду, яку обіймає",
+                "У зразках вона є майже в кожному пункті.",
+            )
+        else:
+            _add(
+                result, ERROR, where, person,
+                "немає посади, з якої звільняється" if dismissing
+                else "немає посади, з якої призначається",
+                "Візьміть її з попереднього наказу або впишіть вручну.",
+            )
+    if appointing and not record.target.text:
         _add(
             result, ERROR, where, person,
             "немає посади, на яку призначається",
@@ -148,7 +179,7 @@ def _check_person(result: CheckResult, item: OrderItem, folder: str, action: str
 
     if not record.birth:
         _add(result, WARNING, where, person, "немає року народження", "Додайте «19__ р.н.».")
-    if not dismissing:
+    if appointing:
         if not record.education:
             _add(result, WARNING, where, person, "немає освіти", "Додайте рядок «освіта: …».")
         if not record.service_since:
@@ -159,9 +190,14 @@ def _check_person(result: CheckResult, item: OrderItem, folder: str, action: str
         if not record.target.vos and not record.current.vos:
             _add(result, WARNING, where, person, "немає ВОС", "Додайте код ВОС нової посади.")
 
-    current_title = "посаду, з якої звільняється" if dismissing else "посаду, з якої призначається"
-    titles = [(str(record.current.text), current_title, "З")]
-    if not dismissing:
+    if assigning:
+        current_title, current_case = "посаду, яку обіймає", "Д"
+    elif dismissing:
+        current_title, current_case = "посаду, з якої звільняється", "З"
+    else:
+        current_title, current_case = "посаду, з якої призначається", "З"
+    titles = [(str(record.current.text), current_title, current_case)]
+    if appointing:
         titles.append((str(record.target.text), "посаду, на яку призначається", "О"))
     for text, title, case in titles:
         if not text:
@@ -237,6 +273,8 @@ def check_draft(draft: OrderDraft) -> CheckResult:
         _check_person(result, item, folder, draft.params.action)
         if draft.params.action == DISMISSAL:
             _check_dismissal(result, item, folder)
+        elif draft.params.action == RANK:
+            _check_rank(result, item)
         _check_text(result, item)
 
         ipn = "".join(character for character in str(item.record.ipn) if character.isdigit())

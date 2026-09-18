@@ -71,6 +71,7 @@ ORDERS_PASSWORD = "2281488"
 
 APPOINTMENT = "призначення"
 DISMISSAL = "звільнення"
+RANK = "присвоєння звання"
 
 #: Поля ручного вводу: ключ запису, підпис, підказка, для якого виду наказу.
 MANUAL_FIELDS = (
@@ -95,6 +96,10 @@ MANUAL_FIELDS = (
     ("registration", "На облік до", "Слобідського ОРТЦК та СП м. Харкова", DISMISSAL),
     ("uniform", "Право на форму", "так / ні", DISMISSAL),
     ("dismissal_note", "Додатковий рядок", "Чинність контракту припиняється 18.12.2026", DISMISSAL),
+    ("new_rank", "Присвоюється звання", "майор", RANK),
+    ("rank_seniority", "Вислуга у званні", "11 років", RANK),
+    ("rank_since", "Строк рахувати з", "04.12.2026", RANK),
+    ("rank_note", "Примітка до звання", "достроково на 6 місяців", RANK),
 )
 
 
@@ -249,7 +254,7 @@ class OrdersWindowMixin:
         kind_row.setHorizontalSpacing(8)
         kind_row.addWidget(label("Вид наказу:", "FieldLabel"), 0, 0)
         self.order_action_box = QComboBox()
-        self.order_action_box.addItems([APPOINTMENT, DISMISSAL])
+        self.order_action_box.addItems([APPOINTMENT, DISMISSAL, RANK])
         self.order_action_box.setCurrentText(self.new_order_action.get() or APPOINTMENT)
         self.order_action_box.currentTextChanged.connect(self._on_order_action_changed)
         kind_row.addWidget(self.order_action_box, 0, 1)

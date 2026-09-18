@@ -1,7 +1,13 @@
-"""Прізвище, ім'я та по батькові у знахідному відмінку для пункту наказу.
+"""Прізвище, ім'я та по батькові у відмінках для пункту наказу.
 
+Знахідний — для призначення й звільнення:
 «КОЛМИК Олексій Вікторович» → «КОЛМИКА Олексія Вікторовича»,
 «ЗІНЧЕНКО Світлана Петрівна» → «ЗІНЧЕНКО Світлану Петрівну».
+
+Давальний — для присвоєння звання (зразки додатка 53):
+«НАЗАРЕНКО Олександр Васильович» → «НАЗАРЕНКУ Олександру Васильовичу»,
+«ДУБ Романна Іванівна» → «ДУБ Романні Іванівні».
+
 Стать — за по батькові (-ич / -на). Прізвище лишається ВЕЛИКИМИ.
 """
 
@@ -103,6 +109,11 @@ def _feminine_name(low: str) -> str:
     return low  # «Любов»
 
 
+def _masculine_patronymic_accusative(low: str) -> str:
+    """«Васильович» → «Васильовича», «Ілліч» → «Ілліча»."""
+    return low + "а" if low.endswith(("ич", "іч")) else low
+
+
 def accusative(full_name: FullName) -> str:
     """Знахідний відмінок ПІБ; для чоловіків збігається з родовим."""
     surname, name, patronymic = full_name.surname, full_name.name, full_name.patronymic
@@ -112,6 +123,80 @@ def accusative(full_name: FullName) -> str:
     else:
         # «Ілліч», «Ілліч» і «Іванович» — по батькові на -ич/-іч.
         forms = (_masculine_surname(surname.casefold()), _masculine_name(name.casefold()),
-                 re.sub(r"([іи])ч$", r"\1ча", patronymic.casefold()))
+                 _masculine_patronymic_accusative(patronymic.casefold()))
     sources = (surname, name, patronymic)
     return " ".join(_restore_case(source, form) for source, form in zip(sources, forms, strict=True) if source)
+
+def _masculine_surname_dative(low: str) -> str:
+    if low.endswith(("ський", "цький", "зький")) or (low.endswith("ий") and len(low) > 4):
+        return low[:-2] + "ому"
+    if low.endswith("ій") and len(low) > 4:
+        return low[:-2] + "ьому"
+    if low.endswith("ь"):
+        return low[:-1] + "ю"
+    if low.endswith(("й", "о")):
+        return low[:-1] + "у"
+    if low.endswith("а"):
+        return low[:-1] + "і"
+    if low.endswith("я"):
+        return low[:-1] + "ї"
+    if low[-1:] not in _VOWELS:
+        return low + "у"
+    return low
+
+
+def _feminine_dative(low: str) -> str:
+    if low.endswith(("ська", "цька", "зька")) or low.endswith(("ова", "єва", "іна", "їна", "ина")):
+        return low[:-1] + "ій"
+    # «Марія» → «Марії», але «Леся» → «Лесі»: подвоєння «ї» лише після голосної.
+    if low.endswith(("ія", "їя", "ея", "оя", "ая", "уя")):
+        return low[:-1] + "ї"
+    if low.endswith("я"):
+        return low[:-1] + "і"
+    if low.endswith("а"):
+        return low[:-1] + "і"
+    if low.endswith("ов"):  # «Любов»
+        return low + "і"
+    return low  # «ДУБ», «КОВАЛЬЧУК» — не змінюються
+
+
+def _masculine_name_dative(low: str) -> str:
+    if low in _MALE_NAMES:  # «Петро» → «Петра» у знахідному, «Петру» — в давальному
+        return _MALE_NAMES[low][:-1] + "у" if _MALE_NAMES[low].endswith("а") else _MALE_NAMES[low]
+    if low.endswith(("ій", "й")):
+        return low[:-1] + "ю"
+    if low.endswith("ь"):
+        return low[:-1] + "ю"
+    if low.endswith("о"):
+        return low[:-1] + "у"
+    if low.endswith("а"):
+        return low[:-1] + "і"
+    if low.endswith("я"):
+        return low[:-1] + "ї"
+    return low + "у"
+
+
+def _masculine_patronymic_dative(low: str) -> str:
+    """«Васильович» → «Васильовичу», «Ілліч» → «Іллічу»."""
+    return low + "у" if low.endswith(("ич", "іч")) else low
+
+
+def dative(full_name: FullName) -> str:
+    """Давальний відмінок ПІБ — для наказу про присвоєння звання."""
+    surname, name, patronymic = full_name.surname, full_name.name, full_name.patronymic
+    if full_name.feminine:
+        forms = (
+            _feminine_dative(surname.casefold()),
+            _feminine_dative(name.casefold()),
+            re.sub(r"на$", "ні", patronymic.casefold()),
+        )
+    else:
+        forms = (
+            _masculine_surname_dative(surname.casefold()),
+            _masculine_name_dative(name.casefold()),
+            _masculine_patronymic_dative(patronymic.casefold()),
+        )
+    sources = (surname, name, patronymic)
+    return " ".join(
+        _restore_case(source, form) for source, form in zip(sources, forms, strict=True) if source
+    )
