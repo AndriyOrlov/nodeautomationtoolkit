@@ -29,6 +29,7 @@ from PySide6.QtWidgets import (
 from . import compat, theme
 from .compare_window import CompareWindow
 from .instruction_dialog import InstructionDialog
+from .orders_tab import OrdersTabMixin
 from .samples_dialog import SamplesDialog
 from .widgets import (
     COPY_RESULT_COLUMNS,
@@ -131,10 +132,10 @@ class GeneratorWindow(QMainWindow):
         super().closeEvent(event)
 
 
-class QtShellMixin:
-    """Qt-інтерфейс для `generate_extracts.App`. Порядок вкладок — як у Tk
-    (0 — примірники, 1 — витяги, 2 — повідомлення): на нього спирається
-    `handle_drag_and_drop`."""
+class QtShellMixin(OrdersTabMixin):
+    """Qt-інтерфейс для `generate_extracts.App`. Порядок вкладок незмінний
+    (0 — примірники, 1 — витяги, 2 — повідомлення, 3 — накази): на нього
+    спирається `handle_drag_and_drop`."""
 
     legacy = None  # модуль generate_extracts; задається в create_qt_app_class
     # Нові частини з наказу дописуються в таблицю заготовками (AGENT.md 9.5.7).
@@ -179,13 +180,16 @@ class QtShellMixin:
         self.tab_copies_page = self._scroll_page(self._build_copies_tab())
         self.tab_extracts_page = self._scroll_page(self._build_extracts_tab())
         self.tab_messages_page = self._scroll_page(self._build_messages_tab())
+        self.tab_orders_page = self._scroll_page(self._build_orders_tab())
         self.tab_copies = self.tab_copies_page
         self.tab_extracts = self.tab_extracts_page
         self.tab_messages = self.tab_messages_page
+        self.tab_orders = self.tab_orders_page
 
         self._tabs.addTab(self.tab_copies_page, "📑  1. Примірники 2/3")
         self._tabs.addTab(self.tab_extracts_page, "📊  2. Розрахунок та витяги")
         self._tabs.addTab(self.tab_messages_page, "💬  3. Повідомлення")
+        self._tabs.addTab(self.tab_orders_page, "📝  4. Накази")
         self._tab_badges: dict[int, Badge] = {}
         for index in range(self._tabs.count()):
             badge = Badge("", "emerald")
@@ -644,6 +648,13 @@ class QtShellMixin:
             template = self.p2_back_page_path.get()
             folder = os.path.dirname(p2_paths[0]) if p2_paths else self.p2_orders_folder.get()
             mode = "Примірник № 2"
+        elif current == 3:
+            # Вкладка наказів рахує не накази в черзі, а складені пункти.
+            items = len(self._order_draft.items) if getattr(self, "_order_draft", None) else 0
+            marked, total = items, items
+            template = self.new_order_template_path.get()
+            folder = self.new_order_out_folder.get()
+            mode = "наказ по особовому складу"
         else:
             marked, total = (copies_marked, copies_total) if from_copies else (orders_marked, orders_total)
             template = self.template_path.get() if current == 1 else self.message_content_template_path.get()

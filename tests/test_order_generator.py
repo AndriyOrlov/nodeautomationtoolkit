@@ -148,7 +148,8 @@ def test_order_and_manual_new_position():
     assert record.target.text.source == MANUAL
     assert str(record.current.text).startswith("КОМАНДИРОМ МЕХАНІЗОВАНОЇ РОТИ")
     assert str(record.basis) == "рапорт від 01.09.2026"
-    assert record.problems == []
+    # Єдине зауваження: ПІБ прийшло з пункту наказу, а там воно у знахідному.
+    assert len(record.problems) == 1 and "знахідному відмінку" in record.problems[0]
 
 
 def test_conflict_between_plan_and_order_is_reported():

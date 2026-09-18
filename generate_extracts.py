@@ -1841,6 +1841,33 @@ class App:
         self.p2_preview_delay = tk.StringVar(value=str(PREVIEW_DEFAULT_DELAY))
         self.last_copy_two_paths: list[str] = []
 
+        # Конфігурація вкладки «Накази» — генератор наказів по особовому складу.
+        # «new_order_» означає наказ, який ми складаємо; «order_signer_» вище —
+        # підписант чужого наказу, з якого робимо витяги.
+        self.new_order_archive_folder = tk.StringVar()
+        self.new_order_index_folder = tk.StringVar()
+        self.new_order_index_force = tk.BooleanVar(value=False)
+        self.new_order_plan_path = tk.StringVar()
+        self.new_order_document_paths: list[str] = []
+        self.new_order_source_summary = tk.StringVar(
+            value="Джерела не обрано — план переміщення або документи"
+        )
+        self.new_order_template_path = tk.StringVar()
+        self.new_order_out_folder = tk.StringVar()
+        self.new_order_executor = tk.StringVar()
+        self.new_order_number = tk.StringVar()
+        self.new_order_date = tk.StringVar()
+        self.new_order_section = tk.StringVar()
+        self.new_order_points = tk.StringVar(value="пункту ___")
+        self.new_order_kind = tk.StringVar(value="осіб офіцерського складу")
+        self.new_order_unit = tk.StringVar()
+        self.new_order_target_unit = tk.StringVar()
+        self.new_order_bases = tk.StringVar()
+        self.new_order_footer_bases = tk.StringVar()
+        self.new_order_signer_position = tk.StringVar()
+        self.new_order_signer_rank = tk.StringVar()
+        self.new_order_signer_name = tk.StringVar()
+
         # Конфігурація вкладки «Повідомлення».
         self.message_cover_template_path = tk.StringVar()
         self.message_content_template_path = tk.StringVar()
@@ -1891,6 +1918,7 @@ class App:
         TAB_COPIES = 0
         TAB_EXTRACTS = 1
         TAB_MESSAGES = 2
+        TAB_ORDERS = 3
 
         # Накази збираються в СПИСОК: перетягнути одразу кілька — звичайна
         # справа, а старий обробник лишав тільки останній файл.
@@ -1924,8 +1952,13 @@ class App:
                         self.log(f"📥 [Drag-and-Drop] Папку результату встановлено: {fpath}")
                 handled_count += 1
             elif fname.endswith((".xlsx", ".xls")):
-                self.excel_path.set(fpath)
-                self.log(f"📥 [Drag-and-Drop] Словник Excel встановлено: {os.path.basename(fpath)}")
+                if current_tab == TAB_ORDERS:
+                    self.new_order_plan_path.set(fpath)
+                    self._refresh_order_sources()
+                    self.log(f"📥 [Drag-and-Drop] План переміщення: {os.path.basename(fpath)}")
+                else:
+                    self.excel_path.set(fpath)
+                    self.log(f"📥 [Drag-and-Drop] Словник Excel встановлено: {os.path.basename(fpath)}")
                 handled_count += 1
             elif fname.endswith(".docx") and not fname.startswith("~$"):
                 if current_tab == TAB_COPIES and ("задн" in fname or "back" in fname or "шаблон" in fname):
@@ -1940,12 +1973,21 @@ class App:
                 elif current_tab == TAB_MESSAGES and ("титул" in fname or "cover" in fname or "шаблон" in fname):
                     self.message_cover_template_path.set(fpath)
                     self.log(f"📥 [Drag-and-Drop] Зразок супроводу встановлено: {os.path.basename(fpath)}")
+                elif current_tab == TAB_ORDERS and ("шаблон" in fname or "template" in fname or "зразок" in fname):
+                    self.new_order_template_path.set(fpath)
+                    self.log(f"📥 [Drag-and-Drop] Шаблон наказу встановлено: {os.path.basename(fpath)}")
                 else:
                     dropped_orders.append(fpath)
                 handled_count += 1
 
         if dropped_orders:
-            if current_tab == TAB_COPIES:
+            if current_tab == TAB_ORDERS:
+                # На вкладці наказів перетягнутий файл — це джерело для пунктів
+                # (подання, витяг, рапорт), а не наказ для обробки.
+                self.new_order_document_paths = [*self.new_order_document_paths, *dropped_orders]
+                self._refresh_order_sources()
+                self.log(f"📥 [Drag-and-Drop] Документів-джерел: {len(dropped_orders)}")
+            elif current_tab == TAB_COPIES:
                 self._set_p2_orders(dropped_orders)
                 self.log_p2(f"📥 [Drag-and-Drop] Наказів для примірників: {len(dropped_orders)}")
             elif current_tab == TAB_MESSAGES:
@@ -2015,6 +2057,21 @@ class App:
                         str(data.get("p2_preview_delay", PREVIEW_DEFAULT_DELAY))
                     )
 
+                    for field in (
+                        "archive_folder", "index_folder", "plan_path", "template_path",
+                        "out_folder", "executor", "number", "date", "section", "unit",
+                        "target_unit", "bases", "footer_bases",
+                        "signer_position", "signer_rank", "signer_name",
+                    ):
+                        value = data.get(f"new_order_{field}")
+                        if value:
+                            getattr(self, f"new_order_{field}").set(value)
+                    for field, default in (("points", "пункту ___"), ("kind", "осіб офіцерського складу")):
+                        getattr(self, f"new_order_{field}").set(data.get(f"new_order_{field}") or default)
+                    self.new_order_document_paths = [
+                        path for path in data.get("new_order_document_paths", []) if os.path.isfile(path)
+                    ]
+
                     self.message_cover_template_path.set(data.get("message_cover_template_path", ""))
                     self.message_content_template_path.set(data.get("message_content_template_path", ""))
                     self.message_out_folder.set(data.get("message_out_folder", ""))
@@ -2050,6 +2107,16 @@ class App:
             "p2_executor": self.p2_executor.get(),
             "p2_preview": self.p2_preview.get(),
             "p2_preview_delay": self.p2_preview_delay.get(),
+            **{
+                f"new_order_{field}": getattr(self, f"new_order_{field}").get()
+                for field in (
+                    "archive_folder", "index_folder", "plan_path", "template_path",
+                    "out_folder", "executor", "number", "date", "section", "points",
+                    "kind", "unit", "target_unit", "bases", "footer_bases",
+                    "signer_position", "signer_rank", "signer_name",
+                )
+            },
+            "new_order_document_paths": list(self.new_order_document_paths),
             "message_cover_template_path": self.message_cover_template_path.get(),
             "message_content_template_path": self.message_content_template_path.get(),
             "message_out_folder": self.message_out_folder.get(),

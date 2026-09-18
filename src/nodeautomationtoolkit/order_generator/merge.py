@@ -22,9 +22,12 @@ from .record import DOCUMENT, MANUAL, ORDER, PLAN, PersonRecord, Position, Value
 #: Пріоритет джерел для кожного поля: перше знайдене непорожнє й перемагає.
 _FIELD_PRIORITY = {
     "rank": (MANUAL, PLAN, DOCUMENT, ORDER),
-    "surname": (MANUAL, ORDER, PLAN, DOCUMENT),
-    "name": (MANUAL, ORDER, PLAN, DOCUMENT),
-    "patronymic": (MANUAL, ORDER, PLAN, DOCUMENT),
+    # ПІБ у пункті наказу стоїть у знахідному («ІВАНЕНКА Олексія Вікторовича»),
+    # а генератор відмінює сам і чекає називний. Тому ПІБ беремо з плану чи
+    # документа, а з наказу — лише коли більше нізвідки (тоді про це пишемо).
+    "surname": (MANUAL, PLAN, DOCUMENT, ORDER),
+    "name": (MANUAL, PLAN, DOCUMENT, ORDER),
+    "patronymic": (MANUAL, PLAN, DOCUMENT, ORDER),
     "ipn": (MANUAL, ORDER, PLAN, DOCUMENT),
     "birth": (MANUAL, ORDER, PLAN, DOCUMENT),
     "education": (MANUAL, ORDER, PLAN, DOCUMENT),
@@ -92,6 +95,11 @@ def build_record(
 
 
 def _check(record: PersonRecord, plan: PersonRecord | None, order: PersonRecord | None) -> None:
+    if record.surname.source == ORDER:
+        record.problems.append(
+            "ПІБ узято з пункту наказу, а там воно у знахідному відмінку "
+            f"(«{record.full_name}») — звірте називний"
+        )
     if not record.target:
         record.problems.append("немає посади, на яку призначається")
     if not record.current:
