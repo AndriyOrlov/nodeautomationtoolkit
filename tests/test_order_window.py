@@ -359,7 +359,6 @@ def test_all_three_kinds_are_offered(shell, unlock):
 def test_dismissal_plan_table_in_the_window(shell, unlock, tmp_path):
     """План звільнення читається за заголовками граф — просто перетягнутий файл."""
     from openpyxl import Workbook
-
     from test_order_table_plan import DISMISSAL_HEADER, DISMISSAL_ROWS
 
     workbook = Workbook()
