@@ -144,7 +144,12 @@ def test_missing_template_names_the_file(tmp_path):
     """
     absent = tmp_path / "зниклий зразок.docx"
 
-    with pytest.raises(FileNotFoundError) as error:
-        copy_template_for_editing(str(absent), str(tmp_path / "result.docx"))
+    with pytest.raises(generator.UserError) as error:
+        copy_template_for_editing(
+            str(absent), str(tmp_path / "result.docx"), label="зразок витягу"
+        )
 
-    assert str(absent) in str(error.value)
+    text = str(error.value)
+    assert str(absent) in text
+    assert "зразок витягу" in text
+    assert "Що зробити:" in text

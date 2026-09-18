@@ -1459,7 +1459,105 @@ def is_path_writable(path: str) -> bool:
         return False
 
 
-def copy_template_for_editing(template_path: str, output_path: str) -> str:
+class UserError(Exception):
+    """Помилка, яку показуємо користувачу простими словами.
+
+    `what` — що саме сталося, `todo` — що з цим робити. Текст складається
+    так, щоб його зрозуміла людина, яка ніколи не відкривала журнал програми:
+    без кодів, без англійських слів, з назвою конкретного файлу.
+    """
+
+    def __init__(self, what: str, todo: str = "", detail: str = ""):
+        self.what = what.strip()
+        self.todo = todo.strip()
+        self.detail = detail.strip()
+        super().__init__(self.what)
+
+    def __str__(self) -> str:
+        parts = [f"Що сталося: {self.what}"]
+        if self.todo:
+            parts.append(f"Що зробити: {self.todo}")
+        if self.detail:
+            parts.append(f"(технічні подробиці: {self.detail})")
+        return "\n".join(parts)
+
+
+# Коди Windows, які трапляються в цій програмі найчастіше. Windows часто
+# повідомляє їх БЕЗ назви файлу («[WinError 2] The system cannot find the
+# file specified»), тому саме тут вони перетворюються на зрозумілий текст.
+_WINDOWS_DRIVE_ERRORS = (21, 53, 67, 1231, 1265)  # диск/мережева тека недоступні
+_WINDOWS_BUSY_ERRORS = (32, 33)                   # файл тримає інша програма
+
+
+def _error_file_name(error: BaseException) -> str:
+    """Назва файлу з помилки, якщо ОС її повідомила."""
+    for attribute in ("filename", "filename2"):
+        value = getattr(error, attribute, None)
+        if value:
+            return str(value)
+    return ""
+
+
+def explain_error(error: BaseException) -> str:
+    """Перекладає будь-який збій на просту мову: що сталося і що робити.
+
+    Показується і у вікні, і в журналі. Технічний текст не викидається —
+    він лишається в кінці, щоб було з чим прийти по допомогу.
+    """
+    if isinstance(error, UserError):
+        return str(error)
+
+    technical = f"{type(error).__name__}: {error}".strip()
+    winerror = getattr(error, "winerror", None)
+    name = _error_file_name(error)
+    named = f"«{os.path.basename(name)}»" if name else "потрібний файл"
+    where = f"\n{name}" if name else ""
+
+    if isinstance(error, FileNotFoundError) or winerror in (2, 3):
+        return str(UserError(
+            f"комп'ютер не знайшов {named} — такого файлу на диску немає." + where,
+            "Файл перейменували, перемістили або видалили. Відкрийте «Зразки та "
+            "реквізити» й виберіть його заново кнопкою «Вибрати», а наказ — "
+            "кнопкою вибору наказу в головному вікні.",
+            technical,
+        ))
+
+    if isinstance(error, PermissionError) or winerror in _WINDOWS_BUSY_ERRORS:
+        return str(UserError(
+            f"файл {named} зараз зайнятий іншою програмою або закритий для запису." + where,
+            "Закрийте цей файл у Word чи Excel (і перевірте, чи не відкритий він "
+            "у вікні попереднього перегляду) і натисніть кнопку ще раз.",
+            technical,
+        ))
+
+    if winerror in _WINDOWS_DRIVE_ERRORS:
+        return str(UserError(
+            "диск або мережева тека, де лежить потрібний файл, зараз недоступні." + where,
+            "Перевірте, чи підключений диск (наприклад, E:) і чи є мережа, "
+            "потім повторіть.",
+            technical,
+        ))
+
+    if type(error).__name__ == "com_error":
+        return str(UserError(
+            "Word не виконав дію: він або зайнятий, або показує власне вікно "
+            "(наприклад, запит на збереження), або його закрили під час роботи.",
+            "Закрийте всі вікна Word, переконайтесь, що жоден документ не чекає "
+            "відповіді, і повторіть. Якщо не допомогло — перезавантажте комп'ютер.",
+            technical,
+        ))
+
+    return str(UserError(
+        "сталася несподівана помилка, і програма зупинила саме цей файл.",
+        "Спробуйте ще раз. Якщо повториться — збережіть текст із журналу "
+        "(нижнє поле вікна) і покажіть його розробнику.",
+        technical,
+    ))
+
+
+def copy_template_for_editing(
+    template_path: str, output_path: str, label: str = "зразок"
+) -> str:
     """Створює робочу копію шаблону з коректним для його вмісту розширенням.
 
     Повертає шлях робочої копії. Якщо він відрізняється від `output_path`,
@@ -1469,10 +1567,11 @@ def copy_template_for_editing(template_path: str, output_path: str) -> str:
         # shutil.copy2 у Windows кидає «[WinError 2] The system cannot find the
         # file specified» БЕЗ назви файлу, а detect_word_extension мовчки
         # проковтує відсутній файл — через це причина збою була невидима.
-        raise FileNotFoundError(
-            f"Не знайдено файл зразка: {template_path}\n"
-            "Можливо, його перейменували, перемістили або диск недоступний — "
-            "виберіть зразок заново у вікні «Зразки та реквізити»."
+        raise UserError(
+            f"немає файлу, який вибраний як {label}:\n{template_path}",
+            "Такого файлу на диску немає: його перейменували, перемістили або "
+            "видалили. Відкрийте «Зразки та реквізити», натисніть «Вибрати» "
+            f"біля рядка «{label}» і вкажіть файл заново.",
         )
     real_ext = detect_word_extension(template_path)
     if real_ext.lower() == os.path.splitext(output_path)[1].lower():
@@ -2939,9 +3038,11 @@ class App:
         # Якщо результат уже відкритий у Word, зберегти його неможливо.
         # Перевіряємо це ДО всієї роботи й повідомляємо зрозуміло.
         if not is_path_writable(output_path):
-            raise RuntimeError(
-                f"Файл «{os.path.basename(output_path)}» відкритий в іншій програмі "
-                "(найімовірніше у Word). Закрийте його та повторіть генерацію."
+            raise UserError(
+                f"файл «{os.path.basename(output_path)}» уже відкритий — "
+                "найімовірніше у Word, з минулого разу.",
+                "Закрийте це вікно Word і натисніть кнопку ще раз. "
+                "Поки файл відкритий, програма не може його перезаписати.",
             )
 
         # Робоча копія шаблону створюється у тимчасовій папці, а не за
@@ -2952,7 +3053,9 @@ class App:
         temp_dir = os.path.join(os.path.dirname(os.path.abspath(output_path)), "_nat_temp")
         os.makedirs(temp_dir, exist_ok=True)
         working_path = copy_template_for_editing(
-            template_path, os.path.join(temp_dir, os.path.basename(output_path))
+            template_path,
+            os.path.join(temp_dir, os.path.basename(output_path)),
+            label="шаблон повідомлення",
         )
         doc = word.Documents.Open(os.path.abspath(working_path), ReadOnly=False)
         try:
@@ -3248,8 +3351,9 @@ class App:
                 + (f"\nУВАГА: не вмістилося адресатів: {recipient_overflow}" if recipient_overflow else ""),
             )
         except Exception as error:
-            self.log(f"ПОМИЛКА повідомлень: {error}")
-            messagebox.showerror("Помилка повідомлень", str(error))
+            explanation = explain_error(error)
+            self.log(f"ПОМИЛКА повідомлень:\n{explanation}")
+            messagebox.showerror("Повідомлення не створені", explanation)
         finally:
             if source_doc is not None:
                 try:
@@ -3712,10 +3816,16 @@ class App:
         details = "\n".join(f"• {item}" for item in missing)
         self.log("ПОМИЛКА: не знайдено обраних файлів:\n" + details)
         messagebox.showwarning(
-            "Файл не знайдено",
-            "Не знайдено файл(и), обрані для роботи:\n\n"
+            "Немає потрібного файлу",
+            "Що сталося: файл(и), вибрані для роботи, не лежать там, де вказано:\n\n"
             f"{details}\n\n"
-            "Виберіть їх заново у вікні «Зразки та реквізити».",
+            "Найчастіше файл перейменували, перемістили або він на диску, "
+            "який зараз не підключений.\n\n"
+            "Що зробити:\n"
+            "1. Відкрийте «Зразки та реквізити».\n"
+            "2. Натисніть «Вибрати» біля рядка, названого вище.\n"
+            "3. Вкажіть потрібний файл і збережіть вікно.\n"
+            "4. Натисніть кнопку генерації ще раз.",
         )
 
     def _set_extract_action_buttons_state(self, state):
@@ -3884,8 +3994,10 @@ class App:
                 handler()
             except Exception as error:
                 traceback.print_exc()
-                self.log(f"  ПОМИЛКА ({name}): {error}")
-                failures.append((name, str(error)))
+                explanation = explain_error(error)
+                self.log(f"  ПОМИЛКА під час обробки «{name}»:\n    "
+                         + explanation.replace("\n", "\n    "))
+                failures.append((name, explanation))
         return failures
 
     def _report_batch_result(
@@ -3897,14 +4009,18 @@ class App:
             messagebox.showinfo("Успіх", f"{title}: успішно оброблено {succeeded} з {total} файл(ів).")
             return
 
-        details = "\n".join(f"• {name}: {error}" for name, error in failures[:10])
+        details = "\n\n".join(
+            f"Наказ «{name}» — не оброблено.\n{error}" for name, error in failures[:10]
+        )
         if len(failures) > 10:
-            details += f"\n… ще {len(failures) - 10}"
+            details += f"\n\n… і ще {len(failures) - 10} файл(ів) з такими самими збоями."
         self.log(f"\nНе вдалося виконати {action_name} для {len(failures)} файл(ів).")
         messagebox.showwarning(
             title,
-            f"Оброблено {succeeded} з {total} файл(ів).\n\n"
-            f"Не вдалося ({len(failures)}):\n{details}",
+            f"Готово: {succeeded} з {total} файл(ів). Не вийшло: {len(failures)}.\n\n"
+            "Нижче названо наказ, на якому програма зупинилась, і причину. "
+            "Назва наказу — це те, що оброблялося, а не обов'язково те, чого бракує.\n\n"
+            f"{details}",
         )
 
     def _log_routing_module(self):
@@ -4293,9 +4409,11 @@ class App:
             busy_candidates.append(management_out_file)
         for busy_candidate in busy_candidates:
             if busy_candidate and not is_path_writable(busy_candidate):
-                raise RuntimeError(
-                    f"Файл «{os.path.basename(busy_candidate)}» відкритий в іншій програмі "
-                    "(найімовірніше у Word). Закрийте його та повторіть генерацію."
+                raise UserError(
+                    f"файл витягів «{os.path.basename(busy_candidate)}» уже відкритий — "
+                    "найімовірніше у Word, з минулого разу.",
+                    "Закрийте це вікно Word і натисніть кнопку ще раз. "
+                    "Поки файл відкритий, програма не може записати в нього нові витяги.",
                 )
         temp_dir = os.path.join(self.out_folder.get(), "_nat_temp")
         os.makedirs(temp_dir, exist_ok=True)
@@ -4819,7 +4937,9 @@ class App:
                 # відповідати реальному вмісту шаблону (він може бути у форматі
                 # Word 97-2003), інакше Word відмовиться її відкрити.
                 temp_path = copy_template_for_editing(
-                    template_path, os.path.join(temp_dir, f"extract_{idx:04d}.docx")
+                    template_path,
+                    os.path.join(temp_dir, f"extract_{idx:04d}.docx"),
+                    label="зразок витягу",
                 )
                 doc = word.Documents.Open(os.path.abspath(temp_path), ReadOnly=False)
                 # Текст шаблону читаємо один раз: більшості з тих двох десятків
@@ -6026,7 +6146,9 @@ class App:
                     # Заготовка може бути у форматі Word 97-2003, тож робоча
                     # копія зберігає реальне розширення, а .docx дає SaveAs2.
                     working_copy = copy_template_for_editing(
-                        back_page_abs, os.path.join(target_dir, "_nat_tmpl.docx")
+                        back_page_abs,
+                        os.path.join(target_dir, "_nat_tmpl.docx"),
+                        label="заготовка примірника",
                     )
                     # Під кінець великого пакета Word може тимчасово відхиляти
                     # виклики — такий збій не є помилкою даних, тому повторюємо.
@@ -6071,8 +6193,10 @@ class App:
                 except Exception as order_error:
                     # Збій одного наказу не має зривати весь пакет.
                     traceback.print_exc()
-                    self.log_p2(f"  ПОМИЛКА ({fname}): {order_error}")
-                    failed_orders.append((fname, str(order_error)))
+                    explanation = explain_error(order_error)
+                    self.log_p2(f"  ПОМИЛКА під час обробки «{fname}»:\n    "
+                                + explanation.replace("\n", "\n    "))
+                    failed_orders.append((fname, explanation))
                     try:
                         if doc is not None:
                             doc.Close(False)
@@ -6104,9 +6228,15 @@ class App:
             self.log_p2(f"\n🎉 Завершено! Успішно сформовано {total_orders} примірник(ів) № 2.")
 
             if failed_orders:
-                details = "\n".join(f"• {name}: {error}" for name, error in failed_orders[:10])
+                details = "\n\n".join(
+                    f"Наказ «{name}» — примірник не створено.\n{error}"
+                    for name, error in failed_orders[:10]
+                )
                 if len(failed_orders) > 10:
-                    details += f"\n… ще {len(failed_orders) - 10}"
+                    details += (
+                        f"\n\n… і ще {len(failed_orders) - 10} наказ(ів) "
+                        "з такими самими збоями."
+                    )
                 self.log_p2(f"\nНе вдалося сформувати примірники: {len(failed_orders)} шт.")
                 messagebox.showwarning(
                     "Примірники сформовано частково",
@@ -6124,14 +6254,15 @@ class App:
             # Раніше винятку не було де перехопити: таблиця лишалась порожньою,
             # а користувач бачив лише traceback у консолі.
             traceback.print_exc()
-            self.log_p2(f"\n❌ ПОМИЛКА пакетної генерації: {error}")
+            explanation = explain_error(error)
+            self.log_p2(f"\n❌ ПОМИЛКА пакетної генерації:\n{explanation}")
             for rec in created_records:
                 self.p2_tree.insert("", tk.END, values=rec)
             if created_records:
                 self._set_copy_two_sources([record[-1] for record in created_records])
             messagebox.showerror(
-                "Помилка формування примірників",
-                f"Пакет перервано: {error}\n\n"
+                "Примірники сформовано не до кінця",
+                f"{explanation}\n\n"
                 f"Встигли сформувати: {len(created_records)} примірник(ів).",
             )
         finally:
