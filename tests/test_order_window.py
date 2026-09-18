@@ -1,7 +1,8 @@
-"""Вкладка «Накази» у вікні генератора: поля, перетягування, чотири кроки.
+"""Вікно «Накази»: замок паролем, поля, чотири кроки.
 
-Вікно будується справжнє (offscreen), Word не запускається, конфіг користувача
-не читається — усі файли вигадані, у тимчасовій теці.
+Генератор наказів схований за кнопкою «🔒 Накази» й тимчасовим паролем, тож
+тести спершу відмикають вікно. Word не запускається, конфіг користувача не
+читається — усі файли вигадані, у тимчасовій теці.
 """
 
 from __future__ import annotations
@@ -74,6 +75,15 @@ def shell(legacy, monkeypatch):
     QApplication.processEvents()
 
 
+@pytest.fixture
+def unlock(shell, monkeypatch):
+    """Відмикає вікно наказів тимчасовим паролем."""
+    from nodeautomationtoolkit.generator_qt.orders_window import ORDERS_PASSWORD
+
+    monkeypatch.setattr(type(shell), "ask_orders_password", lambda self: ORDERS_PASSWORD)
+    return ORDERS_PASSWORD
+
+
 def _edits_with_text(container, text):
     return [edit for edit in container.findChildren(QLineEdit) if edit.text() == text]
 
@@ -92,42 +102,58 @@ def _plan_file(tmp_path) -> Path:
     return path
 
 
-def test_orders_tab_is_the_fourth_one(shell):
-    assert shell.notebook.index(shell.tab_orders_page) == 3
-    assert "накази" in shell._tabs.tabText(3).casefold()
+def test_orders_are_not_a_tab_and_need_a_password(shell, monkeypatch):
+    assert shell._tabs.count() == 3
+    assert all("наказ" not in shell._tabs.tabText(i).casefold() for i in range(3))
+
+    monkeypatch.setattr(type(shell), "ask_orders_password", lambda self: "1234")
+    assert shell.open_orders_window() is None
+    assert getattr(shell, "_orders_window", None) is None
 
 
-def test_order_template_field_is_on_the_tab(shell):
+def test_the_right_password_opens_the_window(shell, unlock):
+    window = shell.open_orders_window()
+    assert window is not None and window.isVisible()
+    # Другого разу пароль уже не питають.
+    shell.ask_orders_password = lambda: ""
+    assert shell.open_orders_window() is window
+
+
+def test_order_fields_are_in_the_window(shell, unlock):
+    page = shell.open_orders_window()
     shell.new_order_template_path.set("C:/Зразки/Шаблон наказу.docx")
     shell.new_order_executor.set("Виконавець наказу")
     shell.new_order_out_folder.set("C:/Накази")
+    shell.new_order_archive_folder.set("C:/Архів наказів")
 
-    assert _edits_with_text(shell.tab_orders_page, "C:/Зразки/Шаблон наказу.docx")
-    assert _edits_with_text(shell.tab_orders_page, "Виконавець наказу")
-    assert _edits_with_text(shell.tab_orders_page, "C:/Накази")
+    assert _edits_with_text(page, "C:/Зразки/Шаблон наказу.docx")
+    assert _edits_with_text(page, "Виконавець наказу")
+    assert _edits_with_text(page, "C:/Накази")
+    assert _edits_with_text(page, "C:/Архів наказів")
 
 
-def test_dropping_a_plan_on_the_orders_tab(shell, tmp_path):
+def test_orders_folder_can_be_picked(shell, unlock, tmp_path, monkeypatch):
+    shell.open_orders_window()
+    monkeypatch.setattr(
+        compat.FileDialogBridge, "askdirectory", staticmethod(lambda **_k: str(tmp_path))
+    )
+    shell.select_order_archive_folder()
+    assert shell.new_order_archive_folder.get() == str(tmp_path)
+    # Тека індексу пропонується сама, щоб її не шукали вручну.
+    assert shell.new_order_index_folder.get().endswith("order_index")
+
+
+def test_dropping_a_plan_into_the_window(shell, unlock, tmp_path):
+    shell.open_orders_window()
     plan = _plan_file(tmp_path)
-    shell.notebook.select(shell.tab_orders_page)
-    shell.handle_drag_and_drop([str(plan)])
+    shell.accept_order_source_path(str(plan))
 
     assert shell.new_order_plan_path.get() == str(plan)
     assert "план" in shell.new_order_source_summary.get().casefold()
 
 
-def test_dropping_a_template_on_the_orders_tab(shell, tmp_path):
-    from docx import Document
-
-    template = tmp_path / "Шаблон наказу.docx"
-    Document().save(str(template))
-    shell.notebook.select(shell.tab_orders_page)
-    shell.handle_drag_and_drop([str(template)])
-
-    assert shell.new_order_template_path.get() == str(template)
-
-
-def test_four_steps_make_a_document(shell, tmp_path):
+def test_four_steps_make_a_document(shell, unlock, tmp_path):
+    shell.open_orders_window()
     shell.new_order_plan_path.set(str(_plan_file(tmp_path)))
     shell.new_order_points.set("пункту 45")
     shell.new_order_number.set("525")
@@ -150,7 +176,8 @@ def test_four_steps_make_a_document(shell, tmp_path):
     assert [path.name for path in made] == ["Наказ № 525 від 17.09.2026.docx"]
 
 
-def test_assembly_without_a_draft_says_so(shell, tmp_path):
+def test_assembly_without_a_draft_says_so(shell, unlock, tmp_path):
+    shell.open_orders_window()
     shell.new_order_out_folder.set(str(tmp_path))
     shell.run_order_assemble()
     assert not list(Path(tmp_path).glob("*.docx"))

@@ -1918,7 +1918,6 @@ class App:
         TAB_COPIES = 0
         TAB_EXTRACTS = 1
         TAB_MESSAGES = 2
-        TAB_ORDERS = 3
 
         # Накази збираються в СПИСОК: перетягнути одразу кілька — звичайна
         # справа, а старий обробник лишав тільки останній файл.
@@ -1952,13 +1951,8 @@ class App:
                         self.log(f"📥 [Drag-and-Drop] Папку результату встановлено: {fpath}")
                 handled_count += 1
             elif fname.endswith((".xlsx", ".xls")):
-                if current_tab == TAB_ORDERS:
-                    self.new_order_plan_path.set(fpath)
-                    self._refresh_order_sources()
-                    self.log(f"📥 [Drag-and-Drop] План переміщення: {os.path.basename(fpath)}")
-                else:
-                    self.excel_path.set(fpath)
-                    self.log(f"📥 [Drag-and-Drop] Словник Excel встановлено: {os.path.basename(fpath)}")
+                self.excel_path.set(fpath)
+                self.log(f"📥 [Drag-and-Drop] Словник Excel встановлено: {os.path.basename(fpath)}")
                 handled_count += 1
             elif fname.endswith(".docx") and not fname.startswith("~$"):
                 if current_tab == TAB_COPIES and ("задн" in fname or "back" in fname or "шаблон" in fname):
@@ -1973,21 +1967,12 @@ class App:
                 elif current_tab == TAB_MESSAGES and ("титул" in fname or "cover" in fname or "шаблон" in fname):
                     self.message_cover_template_path.set(fpath)
                     self.log(f"📥 [Drag-and-Drop] Зразок супроводу встановлено: {os.path.basename(fpath)}")
-                elif current_tab == TAB_ORDERS and ("шаблон" in fname or "template" in fname or "зразок" in fname):
-                    self.new_order_template_path.set(fpath)
-                    self.log(f"📥 [Drag-and-Drop] Шаблон наказу встановлено: {os.path.basename(fpath)}")
                 else:
                     dropped_orders.append(fpath)
                 handled_count += 1
 
         if dropped_orders:
-            if current_tab == TAB_ORDERS:
-                # На вкладці наказів перетягнутий файл — це джерело для пунктів
-                # (подання, витяг, рапорт), а не наказ для обробки.
-                self.new_order_document_paths = [*self.new_order_document_paths, *dropped_orders]
-                self._refresh_order_sources()
-                self.log(f"📥 [Drag-and-Drop] Документів-джерел: {len(dropped_orders)}")
-            elif current_tab == TAB_COPIES:
+            if current_tab == TAB_COPIES:
                 self._set_p2_orders(dropped_orders)
                 self.log_p2(f"📥 [Drag-and-Drop] Наказів для примірників: {len(dropped_orders)}")
             elif current_tab == TAB_MESSAGES:

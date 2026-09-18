@@ -1,4 +1,4 @@
-"""Вкладка «Накази» — генератор наказів по особовому складу.
+"""Вікно «Накази» — генератор наказів по особовому складу.
 
 Чотири кроки в тому самому порядку, що й у пакеті `order_generator`:
 
@@ -10,6 +10,11 @@
 Логіка лежить у `order_generator`; тут лише інтерфейс і виклики. Поле
 «Шаблон наказу» зберігається в конфіг разом з рештою полів; поки шаблону
 немає, збірка робить чистий аркуш за геометрією додатка 53.
+
+Генератор ще в роботі, тому в головному вікні він не вкладкою, а окремим
+вікном за кнопкою «🔒 Накази» і тимчасовим паролем (рішення користувача
+18.09.2026): у зібраній програмі ним поки не користуються. Це замок від
+випадкового запуску, а не захист даних.
 """
 
 from __future__ import annotations
@@ -17,7 +22,16 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from PySide6.QtWidgets import QGridLayout, QTreeWidgetItem, QWidget
+from PySide6.QtWidgets import (
+    QFrame,
+    QGridLayout,
+    QInputDialog,
+    QLineEdit,
+    QMainWindow,
+    QScrollArea,
+    QTreeWidgetItem,
+    QWidget,
+)
 
 from . import compat
 from .widgets import (
@@ -47,12 +61,56 @@ DOCUMENT_FILETYPES = [
 ]
 TEMPLATE_FILETYPES = [("Документ Word", "*.docx"), ("Усі файли", "*.*")]
 
+#: Тимчасовий пароль до вікна наказів (генератор у роботі). Це не захист
+#: даних, а замок від випадкового запуску в зібраній програмі.
+ORDERS_PASSWORD = "2281488"
 
-class OrdersTabMixin:
-    """Інтерфейс і дії вкладки «Накази». Домішується до `QtShellMixin`."""
+
+class OrdersWindow(QMainWindow):
+    """Окреме вікно генератора наказів."""
+
+    def __init__(self, page: QWidget, parent: QWidget | None = None):
+        super().__init__(parent)
+        self.setWindowTitle("Генератор наказів по особовому складу (у роботі)")
+        scroll = QScrollArea()
+        scroll.setObjectName("TabScroll")
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setWidget(page)
+        self.setCentralWidget(scroll)
+        self.resize(1240, 920)
+
+
+class OrdersWindowMixin:
+    """Інтерфейс і дії вікна «Накази». Домішується до `QtShellMixin`."""
+
+    # ── Замок ────────────────────────────────────────────────────────────
+    def ask_orders_password(self) -> str:
+        """Питає пароль; окремим методом, щоб тести не відкривали модальне вікно."""
+        value, accepted = QInputDialog.getText(
+            self.main_window,
+            "Генератор наказів",
+            "Генератор наказів ще в роботі. Введіть пароль:",
+            QLineEdit.EchoMode.Password,
+        )
+        return value if accepted else ""
+
+    def open_orders_window(self):
+        """Відкриває вікно наказів після пароля; у межах запуску питає один раз."""
+        if not getattr(self, "_orders_unlocked", False):
+            if self.ask_orders_password().strip() != ORDERS_PASSWORD:
+                self.log("Генератор наказів ще в роботі: пароль не підійшов.")
+                return
+            self._orders_unlocked = True
+        if getattr(self, "_orders_window", None) is None:
+            self._orders_window = OrdersWindow(self._build_orders_page(), self.main_window)
+        self._orders_window.show()
+        self._orders_window.raise_()
+        self._orders_window.activateWindow()
+        return self._orders_window
 
     # ── Побудова ─────────────────────────────────────────────────────────
-    def _build_orders_tab(self) -> QWidget:
+    def _build_orders_page(self) -> QWidget:
         page, layout = self._page()
         self._order_records = []
         self._order_draft = None
