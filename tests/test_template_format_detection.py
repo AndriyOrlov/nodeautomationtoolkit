@@ -134,3 +134,17 @@ def test_copy_does_not_modify_original_template(tmp_path):
     copy_template_for_editing(str(template), str(output))
 
     assert template.read_bytes() == _OLE2_SIGNATURE
+
+
+def test_missing_template_names_the_file(tmp_path):
+    """Зниклий зразок має називати себе, а не «[WinError 2]» без шляху.
+
+    shutil.copy2 у Windows кидає FileNotFoundError БЕЗ назви файлу, тож
+    користувач бачив лише код помилки й не знав, якого саме файлу немає.
+    """
+    absent = tmp_path / "зниклий зразок.docx"
+
+    with pytest.raises(FileNotFoundError) as error:
+        copy_template_for_editing(str(absent), str(tmp_path / "result.docx"))
+
+    assert str(absent) in str(error.value)

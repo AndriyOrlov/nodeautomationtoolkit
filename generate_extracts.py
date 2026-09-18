@@ -1465,6 +1465,15 @@ def copy_template_for_editing(template_path: str, output_path: str) -> str:
     Повертає шлях робочої копії. Якщо він відрізняється від `output_path`,
     викликач має після `SaveAs2` прибрати проміжний файл.
     """
+    if not os.path.isfile(template_path):
+        # shutil.copy2 у Windows кидає «[WinError 2] The system cannot find the
+        # file specified» БЕЗ назви файлу, а detect_word_extension мовчки
+        # проковтує відсутній файл — через це причина збою була невидима.
+        raise FileNotFoundError(
+            f"Не знайдено файл зразка: {template_path}\n"
+            "Можливо, його перейменували, перемістили або диск недоступний — "
+            "виберіть зразок заново у вікні «Зразки та реквізити»."
+        )
     real_ext = detect_word_extension(template_path)
     if real_ext.lower() == os.path.splitext(output_path)[1].lower():
         working_path = output_path
@@ -3683,6 +3692,32 @@ class App:
     # =========================================================================
     # ДІЇ: РОЗРАХУНОК ТА ВИТЯГИ
     # =========================================================================
+    def _missing_selected_files(self, *entries: tuple[str, str]) -> list[str]:
+        """Перелік «підпис: шлях» для обраних файлів, яких немає на диску.
+
+        Шляхи зберігаються в config.json, тож між запусками файл можуть
+        перейменувати, перемістити або лишити на відключеному диску. Без цієї
+        перевірки генерація доходить аж до копіювання зразка й падає з
+        «[WinError 2] The system cannot find the file specified» — уже після
+        розбору наказу й запису контрольних таблиць.
+        """
+        return [
+            f"{label}: {path}"
+            for label, path in entries
+            if path and not os.path.isfile(path)
+        ]
+
+    def _report_missing_files(self, missing: list[str]) -> None:
+        """Називає конкретні відсутні файли — і в журналі, і у вікні."""
+        details = "\n".join(f"• {item}" for item in missing)
+        self.log("ПОМИЛКА: не знайдено обраних файлів:\n" + details)
+        messagebox.showwarning(
+            "Файл не знайдено",
+            "Не знайдено файл(и), обрані для роботи:\n\n"
+            f"{details}\n\n"
+            "Виберіть їх заново у вікні «Зразки та реквізити».",
+        )
+
     def _set_extract_action_buttons_state(self, state):
         """Разом блокує дії вкладки, щоб два пакети не стартували паралельно."""
         for name in ("btn_calc", "btn_extracts", "btn_management_extracts"):
@@ -3698,6 +3733,11 @@ class App:
                 "Помилка",
                 "Виберіть словник Excel і хоча б один наказ або примірник № 2.",
             )
+            return
+
+        missing = self._missing_selected_files(("Словник Excel", self.excel_path.get()))
+        if missing:
+            self._report_missing_files(missing)
             return
 
         self._set_extract_action_buttons_state(DISABLED)
@@ -3728,6 +3768,14 @@ class App:
                 "Помилка",
                 "Виберіть словник Excel, шаблон витягу і хоча б один наказ або примірник № 2.",
             )
+            return
+
+        missing = self._missing_selected_files(
+            ("Словник Excel", self.excel_path.get()),
+            ("Зразок витягу", self.template_path.get()),
+        )
+        if missing:
+            self._report_missing_files(missing)
             return
 
         self._set_extract_action_buttons_state(DISABLED)
@@ -3785,6 +3833,15 @@ class App:
                 "Для повного циклу потрібні: заготовка примірника, словник Excel і зразок витягу.\n\n"
                 "Заповніть їх у вікні «Зразки та реквізити».",
             )
+            return
+
+        missing = self._missing_selected_files(
+            ("Словник Excel", self.excel_path.get()),
+            ("Зразок витягу", self.template_path.get()),
+            ("Заготовка примірника (остання сторінка)", self.p2_back_page_path.get()),
+        )
+        if missing:
+            self._report_missing_files(missing)
             return
 
         self._batch_running = True
