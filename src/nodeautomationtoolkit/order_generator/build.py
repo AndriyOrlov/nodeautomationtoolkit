@@ -175,7 +175,7 @@ def _find_content_paragraph(document):
     return None
 
 
-def _new_document() -> "Document":
+def _new_document() -> Document:
     document = Document()
     section = document.sections[0]
     section.left_margin, section.right_margin = Cm(2.0), Cm(1.0)

@@ -19,13 +19,18 @@ from nodeautomationtoolkit.order_generator.build import (  # noqa: E402
     content_lines,
     order_filename,
 )
-from nodeautomationtoolkit.order_generator.check import ERROR, WARNING, check_draft  # noqa: E402
+from nodeautomationtoolkit.order_generator.check import ERROR, check_draft  # noqa: E402
 from nodeautomationtoolkit.order_generator.compose import (  # noqa: E402
     OrderParams,
     compose_order,
     numbered_lines,
 )
-from nodeautomationtoolkit.order_generator.record import PLAN, PersonRecord, Position, Value  # noqa: E402
+from nodeautomationtoolkit.order_generator.record import (  # noqa: E402
+    PLAN,
+    PersonRecord,
+    Position,
+    Value,
+)
 
 NBSP = " "
 

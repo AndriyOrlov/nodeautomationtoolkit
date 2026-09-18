@@ -22,14 +22,13 @@ if str(PROJECT_ROOT / "src") not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
 from PySide6.QtWidgets import QApplication, QLineEdit  # noqa: E402
+from test_order_pipeline import PLAN_HEADER, PLAN_ROWS  # noqa: E402
 
 from nodeautomationtoolkit.generator_qt import compat  # noqa: E402
 from nodeautomationtoolkit.generator_qt.main_window import (  # noqa: E402
     create_qt_app_class,
     install_qt_bridge,
 )
-
-from test_order_pipeline import PLAN_HEADER, PLAN_ROWS  # noqa: E402
 
 
 @pytest.fixture(scope="module")

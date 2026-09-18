@@ -17,9 +17,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable
 
 from ..order_index.store import IndexSummary, build_index, find_person_items
 from . import merge, sources

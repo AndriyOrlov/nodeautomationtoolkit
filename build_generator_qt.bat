@@ -61,11 +61,15 @@ rem resolves relative ones against the spec folder, not the project root.
   --paths "%ROOT%src" ^
   --collect-submodules nodeautomationtoolkit.builtin_nodes ^
   --collect-submodules nodeautomationtoolkit.generator_qt ^
+  --collect-submodules nodeautomationtoolkit.order_generator ^
+  --collect-submodules nodeautomationtoolkit.order_index ^
   --collect-all docx ^
   --hidden-import win32timezone ^
   --add-data "%ROOT%src\nodeautomationtoolkit\generator_qt\icons;nodeautomationtoolkit\generator_qt\icons" ^
   --add-data "%ROOT%src\nodeautomationtoolkit\personnel\dictionaries;nodeautomationtoolkit\personnel\dictionaries" ^
   --add-data "%ROOT%src\nodeautomationtoolkit\generator_qt\instruction.md;nodeautomationtoolkit\generator_qt" ^
+  --add-data "%ROOT%src\nodeautomationtoolkit\order_index\positions_all.csv;nodeautomationtoolkit\order_index" ^
+  --add-data "%ROOT%src\nodeautomationtoolkit\order_index\unit_markers.txt;nodeautomationtoolkit\order_index" ^
   "%ROOT%generate_extracts_qt.py"
 if errorlevel 1 goto :failed
 
