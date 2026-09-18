@@ -54,6 +54,9 @@ DOCUMENT_KINDS: tuple[tuple[str, tuple[str | tuple[str, ...], ...]], ...] = (
     ("перелік посад", ("перелік посад",)),
 )
 
+#: Скани й PDF: читаються локально через Tesseract (`ocr.py`).
+OCR_SUFFIXES = {".pdf", ".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp"}
+
 _IPN_RE = re.compile(r"(?<!\d)(\d{10})(?!\d)")
 # Дата народження бралася як будь-яка дата в тексті, і в подання потрапляла дата
 # наказу з рядка вище. Тепер поруч має бути ознака народження.
@@ -156,6 +159,12 @@ def read_text(path: str | Path, word_reader=None) -> str:
                 if cells:
                     lines.append(" | ".join(cells))
         return "\n".join(lines)
+    if suffix in OCR_SUFFIXES:
+        # Скани й PDF читаються локально через Tesseract (PROJECT_RULES 1.1).
+        # Немає Tesseract — повідомлення про це, а не порожній текст.
+        from .ocr import ocr_file
+
+        return ocr_file(path)
     if suffix in {".docx", ".docm"} or zipfile.is_zipfile(path):
         return "\n".join(read_docx_paragraphs(path))
     if word_reader is not None:

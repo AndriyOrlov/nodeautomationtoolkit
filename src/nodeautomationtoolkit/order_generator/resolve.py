@@ -72,13 +72,21 @@ def record_from_document(facts: DocumentFacts, person: PersonMention) -> PersonR
     return record
 
 
-def resolve_document(path: str | Path, index_folder: str | Path | None = None, limit: int = 5) -> ResolvedDocument:
+def resolve_document(
+    path: str | Path,
+    index_folder: str | Path | None = None,
+    limit: int = 5,
+    action: str = merge.APPOINTMENT,
+) -> ResolvedDocument:
     facts = read_document(path)
-    return resolve_facts(facts, index_folder, limit)
+    return resolve_facts(facts, index_folder, limit, action)
 
 
 def resolve_facts(
-    facts: DocumentFacts, index_folder: str | Path | None = None, limit: int = 5
+    facts: DocumentFacts,
+    index_folder: str | Path | None = None,
+    limit: int = 5,
+    action: str = merge.APPOINTMENT,
 ) -> ResolvedDocument:
     result = ResolvedDocument(facts=facts)
     for person in facts.people:
@@ -89,7 +97,7 @@ def resolve_facts(
                 index_folder, ipn=person.ipn or facts.first("ipn"), full_name=person.full_name, limit=limit
             )
         order_record = sources.from_order_item(previous[0]) if previous else None
-        record = merge.build_record(document=document_record, order=order_record)
+        record = merge.build_record(document=document_record, order=order_record, action=action)
         if order_record is None and index_folder:
             record.notes.append("У наказах особу не знайдено — усе взято з документа")
         _verify(record, document_record, previous)

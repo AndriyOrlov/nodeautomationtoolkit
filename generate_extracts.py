@@ -1867,6 +1867,11 @@ class App:
         self.new_order_date = tk.StringVar()
         self.new_order_section = tk.StringVar()
         self.new_order_points = tk.StringVar(value="пункту ___")
+        # Вид наказу: «призначення» (за замовчуванням) або «звільнення».
+        self.new_order_action = tk.StringVar(value="призначення")
+        self.new_order_law_points = tk.StringVar(value="пункту ___ частини ___ статті 26")
+        # Особи, введені вручну. У конфіг НЕ пишуться: там ПІБ і РНОКПП.
+        self.new_order_manual_people: list[dict[str, str]] = []
         self.new_order_kind = tk.StringVar(value="осіб офіцерського складу")
         self.new_order_unit = tk.StringVar()
         self.new_order_target_unit = tk.StringVar()
@@ -2054,12 +2059,16 @@ class App:
                         "archive_folder", "index_folder", "plan_path", "template_path",
                         "out_folder", "executor", "number", "date", "section", "unit",
                         "target_unit", "bases", "footer_bases",
-                        "signer_position", "signer_rank", "signer_name",
+                        "signer_position", "signer_rank", "signer_name", "law_points",
                     ):
                         value = data.get(f"new_order_{field}")
                         if value:
                             getattr(self, f"new_order_{field}").set(value)
-                    for field, default in (("points", "пункту ___"), ("kind", "осіб офіцерського складу")):
+                    for field, default in (
+                        ("points", "пункту ___"),
+                        ("kind", "осіб офіцерського складу"),
+                        ("action", "призначення"),
+                    ):
                         getattr(self, f"new_order_{field}").set(data.get(f"new_order_{field}") or default)
                     self.new_order_document_paths = [
                         path for path in data.get("new_order_document_paths", []) if os.path.isfile(path)
@@ -2107,6 +2116,7 @@ class App:
                     "out_folder", "executor", "number", "date", "section", "points",
                     "kind", "unit", "target_unit", "bases", "footer_bases",
                     "signer_position", "signer_rank", "signer_name",
+                    "action", "law_points",
                 )
             },
             "new_order_document_paths": list(self.new_order_document_paths),

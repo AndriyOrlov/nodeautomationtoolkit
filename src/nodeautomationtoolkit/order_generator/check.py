@@ -16,9 +16,9 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
-from ..personnel import declension
+from ..personnel import declension, dismissal
 from ..personnel.ipn import check_ipn
-from .compose import OrderDraft, OrderItem
+from .compose import DISMISSAL, OrderDraft, OrderItem
 
 ERROR = "помилка"
 WARNING = "увага"
@@ -66,10 +66,49 @@ def _add(result: CheckResult, level: str, where: str, person: str, what: str, ho
     result.problems.append(Problem(level, where, person, what, how))
 
 
-def _check_person(result: CheckResult, item: OrderItem, folder: str) -> None:
+def _check_dismissal(result: CheckResult, item: OrderItem, folder: str) -> None:
+    """Те, без чого пункт про звільнення неповний (зразки додатка 53)."""
     record = item.record
     where = f"Пункт {item.number}"
     person = record.full_name or "особа без ПІБ"
+
+    if not record.dismissal:
+        _add(
+            result, ERROR, where, person,
+            "не вказано підпункт, за яким звільняється",
+            "Оберіть підставу зі статті 26 Закону (довідник підстав звільнення).",
+        )
+    elif not dismissal.find_ground(str(record.dismissal), folder or None):
+        _add(
+            result, ERROR, where, person,
+            f"підстави «{record.dismissal}» немає в довіднику підстав звільнення",
+            "Впишіть підпункт так, як у довіднику («1.а», «б»), або додайте рядок у довідник.",
+        )
+    if not record.service_calendar:
+        _add(
+            result, WARNING, where, person,
+            "немає календарної вислуги років",
+            "У зразках вона є в кожному пункті про звільнення.",
+        )
+    if not record.registration:
+        _add(
+            result, WARNING, where, person,
+            "не вказано ТЦК, куди особа стає на військовий облік",
+            "Додайте «Підлягає направленню на військовий облік до …».",
+        )
+    if not record.uniform:
+        _add(
+            result, WARNING, where, person,
+            "не вказано право носіння військової форми одягу",
+            "Напишіть «так» або «ні» — рядок про форму є в кожному зразку.",
+        )
+
+
+def _check_person(result: CheckResult, item: OrderItem, folder: str, action: str = "") -> None:
+    record = item.record
+    where = f"Пункт {item.number}"
+    person = record.full_name or "особа без ПІБ"
+    dismissing = action == DISMISSAL
 
     if not record.surname or not record.name or not record.patronymic:
         _add(result, ERROR, where, person, "неповне ПІБ", "Допишіть прізвище, ім'я та по батькові.")
@@ -78,10 +117,10 @@ def _check_person(result: CheckResult, item: OrderItem, folder: str) -> None:
     if not record.current.text:
         _add(
             result, ERROR, where, person,
-            "немає посади, з якої призначається",
+            "немає посади, з якої звільняється" if dismissing else "немає посади, з якої призначається",
             "Візьміть її з попереднього наказу або впишіть вручну.",
         )
-    if not record.target.text:
+    if not dismissing and not record.target.text:
         _add(
             result, ERROR, where, person,
             "немає посади, на яку призначається",
@@ -109,21 +148,28 @@ def _check_person(result: CheckResult, item: OrderItem, folder: str) -> None:
 
     if not record.birth:
         _add(result, WARNING, where, person, "немає року народження", "Додайте «19__ р.н.».")
-    if not record.education:
-        _add(result, WARNING, where, person, "немає освіти", "Додайте рядок «освіта: …».")
-    if not record.service_since:
-        _add(result, WARNING, where, person, "немає дати вступу на службу", "Додайте «у ЗС - із __.____».")
-    if not record.target.vos and not record.current.vos:
-        _add(result, WARNING, where, person, "немає ВОС", "Додайте код ВОС нової посади.")
+    if not dismissing:
+        if not record.education:
+            _add(result, WARNING, where, person, "немає освіти", "Додайте рядок «освіта: …».")
+        if not record.service_since:
+            _add(
+                result, WARNING, where, person,
+                "немає дати вступу на службу", "Додайте «у ЗС - із __.____».",
+            )
+        if not record.target.vos and not record.current.vos:
+            _add(result, WARNING, where, person, "немає ВОС", "Додайте код ВОС нової посади.")
 
-    for text, title in ((str(record.current.text), "посаду, з якої"), (str(record.target.text), "посаду, на яку")):
+    current_title = "посаду, з якої звільняється" if dismissing else "посаду, з якої призначається"
+    titles = [(str(record.current.text), current_title, "З")]
+    if not dismissing:
+        titles.append((str(record.target.text), "посаду, на яку призначається", "О"))
+    for text, title, case in titles:
         if not text:
             continue
-        case = "З" if title.endswith("з якої") else "О"
         if not declension.decline_position(text, case, folder or None).found:
             _add(
                 result, WARNING, where, person,
-                f"{title} призначається, не знайдено в довіднику посад — відмінок може бути хибним",
+                f"{title}, не знайдено в довіднику посад — відмінок може бути хибним",
                 "Допишіть посаду в довідник посад або виправте відмінок у тексті.",
             )
 
@@ -156,7 +202,14 @@ def check_draft(draft: OrderDraft) -> CheckResult:
     if not draft.items:
         _add(result, ERROR, "Наказ", "", "немає жодного пункту", "Додайте план переміщення або особу вручну.")
         return result
-    if "___" in draft.params.points:
+    if draft.params.action == DISMISSAL:
+        if "___" in draft.params.law_points:
+            _add(
+                result, WARNING, "Наказ", "",
+                "у шапці не вказані пункт і частина статті 26 Закону",
+                "Впишіть їх у полі «Підстава закону».",
+            )
+    elif "___" in draft.params.points:
         _add(
             result, WARNING, "Наказ", "",
             "у шапці не вказані пункти Положення",
@@ -181,7 +234,9 @@ def check_draft(draft: OrderDraft) -> CheckResult:
             )
         expected = item.number + 1
 
-        _check_person(result, item, folder)
+        _check_person(result, item, folder, draft.params.action)
+        if draft.params.action == DISMISSAL:
+            _check_dismissal(result, item, folder)
         _check_text(result, item)
 
         ipn = "".join(character for character in str(item.record.ipn) if character.isdigit())

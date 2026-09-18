@@ -26,10 +26,11 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 
 from ..builtin_nodes.typography import apply_ukrainian_typography, clean_duplicated_units
-from ..personnel import appointment, declension
+from ..personnel import appointment, declension, dismissal
 from .names import FullName, accusative
 from .record import PersonRecord
 
@@ -38,7 +39,19 @@ REGULATION = (
     "Положення про проходження громадянами України військової служби "
     "у Збройних Силах України"
 )
+#: Стала частина шапки наказу про звільнення (зразки додатка 53).
+LAW = "Закону України «Про військовий обов'язок і військову службу»"
+DEFAULT_LAW_POINTS = "пункту ___ частини ___ статті 26"
 DEFAULT_KIND = "осіб офіцерського складу"
+
+APPOINTMENT = "призначення"
+DISMISSAL = "звільнення"
+
+#: Місяці у формі «Народився 11 серпня 1976 року».
+MONTHS_IN_WORDS = (
+    "січня", "лютого", "березня", "квітня", "травня", "червня",
+    "липня", "серпня", "вересня", "жовтня", "листопада", "грудня",
+)
 
 
 @dataclass
@@ -57,6 +70,8 @@ class OrderParams:
     numbering_start: int = 1
     sort_by_surname: bool = True
     dictionary_folder: str = ""  # тека користувацьких довідників відмінків
+    action: str = APPOINTMENT  # «призначення» або «звільнення»
+    law_points: str = DEFAULT_LAW_POINTS  # для звільнення: пункт, частина, стаття Закону
 
 
 @dataclass
@@ -67,6 +82,7 @@ class OrderItem:
     lines: list[str]
     record: PersonRecord
     notes: list[str] = field(default_factory=list)
+    subheading: str = ""  # «У ЗАПАС ЗА ПІДПУНКТОМ «а» (…):» для наказу про звільнення
 
     @property
     def text(self) -> str:
@@ -183,6 +199,109 @@ def item_lines(record: PersonRecord, params: OrderParams) -> list[str]:
     return [apply_ukrainian_typography(clean_duplicated_units(line)) for line in lines]
 
 
+def birth_in_words(birth: str) -> str:
+    """«11.08.1976» → «Народився 11 серпня 1976 року»; лише рік → «1976 р.н.»."""
+    text = _clean(birth)
+    match = re.fullmatch(r"(\d{1,2})[.\-/](\d{1,2})[.\-/]((?:19|20)\d{2})", text)
+    if match:
+        day, month, year = int(match.group(1)), int(match.group(2)), match.group(3)
+        if 1 <= month <= 12:
+            return f"Народився {day:02d} {MONTHS_IN_WORDS[month - 1]} {year} року"
+    year = re.search(r"(?:19|20)\d{2}", text)
+    return f"{year.group(0)} р.н." if year else ""
+
+
+def service_line(record: PersonRecord) -> str:
+    """«Народився … . Вислуга років у ЗС: календарна - …, пільгова - …»"""
+    parts = []
+    birth = birth_in_words(str(record.birth))
+    if birth:
+        parts.append(birth.rstrip(".") + ".")
+    calendar, privileged = _clean(record.service_calendar), _clean(record.service_privileged)
+    if calendar or privileged:
+        pieces = []
+        if calendar:
+            pieces.append(f"календарна - {calendar}")
+        if privileged:
+            pieces.append(f"пільгова - {privileged}")
+        parts.append("Вислуга років у ЗС: " + ", ".join(pieces) + ".")
+    return " ".join(parts)
+
+
+def uniform_line(record: PersonRecord) -> str:
+    """«Звільняється з правом носіння військової форми одягу.» або «без права…»."""
+    value = _clean(record.uniform).casefold()
+    if not value:
+        return ""
+    without = value.startswith(("ні", "без", "не"))
+    return (
+        "Звільняється без права носіння військової форми одягу."
+        if without
+        else "Звільняється з правом носіння військової форми одягу."
+    )
+
+
+def dismissal_item_lines(record: PersonRecord, params: OrderParams) -> list[str]:
+    """Пункт наказу про звільнення (зразки додатка 53).
+
+    Відрізняється від призначення: немає нової посади й висновку про
+    вищу/нижчу, зате є вислуга років, ТЦК і право носіння форми.
+    """
+    folder = params.dictionary_folder
+    rank, _ = rank_accusative(str(record.rank), folder)
+    full_name = accusative(
+        FullName(str(record.surname), str(record.name), str(record.patronymic))
+    )
+    current, _ = position_accusative(str(record.current.text), folder)
+    first = " ".join(part for part in (rank[:1].upper() + rank[1:] if rank else "", full_name) if part)
+    if current:
+        first += f", {current}"
+    lines = [first.rstrip(" ,") + "."]
+
+    for line in (
+        service_line(record),
+        f"Підлягає направленню на військовий облік до {_clean(record.registration)}."
+        if record.registration
+        else "",
+        f"{_clean(record.ipn)}." if record.ipn else "",
+        uniform_line(record),
+        _clean(record.dismissal_note).rstrip(".") + "." if record.dismissal_note else "",
+    ):
+        if line:
+            lines.append(line)
+    return [apply_ukrainian_typography(clean_duplicated_units(line)) for line in lines]
+
+
+def dismissal_heading_lines(params: OrderParams) -> list[str]:
+    """«Відповідно до … Закону … нижчепойменованих осіб … ЗВІЛЬНИТИ з військової служби:»"""
+    lines = []
+    if _clean(params.section):
+        lines.append(_clean(params.section))
+    who = _clean(params.kind) or DEFAULT_KIND
+    unit = _clean(params.unit)
+    text = (
+        f"Відповідно до {_clean(params.law_points) or DEFAULT_LAW_POINTS} {LAW} "
+        f"нижчепойменованих {who}"
+        + (f" {unit}" if unit else "")
+        + " ЗВІЛЬНИТИ з військової служби:"
+    )
+    lines.append(apply_ukrainian_typography(clean_duplicated_units(text)))
+    return lines
+
+
+def dismissal_subheading(record: PersonRecord, params: OrderParams) -> str:
+    """Підзаголовок групи за підпунктом; без підстави — порожньо (побачить перевірка)."""
+    return dismissal.subheading(
+        str(record.dismissal), str(record.destination), params.dictionary_folder or None
+    )
+
+
+def _dismissal_order(params: OrderParams) -> dict[str, int]:
+    """Порядок груп — такий, як у довіднику підстав."""
+    table = dismissal.grounds(params.dictionary_folder or None)
+    return {ground.key: index for index, ground in enumerate(table)}
+
+
 def heading_lines(params: OrderParams) -> list[str]:
     """Шапка розділу: «§ …» окремим рядком і «Відповідно до …:»."""
     lines = []
@@ -229,6 +348,44 @@ def single_item_lines(record: PersonRecord, params: OrderParams) -> list[str]:
     return lines
 
 
+def compose_dismissal_order(records: list[PersonRecord], params: OrderParams) -> OrderDraft:
+    """Наказ про звільнення: пункти згруповані підзаголовками за підпунктами."""
+    draft = OrderDraft(params=params, heading=dismissal_heading_lines(params))
+    order = _dismissal_order(params)
+
+    def group_key(record: PersonRecord) -> tuple[int, str, str]:
+        ground = dismissal.find_ground(
+            str(record.dismissal), params.dictionary_folder or None
+        )
+        place = order.get(ground.key, len(order)) if ground else len(order)
+        return (place, str(record.destination), ground.key if ground else "")
+
+    people = list(records)
+    people.sort(key=lambda record: (group_key(record), record.sort_key()))
+
+    number = params.numbering_start
+    for record in people:
+        draft.items.append(
+            OrderItem(
+                number=number,
+                lines=dismissal_item_lines(record, params),
+                record=record,
+                subheading=dismissal_subheading(record, params),
+            )
+        )
+        number += 1
+    draft.footer = _footer_lines(params)
+    return draft
+
+
+def _footer_lines(params: OrderParams) -> list[str]:
+    return [
+        apply_ukrainian_typography(f"Підстава: {_clean(base)}")
+        for base in params.footer_bases
+        if _clean(base)
+    ]
+
+
 def compose_order(records: list[PersonRecord], params: OrderParams | None = None) -> OrderDraft:
     """Записи про осіб → проєкт наказу (шапка, пронумеровані пункти, підстави)."""
     params = params or OrderParams()
@@ -239,6 +396,8 @@ def compose_order(records: list[PersonRecord], params: OrderParams | None = None
     draft = OrderDraft(params=params)
     if not people:
         return draft
+    if params.action == DISMISSAL:
+        return compose_dismissal_order(people, params)
 
     if len(people) == 1 and not _clean(params.section):
         record = people[0]
@@ -259,11 +418,7 @@ def compose_order(records: list[PersonRecord], params: OrderParams | None = None
                     record=record,
                 )
             )
-    draft.footer = [
-        apply_ukrainian_typography(f"Підстава: {_clean(base)}")
-        for base in params.footer_bases
-        if _clean(base)
-    ]
+    draft.footer = _footer_lines(params)
     return draft
 
 
@@ -275,7 +430,14 @@ def numbered_lines(draft: OrderDraft) -> list[str]:
     """
     lines: list[str] = []
     lines.extend(draft.heading)
+    subheading = ""
     for item in draft.items:
+        if item.subheading and item.subheading != subheading:
+            # Новий підпункт звільнення — свій підзаголовок перед пунктами.
+            subheading = item.subheading
+            if lines:
+                lines.append("")
+            lines.append(subheading)
         if lines:
             lines.append("")
         first, *rest = item.lines

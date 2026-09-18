@@ -192,3 +192,114 @@ def test_assembly_without_a_draft_says_so(shell, unlock, tmp_path):
     shell.new_order_out_folder.set(str(tmp_path))
     shell.run_order_assemble()
     assert not list(Path(tmp_path).glob("*.docx"))
+
+def test_manual_person_makes_an_order(shell, unlock, tmp_path, monkeypatch):
+    """Без плану й документів: особу вписують руками просто у вікні."""
+    from nodeautomationtoolkit.generator_qt import orders_window
+
+    shell.open_orders_window()
+    values = {
+        "rank": "капітан",
+        "surname": "ІВАНЕНКО",
+        "name": "Олексій",
+        "patronymic": "Вікторович",
+        "ipn": "3508402997",
+        "birth": "1988",
+        "education": "НАСВ (отр) у 2010 р.",
+        "service_since": "08.2006",
+        "current.text": "командир механізованого взводу",
+        "current.shpk": "капітан",
+        "target.text": "командир механізованої роти",
+        "target.shpk": "майор",
+        "target.vos": "0210003",
+    }
+
+    class _Dialog:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def exec(self):
+            from PySide6.QtWidgets import QDialog
+
+            return QDialog.DialogCode.Accepted
+
+        def values(self):
+            return values
+
+    monkeypatch.setattr(orders_window, "ManualPersonDialog", _Dialog)
+    shell.add_manual_person()
+    assert "вручну" in shell.new_order_source_summary.get()
+
+    shell.new_order_points.set("пункту 45")
+    shell.new_order_out_folder.set(str(tmp_path / "готове"))
+    shell.run_order_compose()
+    assert shell.order_items_table.topLevelItemCount() == 1
+    assert shell._order_check.ready
+
+    shell.run_order_assemble()
+    assert [path.name for path in (tmp_path / "готове").glob("*.docx")]
+
+
+def test_dismissal_order_from_the_window(shell, unlock, tmp_path, monkeypatch):
+    from nodeautomationtoolkit.generator_qt import orders_window
+
+    shell.open_orders_window()
+    shell.new_order_action.set("звільнення")
+    shell.new_order_law_points.set("пункту другого частини п'ятої статті 26")
+    values = {
+        "rank": "полковник",
+        "surname": "БОНДАР",
+        "name": "Руслан",
+        "patronymic": "Володимирович",
+        "ipn": "2652323639",
+        "birth": "11.08.1976",
+        "current.text": "заступник командира батальйону",
+        "dismissal": "1.а",
+        "destination": "у запас",
+        "service_calendar": "29 років 3 місяці",
+        "service_privileged": "29 років 11 місяців",
+        "registration": "Слобідського ОРТЦК та СП м. Харкова",
+        "uniform": "так",
+    }
+
+    class _Dialog:
+        def __init__(self, action, *_args, **_kwargs):
+            assert action == "звільнення"
+
+        def exec(self):
+            from PySide6.QtWidgets import QDialog
+
+            return QDialog.DialogCode.Accepted
+
+        def values(self):
+            return values
+
+    monkeypatch.setattr(orders_window, "ManualPersonDialog", _Dialog)
+    shell.add_manual_person()
+    shell.new_order_out_folder.set(str(tmp_path / "звільнення"))
+    shell.run_order_compose()
+    assert shell._order_check.ready, [p.line() for p in shell._order_check.problems]
+
+    text = shell._order_draft.text.replace(" ", " ")
+    assert "ЗВІЛЬНИТИ з військової служби:" in text
+    assert "У ЗАПАС ЗА ПІДПУНКТОМ «а»" in text
+    assert "Призначається" not in text
+
+    shell.run_order_assemble()
+    assert [path.name for path in (tmp_path / "звільнення").glob("*.docx")]
+
+
+def test_a_scan_without_tesseract_says_so(shell, unlock, tmp_path, monkeypatch):
+    from nodeautomationtoolkit.order_generator import ocr
+
+    shell.open_orders_window()
+    scan = tmp_path / "подання.png"
+    scan.write_bytes(b"not a real image")
+    monkeypatch.setattr(ocr, "find_tesseract", lambda: None)
+
+    messages = []
+    monkeypatch.setattr(type(shell), "log", lambda self, text="", *a, **k: messages.append(str(text)))
+    shell.accept_order_source_path(str(scan))
+    shell.run_order_compose()
+
+    assert any("розпізнати скан" in message for message in messages)

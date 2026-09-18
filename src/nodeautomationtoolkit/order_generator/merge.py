@@ -36,6 +36,15 @@ _FIELD_PRIORITY = {
     "basis": (MANUAL, DOCUMENT, PLAN, ORDER),
     "evaluation": (MANUAL, PLAN, DOCUMENT, ORDER),
     "previous_item": (ORDER,),
+    # Звільнення: у наказі про призначення цих даних немає, тому джерела —
+    # план звільнення, документ (рапорт, подання) або ручний ввід.
+    "dismissal": (MANUAL, DOCUMENT, PLAN, ORDER),
+    "destination": (MANUAL, DOCUMENT, PLAN, ORDER),
+    "service_calendar": (MANUAL, DOCUMENT, PLAN, ORDER),
+    "service_privileged": (MANUAL, DOCUMENT, PLAN, ORDER),
+    "registration": (MANUAL, DOCUMENT, PLAN, ORDER),
+    "uniform": (MANUAL, DOCUMENT, PLAN, ORDER),
+    "dismissal_note": (MANUAL, DOCUMENT, PLAN, ORDER),
 }
 
 
@@ -61,11 +70,17 @@ def _merge_position(primary: Position | None, fallback: Position | None) -> Posi
     return merged
 
 
+#: Види наказу: від нього залежить, чого вимагати від запису.
+APPOINTMENT = "призначення"
+DISMISSAL = "звільнення"
+
+
 def build_record(
     plan: PersonRecord | None = None,
     order: PersonRecord | None = None,
     manual: PersonRecord | None = None,
     document: PersonRecord | None = None,
+    action: str = APPOINTMENT,
 ) -> PersonRecord:
     """Один запис про особу з тих джерел, які є (будь-який їх набір)."""
     records = {PLAN: plan, ORDER: order, MANUAL: manual, DOCUMENT: document}
@@ -90,20 +105,29 @@ def build_record(
             record.problems.extend(source.problems)
             record.notes.extend(source.notes)
 
-    _check(record, plan or document, order)
+    _check(record, plan or document, order, action)
     return record
 
 
-def _check(record: PersonRecord, plan: PersonRecord | None, order: PersonRecord | None) -> None:
+def _check(
+    record: PersonRecord,
+    plan: PersonRecord | None,
+    order: PersonRecord | None,
+    action: str = APPOINTMENT,
+) -> None:
     if record.surname.source == ORDER:
         record.problems.append(
             "ПІБ узято з пункту наказу, а там воно у знахідному відмінку "
             f"(«{record.full_name}») — звірте називний"
         )
-    if not record.target:
+    if action != DISMISSAL and not record.target:
+        # У наказі про звільнення нової посади немає — вимагати її безглуздо.
         record.problems.append("немає посади, на яку призначається")
     if not record.current:
-        record.problems.append("немає посади, з якої призначається")
+        record.problems.append(
+            "немає посади, з якої звільняється" if action == DISMISSAL
+            else "немає посади, з якої призначається"
+        )
     if not record.ipn:
         record.problems.append("немає РНОКПП")
     if not record.birth:

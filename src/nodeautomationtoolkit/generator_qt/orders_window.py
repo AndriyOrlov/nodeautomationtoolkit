@@ -23,6 +23,9 @@ import os
 from pathlib import Path
 
 from PySide6.QtWidgets import (
+    QComboBox,
+    QDialog,
+    QDialogButtonBox,
     QFrame,
     QGridLayout,
     QInputDialog,
@@ -30,6 +33,7 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QScrollArea,
     QTreeWidgetItem,
+    QVBoxLayout,
     QWidget,
 )
 
@@ -64,6 +68,70 @@ TEMPLATE_FILETYPES = [("Документ Word", "*.docx"), ("Усі файли",
 #: Тимчасовий пароль до вікна наказів (генератор у роботі). Це не захист
 #: даних, а замок від випадкового запуску в зібраній програмі.
 ORDERS_PASSWORD = "2281488"
+
+APPOINTMENT = "призначення"
+DISMISSAL = "звільнення"
+
+#: Поля ручного вводу: ключ запису, підпис, підказка, для якого виду наказу.
+MANUAL_FIELDS = (
+    ("rank", "Звання", "полковник", ""),
+    ("surname", "Прізвище", "у називному: ІВАНЕНКО", ""),
+    ("name", "Ім'я", "Олексій", ""),
+    ("patronymic", "По батькові", "Вікторович", ""),
+    ("ipn", "РНОКПП", "10 цифр", ""),
+    ("birth", "Народження", "11.08.1976 або 1976", ""),
+    ("education", "Освіта", "НАОУ (оср) у 2003 р.", APPOINTMENT),
+    ("service_since", "У ЗС із", "08.1996", APPOINTMENT),
+    ("current.text", "Посада, з якої", "у називному", ""),
+    ("current.shpk", "шпк старої посади", "майор", APPOINTMENT),
+    ("target.text", "Посада, на яку", "у називному", APPOINTMENT),
+    ("target.shpk", "шпк нової посади", "підполковник", APPOINTMENT),
+    ("target.vos", "ВОС", "0210003", APPOINTMENT),
+    ("basis", "Підстава", "рапорт від 01.09.2026", ""),
+    ("dismissal", "Підпункт звільнення", "1.а або а", DISMISSAL),
+    ("destination", "Куди", "у запас / у відставку", DISMISSAL),
+    ("service_calendar", "Вислуга календарна", "29 років 3 місяці", DISMISSAL),
+    ("service_privileged", "Вислуга пільгова", "29 років 11 місяців або немає", DISMISSAL),
+    ("registration", "На облік до", "Слобідського ОРТЦК та СП м. Харкова", DISMISSAL),
+    ("uniform", "Право на форму", "так / ні", DISMISSAL),
+    ("dismissal_note", "Додатковий рядок", "Чинність контракту припиняється 18.12.2026", DISMISSAL),
+)
+
+
+class ManualPersonDialog(QDialog):
+    """Ручний ввід особи: ті самі поля, що й у записі `PersonRecord`."""
+
+    def __init__(self, action: str, parent: QWidget | None = None):
+        super().__init__(parent)
+        self.setWindowTitle(f"Особа вручну — наказ про {action}")
+        self._edits: dict[str, QLineEdit] = {}
+        layout = QVBoxLayout(self)
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(8)
+        grid.setVerticalSpacing(6)
+        row = 0
+        for key, title, hint, only_for in MANUAL_FIELDS:
+            if only_for and only_for != action:
+                continue
+            edit = QLineEdit()
+            edit.setPlaceholderText(hint)
+            grid.addWidget(label(f"{title}:", "FieldLabel"), row // 2, (row % 2) * 2)
+            grid.addWidget(edit, row // 2, (row % 2) * 2 + 1)
+            self._edits[key] = edit
+            row += 1
+        grid.setColumnStretch(1, 1)
+        grid.setColumnStretch(3, 1)
+        layout.addLayout(grid)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+        self.resize(760, 380)
+
+    def values(self) -> dict[str, str]:
+        return {key: edit.text().strip() for key, edit in self._edits.items() if edit.text().strip()}
 
 
 class OrdersWindow(QMainWindow):
@@ -162,6 +230,7 @@ class OrdersWindowMixin:
         card = SectionCard("② Джерела для пунктів", accent="indigo")
         card.add_action(self._lock(button("＋ План переміщення", "primary", self.select_order_plan)))
         card.add_action(self._lock(button("＋ Документи", "secondary", self.select_order_documents)))
+        card.add_action(self._lock(button("＋ Особа вручну", "secondary", self.add_manual_person)))
         card.add_divider()
         card.add_action(button("✖ Очистити", "ghost", self.clear_order_sources))
         card.body.addWidget(bind_label(label("", "SummaryLabel"), self.new_order_source_summary))
@@ -175,6 +244,25 @@ class OrdersWindowMixin:
 
     def _orders_requisites(self) -> SectionCard:
         card = SectionCard("③ Реквізити наказу", accent="slate")
+
+        kind_row = QGridLayout()
+        kind_row.setHorizontalSpacing(8)
+        kind_row.addWidget(label("Вид наказу:", "FieldLabel"), 0, 0)
+        self.order_action_box = QComboBox()
+        self.order_action_box.addItems([APPOINTMENT, DISMISSAL])
+        self.order_action_box.setCurrentText(self.new_order_action.get() or APPOINTMENT)
+        self.order_action_box.currentTextChanged.connect(self._on_order_action_changed)
+        kind_row.addWidget(self.order_action_box, 0, 1)
+        kind_row.addWidget(label("Підстава закону:", "FieldLabel"), 0, 2)
+        kind_row.addWidget(
+            line_edit(self.new_order_law_points, "для звільнення: пункту другого частини п'ятої статті 26"),
+            0,
+            3,
+        )
+        kind_row.setColumnStretch(1, 1)
+        kind_row.setColumnStretch(3, 2)
+        card.body.addLayout(kind_row)
+
         grid = QGridLayout()
         grid.setHorizontalSpacing(8)
         grid.setVerticalSpacing(6)
@@ -291,6 +379,25 @@ class OrdersWindowMixin:
     def clear_order_sources(self):
         self.new_order_plan_path.set("")
         self.new_order_document_paths = []
+        self.new_order_manual_people = []
+        self._refresh_order_sources()
+
+    def _on_order_action_changed(self, value: str):
+        self.new_order_action.set(value)
+        self.save_config()
+        self.log(f"Вид наказу: {value}.")
+
+    def add_manual_person(self):
+        """Ручний ввід особи — коли плану немає або особу треба дописати."""
+        dialog = ManualPersonDialog(self.new_order_action.get() or APPOINTMENT, self.main_window)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        values = dialog.values()
+        if not values.get("surname"):
+            self.log("Особу не додано: без прізвища пункт скласти нема з чого.")
+            return
+        self.new_order_manual_people = [*self.new_order_manual_people, values]
+        self.log(f"Додано особу вручну: {values.get('surname')}.")
         self._refresh_order_sources()
 
     def select_new_order_template(self):
@@ -326,8 +433,12 @@ class OrdersWindowMixin:
             parts.append(f"план: {os.path.basename(plan)}")
         if documents:
             parts.append(f"документів: {len(documents)}")
+        if self.new_order_manual_people:
+            parts.append(f"осіб вручну: {len(self.new_order_manual_people)}")
         self.new_order_source_summary.set(
-            "; ".join(parts) if parts else "Джерела не обрано — план переміщення або документи"
+            "; ".join(parts)
+            if parts
+            else "Джерела не обрано — план переміщення, документи або ручний ввід"
         )
         self.save_config()
 
@@ -373,11 +484,18 @@ class OrdersWindowMixin:
                 records += pipeline.records_from_documents(
                     list(self.new_order_document_paths), index or None, log=self.log
                 )
+            if self.new_order_manual_people:
+                records += pipeline.records_from_manual(
+                    list(self.new_order_manual_people), action=self.new_order_action.get()
+                )
         except FileNotFoundError as error:
             self.log(f"Не знайдено файл: {error.filename or error}")
             return
         if not records:
-            self.log("Немає з чого складати наказ: оберіть план переміщення або документи.")
+            self.log(
+                "Немає з чого складати наказ: оберіть план переміщення, документи "
+                "або додайте особу вручну."
+            )
             return
 
         self._order_records = records
@@ -456,6 +574,8 @@ class OrdersWindowMixin:
             target_unit=self.new_order_target_unit.get(),
             bases=split(self.new_order_bases.get()),
             footer_bases=split(self.new_order_footer_bases.get()),
+            action=self.new_order_action.get() or APPOINTMENT,
+            law_points=self.new_order_law_points.get() or "пункту ___ частини ___ статті 26",
         )
 
     def _order_document_parts(self):

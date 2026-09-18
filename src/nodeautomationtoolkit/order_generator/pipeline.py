@@ -26,6 +26,7 @@ from . import merge, sources
 from .build import OrderDocumentParts, build_order_document, order_filename
 from .check import CheckResult, check_draft
 from .compose import OrderDraft, OrderParams, compose_order
+from .ocr import OcrUnavailable
 from .plan import read_plan
 from .record import PersonRecord
 from .resolve import resolve_document
@@ -69,7 +70,10 @@ def index_orders(
 
 # ──────────────────────────────── 2. Генерація ───────────────────────────────
 def records_from_plan(
-    plan_path: str | Path, index_folder: str | Path | None = None, log: Log = lambda _m: None
+    plan_path: str | Path,
+    index_folder: str | Path | None = None,
+    log: Log = lambda _m: None,
+    action: str = merge.APPOINTMENT,
 ) -> list[PersonRecord]:
     """План переміщення + найсвіжіший пункт наказу про кожну особу з індексу."""
     plan = read_plan(plan_path)
@@ -89,25 +93,47 @@ def records_from_plan(
                 order_record = sources.from_order_item(previous[0])
             else:
                 log(f"У наказах не знайдено: {plan_record.full_name}")
-        records.append(merge.build_record(plan=plan_record, order=order_record))
+        records.append(merge.build_record(plan=plan_record, order=order_record, action=action))
     return records
 
 
 def records_from_documents(
-    paths: list[str | Path], index_folder: str | Path | None = None, log: Log = lambda _m: None
+    paths: list[str | Path],
+    index_folder: str | Path | None = None,
+    log: Log = lambda _m: None,
+    action: str = merge.APPOINTMENT,
 ) -> list[PersonRecord]:
     """Подання, рапорт, аркуш бесіди, скан — усе, що вміє читати `documents.py`."""
     records = []
     for path in paths:
-        resolved = resolve_document(path, index_folder)
-        log(f"{Path(path).name}: {resolved.kind}, осіб {len(resolved.people)}")
+        name = Path(path).name
+        try:
+            resolved = resolve_document(path, index_folder, action=action)
+        except OcrUnavailable as error:
+            # Скан без Tesseract — окремий випадок: решту файлів це не спиняє.
+            log(f"{name}: не вдалося розпізнати скан. {error}")
+            continue
+        except FileNotFoundError:
+            log(f"{name}: файла немає на місці — його перенесли або видалили.")
+            continue
+        except Exception as error:  # пошкоджений або захищений файл
+            log(f"{name}: прочитати не вдалося ({type(error).__name__}). Відкрийте файл і перевірте.")
+            continue
+        log(f"{name}: {resolved.kind}, осіб {len(resolved.people)}")
+        if not resolved.people:
+            log(f"{name}: жодної особи не впізнано — допоможе ручний ввід.")
         records.extend(person.record for person in resolved.people)
     return records
 
 
-def records_from_manual(rows: list[dict[str, str]]) -> list[PersonRecord]:
+def records_from_manual(
+    rows: list[dict[str, str]], action: str = merge.APPOINTMENT
+) -> list[PersonRecord]:
     """Ручний ввід: список словників з іменами полів `PersonRecord`."""
-    return [merge.build_record(manual=sources.from_manual(values)) for values in rows]
+    return [
+        merge.build_record(manual=sources.from_manual(values), action=action or merge.APPOINTMENT)
+        for values in rows
+    ]
 
 
 def generate(records: list[PersonRecord], params: OrderParams | None = None) -> OrderDraft:

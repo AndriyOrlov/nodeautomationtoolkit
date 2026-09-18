@@ -69,6 +69,14 @@ class PersonRecord:
     target: Position = field(default_factory=Position)
     basis: Value = field(default_factory=Value)
     evaluation: Value = field(default_factory=Value)
+    # Звільнення з військової служби (стаття 26 Закону; зразки додатка 53).
+    dismissal: Value = field(default_factory=Value)  # ключ підстави: «1.а», «б»
+    destination: Value = field(default_factory=Value)  # «у запас» / «у відставку»
+    service_calendar: Value = field(default_factory=Value)  # «29 років 3 місяці»
+    service_privileged: Value = field(default_factory=Value)  # «29 років 11 місяців» / «немає»
+    registration: Value = field(default_factory=Value)  # ТЦК, куди стає на облік
+    uniform: Value = field(default_factory=Value)  # «так» / «ні» — право носіння форми
+    dismissal_note: Value = field(default_factory=Value)  # «Чинність контракту припиняється …»
     previous_item: Value = field(default_factory=Value)  # текст пункту, з якого переносили
     problems: list[str] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
