@@ -35,3 +35,10 @@ python/
 *.xlsx
 *.xls
 !examples/fake_recipient_mapping.xlsx
+
+# Локальний індекс наказів (посади з реальних наказів) — у git не потрапляє
+*.sqlite
+positions.csv
+
+# Локальний Tesseract і Poppler, що їдуть разом із програмою (великі бінарники)
+/tesseract/
