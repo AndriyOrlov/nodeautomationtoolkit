@@ -51,12 +51,15 @@ def record_from_document(facts: DocumentFacts, person: PersonMention) -> PersonR
         service_since=Value(facts.first("service_since"), DOCUMENT),
         basis=Value(facts.first("basis") or facts.first("law_reference"), DOCUMENT),
     )
-    positions = facts.positions
+    # Посада «на яку» береться лише за явною ознакою («до призначення на посаду»).
+    # Друга згадана посада нею не є: у рапорті це адресат, а не нове призначення.
+    target = facts.first("target_position")
+    positions = [position for position in facts.positions if position != target]
     if positions:
         record.current = Position(text=Value(positions[0], DOCUMENT))
-    if len(positions) > 1:
+    if target:
         record.target = Position(
-            text=Value(positions[1], DOCUMENT),
+            text=Value(target, DOCUMENT),
             shpk=Value(facts.first("shpk"), DOCUMENT),
             vos=Value(facts.first("vos"), DOCUMENT),
             tariff=Value(facts.first("tariff"), DOCUMENT),

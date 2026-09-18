@@ -30,16 +30,19 @@ from ..order_index.items import _PERSON_RE  # «ПРІЗВИЩЕ Ім'я По б
 _UP = "А-ЯІЇЄҐ"
 _LO = "а-яіїєґ"
 
-#: Вид документа → слова, за якими він упізнається (перше збіжне й перемагає).
-DOCUMENT_KINDS: tuple[tuple[str, tuple[str, ...]], ...] = (
+#: Вид документа → ознаки, за якими він упізнається (перший збіжний і перемагає).
+#: Ознака — або одне слово, або кортеж слів, які мають бути ВСІ разом
+#: («подання» + «до звільнення»). Між самими ознаками — «або»: рапорт
+#: упізнається і за словом «рапорт», і за «заява», і за «бажаю звільнитися».
+DOCUMENT_KINDS: tuple[tuple[str, tuple[str | tuple[str, ...], ...]], ...] = (
     ("план переміщення", ("план переміщення",)),
     ("план звільнення", ("план звільнення",)),
-    ("наказ", ("наказ по особовому складу", "наказую:", "звільнити з займаних посад", "§")),
     ("витяг", ("витяг з наказу", "витяг із наказу")),
-    ("подання до звільнення", ("подання", "до звільнення")),
-    ("подання до присвоєння звання", ("подання", "присвоєння військового звання")),
+    ("наказ", ("наказ по особовому складу", "наказую:", ("§", "звільнити з займаних посад"))),
+    ("подання до звільнення", (("подання", "до звільнення"),)),
+    ("подання до присвоєння звання", (("подання", "присвоєння військового звання"),)),
     ("подання", ("подання",)),
-    ("рапорт", ("рапорт", "заява", "прошу", "бажаю звільнитися")),
+    ("рапорт", ("рапорт", "заява", "бажаю звільнитися", "прошу звільнити")),
     ("аркуш бесіди", ("аркуш бесіди",)),
     ("аркуш вивчення", ("аркуш вивчення особистих якостей",)),
     ("картка професійного відбору", ("картка професійного відбору",)),
@@ -52,7 +55,19 @@ DOCUMENT_KINDS: tuple[tuple[str, tuple[str, ...]], ...] = (
 )
 
 _IPN_RE = re.compile(r"(?<!\d)(\d{10})(?!\d)")
-_BIRTH_RE = re.compile(r"(?<!\d)(\d{2}\.\d{2}\.(?:19|20)\d{2})(?!\d)|(?<!\d)((?:19|20)\d{2})\s*р\.\s*н\.")
+# Дата народження бралася як будь-яка дата в тексті, і в подання потрапляла дата
+# наказу з рядка вище. Тепер поруч має бути ознака народження.
+_BIRTH_RE = re.compile(
+    r"(?:дат\w*\s+народженн\w*\s*[:\-–]?\s*)(\d{2}\.\d{2}\.(?:19|20)\d{2})"
+    r"|(\d{2}\.\d{2}\.(?:19|20)\d{2})\s*(?:р\.\s*н\.|року\s+народженн\w*)"
+    r"|((?:19|20)\d{2})\s*(?:р\.\s*н\.|року\s+народженн\w*)",
+    re.IGNORECASE,
+)
+#: Ознака посади, НА ЯКУ подають: одразу після неї стоїть назва посади.
+_TARGET_POSITION_RE = re.compile(
+    r"(?:призначенн\w*|призначити|перемістити|подається)[^.;:]{0,40}?на\s+посад\w*\s*[:\-–]?\s*",
+    re.IGNORECASE,
+)
 _SERVICE_RE = re.compile(r"у\s+ЗС\w*\s*[-–]?\s*(?:із|з)\s+(\d{2}\.\d{4}|\d{4})", re.IGNORECASE)
 _EDUCATION_RE = re.compile(r"освіт[аи][:\s-]+(.{5,160}?)(?:;|\.\s|$)", re.IGNORECASE)
 _SHPK_RE = re.compile(r"шпк\s*[-–:]?\s*[«\"“„]?([^»\"”,;)]+)[»\"”]?", re.IGNORECASE)
@@ -60,8 +75,13 @@ _VOS_RE = re.compile(r"ВОС\s*[-–]?\s*(\d{6,8}[А-ЯA-Z]?)", re.IGNORECASE)
 _TARIFF_RE = re.compile(r"(\d{1,2})\s*(?:т\.?\s?р\.?|тарифн\w*\s+розряд\w*)", re.IGNORECASE)
 _ORDER_REF_RE = re.compile(r"наказ\w*[^.;]{0,80}?від\s+(\d{2}\.\d{2}\.\d{4})\s*№\s*([\w\-/]+)", re.IGNORECASE)
 _REPORT_REF_RE = re.compile(r"(рапорт|заяв\w+)[^.;]{0,40}?від\s+(\d{2}\.\d{2}\.\d{4})", re.IGNORECASE)
+# Підстава звільнення пишеться ланцюгом: «підпункту «б» пункту 2 частини шостої
+# статті 26». Без проміжної ланки «пункту N» збіг починався з середини ланцюга,
+# і замість підпункту в підставу потрапляв пункт.
 _LAW_REF_RE = re.compile(
-    r"(?:під)?пункт\w*\s*[«\"]?([\w\-]+)[»\"]?\s*(?:частини\s+\w+\s+)?статті\s+(\d+)[^.;]{0,60}", re.IGNORECASE
+    r"(?:під)?пункт\w*\s*[«\"]?([\w\-]+)[»\"]?\s*"
+    r"(?:пункт\w*\s+[\w\-]+\s*)?(?:частини\s+\w+\s+)?статті\s+(\d+)[^.;]{0,60}",
+    re.IGNORECASE,
 )
 _CONSENT_RE = re.compile(
     r"(з[гґ]од(?:ен|на|ий|а)\b[^.;]{0,60}|бажаю[^.;]{0,60}|прошу\s+(?:призначити|перемістити|звільнити)[^.;]{0,80})",
@@ -150,8 +170,10 @@ def detect_kind(text: str) -> str:
     """Вид документа за його текстом; «невідомо», якщо ознак немає."""
     head = " ".join(text[:4000].split()).casefold()
     for kind, markers in DOCUMENT_KINDS:
-        if all(marker.casefold() in head for marker in markers):
-            return kind
+        for marker in markers:
+            parts = (marker,) if isinstance(marker, str) else marker
+            if all(part.casefold() in head for part in parts):
+                return kind
     return "невідомо"
 
 
@@ -196,7 +218,7 @@ def extract_facts(text: str, path: str = "", dictionary=None) -> DocumentFacts:
     for match in _IPN_RE.finditer(text):
         _add(result.facts, "ipn", match.group(1), _around(text, match), "точно")
     for match in _BIRTH_RE.finditer(text):
-        _add(result.facts, "birth", match.group(1) or match.group(2), _around(text, match))
+        _add(result.facts, "birth", next(group for group in match.groups() if group), _around(text, match))
     for pattern, field_name, confidence in (
         (_SERVICE_RE, "service_since", "точно"),
         (_EDUCATION_RE, "education", "точно"),
@@ -221,6 +243,9 @@ def extract_facts(text: str, path: str = "", dictionary=None) -> DocumentFacts:
     result.positions = _positions(text, dictionary)
     for position in result.positions:
         _add(result.facts, "position", position, position)
+    target = _target_position(text, dictionary)
+    if target:
+        _add(result.facts, "target_position", target, target, "точно")
     return result
 
 
@@ -235,7 +260,9 @@ def _positions(text: str, dictionary) -> list[str]:
 
         dictionary = load_position_dictionary()
     found: list[str] = []
-    for piece in re.split(r"[\n;]|(?<=[.,])\s", text):
+    # Двокрапка теж межа: «Подається до призначення на посаду: начальник штабу…»
+    # без неї лишалось одним шматком, і посада не впізнавалась.
+    for piece in re.split(r"[\n;:]|(?<=[.,])\s", text):
         piece = piece.strip(" ,.;:-–—")
         if len(piece) < 5:
             continue
@@ -243,6 +270,24 @@ def _positions(text: str, dictionary) -> list[str]:
         if match and match.nominative not in found:
             found.append(match.nominative)
     return found
+
+
+def _target_position(text: str, dictionary=None) -> str:
+    """Посада, на яку подають: те, що стоїть після «до призначення на посаду».
+
+    Без такої ознаки посаду не вгадати: у рапорті на звільнення друга згадана
+    посада — це адресат («Командиру військової частини»), а не нове призначення.
+    """
+    if dictionary is None:
+        from ..order_index.position_dictionary import load_position_dictionary
+
+        dictionary = load_position_dictionary()
+    for match in _TARGET_POSITION_RE.finditer(text):
+        tail = text[match.end() : match.end() + 200].strip(" ,.;:-–—")
+        found = dictionary.match_at_start(tail)
+        if found:
+            return found.nominative
+    return ""
 
 
 def read_document(path: str | Path, word_reader=None, dictionary=None) -> DocumentFacts:

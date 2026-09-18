@@ -396,72 +396,14 @@ def is_generated_copy_filename(filename: str) -> bool:
     return name.startswith(COPY_FILENAME_PREFIX.lower() + "_") or _LEGACY_COPY_PREFIX in name
 
 
-def apply_ukrainian_typography(text: str) -> str:
-    """Замінює пробіли після коротких прийменників, сполучників та скорочень на нерозривні (\u00A0)."""
-    result = text or ""
-    # Код ВОС має лишатися суцільним: «ВОС - 0602002» не можна розривати між
-    # рядками, інакше номер зависає під самим краєм сторінки.
-    result = re.sub(
-        r"(?i)\b(ВОС)\s*(-|–|—)\s*(\d+)",
-        lambda m: f"{m.group(1)} {m.group(2)} {m.group(3)}",
-        result,
-    )
-    pattern = r"(?i)\b(з|із|зі|та|до|в|у|на|і|й|по|за|від|при|під|над|про|для|без|через|шпк|вос-?\d*|зс|р\.н\.|в/ч|в\.ч\.|№|п\.|пп\.|ст\.)\s+"
-    return re.sub(pattern, lambda m: f"{m.group(1)} ", result)
-
-
-def clean_duplicated_units(text: str) -> str:
-    """Усуває повторення фраз 'військової частини' та однакових шифрів підряд із збереженням регістру."""
-    def _rep_phrase(match):
-        m_txt = match.group(0)
-        letters = [c for c in m_txt if c.isalpha()]
-        if letters and all(c.isupper() for c in letters):
-            return "ВІЙСЬКОВОЇ ЧАСТИНИ "
-        return "військової частини "
-
-    t = re.sub(
-        r"\b(?:військов(?:ої|а|у|ій|ою)\s+частин(?:и|а|у|і|ою)\s*){2,}",
-        _rep_phrase,
-        text or "",
-        flags=re.IGNORECASE,
-    )
-    t = re.sub(
-        r"\b(військов\w+\s+частин\w+\s+[АA]\d+)(?:\s+\1\b)+",
-        r"\1",
-        t,
-        flags=re.IGNORECASE,
-    )
-    t = re.sub(
-        r"\b(ВІЙСЬКОВ\w+\s+ЧАСТИН\w+\s+[АA]\d+)(?:\s+\1\b)+",
-        r"\1",
-        t,
-    )
-    return t
-
-
-def ensure_blank_line_before_items(text: str) -> str:
-    """Гарантує наявність рівно 1 порожнього рядка перед кожним пунктом наказу
-    та рівно 2 порожніх рядків перед підписантом наказу.
-    Якщо порожній рядок вже є — додатковий не вставляється, якщо їх кілька — згортається до потрібної кількості."""
-    lines = (text or "").splitlines()
-    result = []
-    for idx, line in enumerate(lines):
-        clean = line.strip()
-        is_item = bool(re.match(r"^\d{1,3}(?:\.\d{1,3})*[\.\)]\s+", clean))
-        is_signer = bool(_ORDER_SIGNER_START_RE.match(clean))
-
-        if is_signer and idx > 0 and result:
-            while result and result[-1].strip() == "":
-                result.pop()
-            result.append("")
-            result.append("")
-        elif is_item and idx > 0 and result:
-            while len(result) > 1 and result[-1].strip() == "" and result[-2].strip() == "":
-                result.pop()
-            if result[-1].strip() != "":
-                result.append("")
-        result.append(line)
-    return "\n".join(result)
+#: Правила набору (нерозривні пробіли, повтори «військової частини», порожні
+#: рядки) спільні з генератором наказів — лежать у пакеті, а не тут.
+from nodeautomationtoolkit.builtin_nodes.typography import (  # noqa: E402
+    ORDER_SIGNER_START_RE as _ORDER_SIGNER_START_RE,
+    apply_ukrainian_typography,
+    clean_duplicated_units,
+    ensure_blank_line_before_items,
+)
 
 
 def is_biographical_paragraph(p_text: str) -> bool:
@@ -1129,25 +1071,6 @@ def build_addressee_kind_text(groups: dict[str, list[str]]) -> str:
 _MESSAGE_ADDRESSEE_KIND_TAGS = ("{{тцк чі вч}}", "{{тцк чи вч}}")
 
 
-_ORDER_SIGNER_START_RE = re.compile(
-    # «в.о.» без «т» — окремий вживаний варіант, якого тут бракувало. Крапки
-    # обов'язкові: без них шаблон ловив би звичайне «в …» на початку рядка.
-    #
-    # Родові форми («командувача», «начальника») сюди додавати НЕ МОЖНА, хоч і
-    # спокусливо: підписний блок часто дворядковий — «Тимчасово виконуючий
-    # обов'язки / командувача військ …», — а `_analyze_order` шукає підписанта
-    # З КІНЦЯ і бере ОСТАННІЙ збіг. Тоді початком блока ставав його ж другий
-    # рядок, і в тег {{підписант}} потрапляла половина блока.
-    # Скорочення закінчується крапкою, тому кінцевий `\b` до нього не
-    # застосовний (між «.» і пробілом межі слова немає) — замість нього
-    # заглядання вперед на пробіл.
-    r"^\s*(?:"
-    r"(?:т\s*\.\s*)?в\s*\.\s*о\s*\.?(?=\s)"
-    r"|тимчасово\s+виконуюч(?:ий|а)?\b"
-    r"|(?:командувач|командир|начальник|заступник\s+командувача)\b"
-    r")",
-    re.IGNORECASE | re.UNICODE,
-)
 #: Перелік звань окремо: він потрібен і прив'язаним до початку рядка (звичайний
 #: підписний блок), і всередині рядка (коли звання стоїть поруч із посадою).
 _RANK_ALTERNATIVES = (
