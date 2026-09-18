@@ -24,6 +24,12 @@ src_path = os.path.join(project_root, "src")
 if src_path not in sys.path:
     sys.path.insert(0, src_path)
 
+# Номер версії — один на всю програму (`src/nodeautomationtoolkit/__init__.py`).
+# Домовленість із користувачем 18.09.2026: КОЖНА наша зміна в програмі збільшує
+# останнє число на одиницю, щоб у вікні було видно, чи запущена вже виправлена
+# версія, чи ще стара.
+from nodeautomationtoolkit import __version__ as APP_VERSION
+
 from nodeautomationtoolkit.builtin_nodes.recipient_mapping import (
     read_recipient_mapping,
     _build_unit_fuzzy_pattern,
@@ -1787,7 +1793,9 @@ def _carry_source_formatting(doc, start: int, end: int, source_paragraph) -> Non
 class App:
     def __init__(self, root):
         self.root = root
-        self.root.title("Node Automation Toolkit — Генератор витягів та примірників")
+        self.root.title(
+            f"Node Automation Toolkit {APP_VERSION} — Генератор витягів та примірників"
+        )
         self.root.geometry("1180x880")
         self.root.minsize(920, 700)
 
