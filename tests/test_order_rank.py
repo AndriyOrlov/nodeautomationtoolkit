@@ -191,3 +191,21 @@ def test_rank_subheading_is_kept_with_the_first_item(tmp_path):
     paragraphs = Document(str(path)).paragraphs
     heading = next(p for p in paragraphs if p.text.strip() == "«МАЙОР»")
     assert heading.paragraph_format.keep_with_next is True
+
+
+def test_rank_subheading_is_centred(tmp_path):
+    """У зразку додатка 53 звання-підзаголовок стоїть по центру аркуша."""
+    from docx import Document
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+
+    from nodeautomationtoolkit.order_generator.build import build_order_document
+
+    draft = compose_order([person()], params())
+    path = build_order_document(draft, tmp_path / "ranks.docx")
+    paragraphs = Document(str(path)).paragraphs
+    heading = next(p for p in paragraphs if p.text.strip() == "«МАЙОР»")
+    assert heading.paragraph_format.alignment == WD_ALIGN_PARAGRAPH.CENTER
+    assert round(heading.paragraph_format.left_indent.cm, 2) == 0.0
+
+    biography = next(p for p in paragraphs if "вислуга" in plain(p.text))
+    assert round(biography.paragraph_format.left_indent.cm, 1) == 8.0

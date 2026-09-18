@@ -1,7 +1,7 @@
 from nodeautomationtoolkit.builtin_nodes.recipient_mapping import (
     groups_to_ciphers,
-    read_recipient_mapping,
     map_military_units,
+    read_recipient_mapping,
 )
 from nodeautomationtoolkit.core.table_types import DataTable
 
@@ -112,7 +112,10 @@ def test_army_corps_prioritization_over_subordinate_units():
 
 
 def test_tck_full_wording_extracts_only_oblast():
-    from nodeautomationtoolkit.builtin_nodes.recipient_mapping import _extract_tck_region_hints, analyze_senders
+    from nodeautomationtoolkit.builtin_nodes.recipient_mapping import (
+        _extract_tck_region_hints,
+        analyze_senders,
+    )
 
     text = (
         "§ 1\n"
@@ -161,9 +164,9 @@ def test_generate_decision_order():
 
 def test_order_block_constructor_pipeline():
     from nodeautomationtoolkit.builtin_nodes.recipient_mapping import (
-        parse_to_blocks,
-        filter_transform_blocks,
         assemble_from_blocks,
+        filter_transform_blocks,
+        parse_to_blocks,
     )
 
     text = (

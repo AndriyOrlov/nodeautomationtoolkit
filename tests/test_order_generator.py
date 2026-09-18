@@ -12,6 +12,7 @@ from nodeautomationtoolkit.order_generator.record import MANUAL, ORDER, PLAN
 from nodeautomationtoolkit.order_index.store import PersonItem
 from nodeautomationtoolkit.order_index.word_reader import WordTextReader
 
+
 class _NoWordReader(WordTextReader):
     """У тестах Word не запускається: .doc із вмістом .docx читається напряму."""
 

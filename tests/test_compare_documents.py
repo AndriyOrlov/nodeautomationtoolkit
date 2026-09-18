@@ -3,15 +3,9 @@
 import io
 import zipfile
 from pathlib import Path
-from xml.etree import ElementTree as ET
-
-import pytest
 
 from nodeautomationtoolkit.builtin_nodes.compare_documents import (
-    DocParagraph,
     compare_docx_documents,
-    generate_ai_chat_report,
-    _parse_docx_paragraphs,
 )
 
 

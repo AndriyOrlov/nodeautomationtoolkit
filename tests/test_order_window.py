@@ -382,3 +382,45 @@ def test_dismissal_plan_table_in_the_window(shell, unlock, tmp_path):
 
     shell.run_order_assemble()
     assert [item.name for item in (tmp_path / "готове").glob("*.docx")]
+
+def test_unit_name_comes_from_the_table(shell, unlock, tmp_path):
+    """У шапку наказу йде повна назва з таблиці, ще й у родовому."""
+    from openpyxl import Workbook
+    from test_order_units import TABLE
+
+    workbook = Workbook()
+    sheet = workbook.active
+    for row in TABLE:
+        sheet.append(row)
+    table = tmp_path / "Частини.xlsx"
+    workbook.save(table)
+
+    shell.open_orders_window()
+    shell.excel_path.set(str(table))
+    shell.new_order_unit.set("А1111")
+    shell.new_order_target_unit.set("14 опз")
+
+    params = shell._order_params()
+    assert params.unit.startswith("72 окремої механізованої бригади")
+    assert params.target_unit.startswith("14 окремий полк зв'язку")
+
+
+def test_unit_not_in_the_table_stays_as_typed(shell, unlock, tmp_path):
+    from openpyxl import Workbook
+    from test_order_units import TABLE
+
+    workbook = Workbook()
+    sheet = workbook.active
+    for row in TABLE:
+        sheet.append(row)
+    table = tmp_path / "Частини.xlsx"
+    workbook.save(table)
+
+    messages = []
+    shell.open_orders_window()
+    shell.excel_path.set(str(table))
+    shell.new_order_unit.set("Збройних Сил України")
+    shell.log = lambda text="", *a, **k: messages.append(str(text))
+
+    assert shell._order_params().unit == "Збройних Сил України"
+    assert any("немає" in message for message in messages)

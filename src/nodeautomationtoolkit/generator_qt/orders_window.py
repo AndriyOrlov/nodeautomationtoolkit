@@ -277,7 +277,7 @@ class OrdersWindowMixin:
             ("Розділ §:", self.new_order_section, "§ 1 — можна лишити порожнім", 0, 4),
             ("Пункти Положення:", self.new_order_points, "пункту 45", 1, 0),
             ("Тип о/с:", self.new_order_kind, "осіб офіцерського складу", 1, 2),
-            ("Чиїх осіб:", self.new_order_unit, "у родовому: Збройних Сил України", 1, 4),
+            ("Чиїх осіб:", self.new_order_unit, "шифр, скорочення або назва з таблиці", 1, 4),
             ("Призначити до:", self.new_order_target_unit, "коли всі йдуть в одну частину", 2, 0),
             ("Підстави в шапці:", self.new_order_bases, "через крапку з комою", 2, 2),
             ("Підстава в кінці:", self.new_order_footer_bases, "через крапку з комою", 2, 4),
@@ -582,18 +582,37 @@ class OrdersWindowMixin:
             return [piece.strip() for piece in str(text or "").split(";") if piece.strip()]
 
         return OrderParams(
+            units_table=self.excel_path.get(),
             number=self.new_order_number.get(),
             date=self.new_order_date.get(),
             section=self.new_order_section.get(),
             points=self.new_order_points.get() or "пункту ___",
             kind=self.new_order_kind.get() or "осіб офіцерського складу",
-            unit=self.new_order_unit.get(),
-            target_unit=self.new_order_target_unit.get(),
+            unit=self._full_unit(self.new_order_unit.get(), "Р"),
+            target_unit=self._full_unit(self.new_order_target_unit.get()),
             bases=split(self.new_order_bases.get()),
             footer_bases=split(self.new_order_footer_bases.get()),
             action=self.new_order_action.get() or APPOINTMENT,
             law_points=self.new_order_law_points.get() or "пункту ___ частини ___ статті 26",
         )
+
+    def _full_unit(self, text: str, case_label: str = "") -> str:
+        """Коротку назву частини («А1234», «72 омбр») міняє на повну з таблиці."""
+        from nodeautomationtoolkit.order_generator.units import full_unit_name
+
+        table = self.excel_path.get()
+        if not text.strip() or not table:
+            return text
+        try:
+            name, how = full_unit_name(text, table, case_label)
+        except Exception as error:  # таблиця недоступна чи має інший вигляд
+            self.log(f"Таблицю частин прочитати не вдалося ({type(error).__name__}) — беру, що ввели.")
+            return text
+        if how:
+            self.log(f"Частину знайдено в таблиці за {how}: {name}")
+        else:
+            self.log(f"У таблиці частин немає «{text}» — у наказ піде те, що ввели.")
+        return name
 
     def _order_document_parts(self):
         from nodeautomationtoolkit.order_generator.build import OrderDocumentParts

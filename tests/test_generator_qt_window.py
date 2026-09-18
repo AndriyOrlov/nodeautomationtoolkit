@@ -25,7 +25,10 @@ from PySide6.QtGui import QGuiApplication  # noqa: E402
 from PySide6.QtWidgets import QApplication, QLineEdit  # noqa: E402
 
 from nodeautomationtoolkit.generator_qt import compat  # noqa: E402
-from nodeautomationtoolkit.generator_qt.main_window import create_qt_app_class, install_qt_bridge  # noqa: E402
+from nodeautomationtoolkit.generator_qt.main_window import (  # noqa: E402
+    create_qt_app_class,
+    install_qt_bridge,
+)
 from nodeautomationtoolkit.generator_qt.widgets import LogConsole  # noqa: E402
 
 

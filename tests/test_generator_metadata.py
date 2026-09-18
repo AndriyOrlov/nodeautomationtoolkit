@@ -1,7 +1,7 @@
 from generate_extracts import (
     back_page_tag_values,
-    build_message_recipient_list,
     build_copy_two_filename,
+    build_message_recipient_list,
     extract_metadata_from_text,
     find_unmatched_open_unit_spans,
     format_ukr_date,

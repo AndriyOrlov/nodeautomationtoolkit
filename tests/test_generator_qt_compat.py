@@ -22,7 +22,14 @@ if str(SRC_PATH) not in sys.path:
 
 from PySide6.QtCore import Qt  # noqa: E402
 from PySide6.QtGui import QGuiApplication  # noqa: E402
-from PySide6.QtWidgets import QApplication, QFileDialog, QMessageBox, QTabWidget, QTreeWidget, QWidget  # noqa: E402
+from PySide6.QtWidgets import (  # noqa: E402
+    QApplication,
+    QFileDialog,
+    QMessageBox,
+    QTabWidget,
+    QTreeWidget,
+    QWidget,
+)
 
 from nodeautomationtoolkit.generator_qt import compat  # noqa: E402
 

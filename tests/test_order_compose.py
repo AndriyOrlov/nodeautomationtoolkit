@@ -290,3 +290,25 @@ def test_order_filename_uses_the_requisites():
 )
 def test_paragraph_kinds(line, kind):
     assert _kind(line) == kind
+
+def test_biography_block_is_indented_like_in_the_samples(tmp_path):
+    """Біографія й висновок стоять із відступом праворуч (додаток 53: ~8 см)."""
+    from docx import Document
+
+    draft = compose_order([person()], OrderParams(section="§ 1"))
+    path = build_order_document(draft, tmp_path / "order.docx")
+    paragraphs = [p for p in Document(str(path)).paragraphs if p.text.strip()]
+
+    item = next(p for p in paragraphs if _kind(p.text) == "item")
+    assert round(item.paragraph_format.left_indent.cm, 2) == 0.0
+    assert round(item.paragraph_format.first_line_indent.cm, 2) == 1.25
+
+    biography = next(p for p in paragraphs if "р.н." in p.text)
+    assert round(biography.paragraph_format.left_indent.cm, 1) == 8.0
+    assert round(biography.paragraph_format.first_line_indent.cm, 2) == 0.0
+
+    conclusion = next(p for p in paragraphs if p.text.strip().startswith("Призначається"))
+    assert round(conclusion.paragraph_format.left_indent.cm, 1) == 8.0
+
+    heading = next(p for p in paragraphs if p.text.strip().startswith("Відповідно до"))
+    assert round(heading.paragraph_format.left_indent.cm, 2) == 0.0

@@ -38,6 +38,16 @@ BODY_FONT = "Times New Roman"
 BODY_SIZE = Pt(14)
 EXECUTOR_SIZE = Pt(8)
 FIRST_LINE_INDENT = Cm(1.25)
+#: Біографічний блок пункту (р.н., освіта, у ЗС, РНОКПП, висновок про посаду)
+#: стоїть не під самим пунктом, а з відступом у праву половину аркуша. Міряно
+#: по зразках додатка 53: там лівий відступ таких абзаців 8.04–8.15 см.
+BIO_LEFT_INDENT = Cm(8.0)
+
+
+def _is_rank_subheading(line: str) -> bool:
+    """««МАЙОР»» — підзаголовок групи в наказі про звання; він центрується."""
+    clean = (line or "").replace(" ", " ").strip()
+    return clean.startswith("«") and clean.endswith("»") and clean == clean.upper()
 
 
 @dataclass
@@ -67,7 +77,7 @@ def _kind(line: str) -> str:
         return "heading"
     # Підзаголовок групи в наказі про звання — саме звання ВЕЛИКИМИ в лапках
     # («МАЙОР»). Крапки в кінці він не має, тому окреме правило.
-    if clean.startswith("«") and clean.endswith("»") and clean == clean.upper():
+    if _is_rank_subheading(clean):
         return "heading"
     return "continuation"
 
@@ -98,11 +108,21 @@ def content_lines(draft: OrderDraft, parts: OrderDocumentParts | None = None) ->
 
 
 def _style_paragraph(paragraph, line: str, executor: bool) -> None:
+    """Геометрія абзацу за зразками додатка 53 і PROJECT_RULES розд. 5."""
     kind = _kind(line)
     fmt = paragraph.paragraph_format
     fmt.space_before = Pt(0)
     fmt.space_after = Pt(0)
-    if kind in ("item", "heading", "continuation"):
+    fmt.left_indent = Cm(0)
+    if kind == "continuation":
+        # Біографія й висновок про посаду — окремим блоком праворуч.
+        fmt.alignment = WD_ALIGN_PARAGRAPH.LEFT
+        fmt.left_indent = BIO_LEFT_INDENT
+        fmt.first_line_indent = Cm(0)
+    elif _is_rank_subheading(line):
+        fmt.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        fmt.first_line_indent = Cm(0)
+    elif kind in ("item", "heading"):
         fmt.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
         fmt.first_line_indent = FIRST_LINE_INDENT
     else:

@@ -29,8 +29,8 @@ from .compose import OrderDraft, OrderParams, compose_order
 from .ocr import OcrUnavailable
 from .plan import read_plan
 from .record import PersonRecord
-from .table_plan import read_table
 from .resolve import resolve_document
+from .table_plan import read_table
 
 Log = Callable[[str], None]
 

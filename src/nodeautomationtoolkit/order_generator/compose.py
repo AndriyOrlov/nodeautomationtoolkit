@@ -71,7 +71,8 @@ class OrderParams:
     numbering_start: int = 1
     sort_by_surname: bool = True
     dictionary_folder: str = ""  # тека користувацьких довідників відмінків
-    action: str = APPOINTMENT  # «призначення» або «звільнення»
+    units_table: str = ""  # таблиця відповідностей: звідки брати повну назву частини
+    action: str = APPOINTMENT  # «призначення», «звільнення» або «присвоєння звання»
     law_points: str = DEFAULT_LAW_POINTS  # для звільнення: пункт, частина, стаття Закону
 
 

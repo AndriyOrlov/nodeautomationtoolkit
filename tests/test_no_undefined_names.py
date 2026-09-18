@@ -21,7 +21,6 @@
 import pathlib
 
 import pytest
-
 from _undefined_names import find_undefined_names
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent

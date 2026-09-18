@@ -16,7 +16,11 @@ from nodeautomationtoolkit.order_index.extractor import (
 )
 from nodeautomationtoolkit.order_index.position_dictionary import load_position_dictionary
 from nodeautomationtoolkit.order_index.unit_split import split_position_unit
-from nodeautomationtoolkit.order_index.word_reader import WordTextReader, sniff_suffix, split_word_text
+from nodeautomationtoolkit.order_index.word_reader import (
+    WordTextReader,
+    sniff_suffix,
+    split_word_text,
+)
 
 APPOINT = [
     "§ 1",
@@ -238,7 +242,11 @@ def test_mo317_vos_expansion():
 
 
 def test_mo317_dictionary_gives_codes_and_vos():
-    from nodeautomationtoolkit.order_index.position_dictionary import load_mo317, load_vos_names, strip_brackets
+    from nodeautomationtoolkit.order_index.position_dictionary import (
+        load_mo317,
+        load_vos_names,
+        strip_brackets,
+    )
 
     assert strip_brackets("Льотчик (літака)") == "льотчик"
     assert strip_brackets("Повітряний стрілець - радист") == "повітряний стрілець-радист"
@@ -253,7 +261,10 @@ def test_mo317_dictionary_gives_codes_and_vos():
 
 
 def test_mo444_officer_vos_dictionary():
-    from nodeautomationtoolkit.order_index.position_dictionary import MO444_VOS_REPLACEMENT_FILE, load_officer_vos
+    from nodeautomationtoolkit.order_index.position_dictionary import (
+        MO444_VOS_REPLACEMENT_FILE,
+        load_officer_vos,
+    )
 
     officer_vos = load_officer_vos()
     assert len(officer_vos) > 400

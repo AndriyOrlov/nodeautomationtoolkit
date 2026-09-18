@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """Пошук імен, які функція ЧИТАЄ, але ніде не звʼязує — майбутній `NameError`.
 
 Навіщо власний обхід AST: `py_compile` таких помилок не бачить (синтаксис
@@ -14,7 +13,6 @@ from __future__ import annotations
 import ast
 import builtins
 import importlib
-import io
 
 
 def _star_names(module_name: str) -> set[str]:
@@ -97,7 +95,7 @@ def _loaded_names(node):
 
 
 def find_undefined_names(path):
-    tree = ast.parse(io.open(path, encoding="utf-8").read(), filename=str(path))
+    tree = ast.parse(open(path, encoding="utf-8").read(), filename=str(path))
     module_names = _bound_names(tree) | set(dir(builtins)) | {"__file__", "__name__", "__doc__"}
 
     problems = []
