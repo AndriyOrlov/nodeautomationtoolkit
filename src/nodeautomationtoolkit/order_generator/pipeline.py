@@ -29,6 +29,7 @@ from .compose import OrderDraft, OrderParams, compose_order
 from .ocr import OcrUnavailable
 from .plan import read_plan
 from .record import PersonRecord
+from .table_plan import read_table
 from .resolve import resolve_document
 
 Log = Callable[[str], None]
@@ -123,6 +124,37 @@ def records_from_documents(
         if not resolved.people:
             log(f"{name}: жодної особи не впізнано — допоможе ручний ввід.")
         records.extend(person.record for person in resolved.people)
+    return records
+
+
+def records_from_table(
+    path: str | Path,
+    index_folder: str | Path | None = None,
+    log: Log = lambda _m: None,
+    action: str = merge.APPOINTMENT,
+) -> list[PersonRecord]:
+    """Таблиця з довільними графами (план звільнення, список до звання).
+
+    Графи впізнаються за заголовками з довідника `table_columns.csv`; чого не
+    впізнали — пишемо в журнал, щоб користувач додав назву в довідник.
+    """
+    plan = read_table(path)
+    for problem in plan.problems:
+        log(f"{Path(path).name}: {problem}")
+    if plan.unknown_columns:
+        log(f"Не впізнано граф: {', '.join(plan.unknown_columns)} — додайте їх у довідник граф.")
+    log(f"{Path(path).name}: рядків {len(plan.records)}")
+
+    records = []
+    for table_record in plan.records:
+        order_record = None
+        if index_folder:
+            previous = find_person_items(
+                index_folder, ipn=str(table_record.ipn), full_name=table_record.full_name, limit=1
+            )
+            if previous:
+                order_record = sources.from_order_item(previous[0])
+        records.append(merge.build_record(plan=table_record, order=order_record, action=action))
     return records
 
 

@@ -233,7 +233,7 @@ class OrdersWindowMixin:
 
     def _orders_step_two(self) -> SectionCard:
         card = SectionCard("② Джерела для пунктів", accent="indigo")
-        card.add_action(self._lock(button("＋ План переміщення", "primary", self.select_order_plan)))
+        card.add_action(self._lock(button("＋ План або таблиця", "primary", self.select_order_plan)))
         card.add_action(self._lock(button("＋ Документи", "secondary", self.select_order_documents)))
         card.add_action(self._lock(button("＋ Особа вручну", "secondary", self.add_manual_person)))
         card.add_divider()
@@ -241,7 +241,7 @@ class OrdersWindowMixin:
         card.body.addWidget(bind_label(label("", "SummaryLabel"), self.new_order_source_summary))
         card.body.addWidget(
             OrderDropZone(
-                "⇪  Перетягніть сюди план переміщення (.xlsx) або подання, рапорт, витяг",
+                "⇪  Перетягніть сюди план чи список (.xlsx) або подання, рапорт, витяг",
                 self.accept_order_source_path,
             )
         )
@@ -359,7 +359,7 @@ class OrdersWindowMixin:
 
     def select_order_plan(self):
         path = compat.FileDialogBridge.askopenfilename(
-            title="План переміщення (додаток 16)", filetypes=PLAN_FILETYPES
+            title="План переміщення, план звільнення або список", filetypes=PLAN_FILETYPES
         )
         if path:
             self.new_order_plan_path.set(path)
@@ -482,16 +482,28 @@ class OrdersWindowMixin:
             index = ""
         records = []
         plan = self.new_order_plan_path.get()
+        action = self.new_order_action.get() or APPOINTMENT
         try:
-            if plan:
+            if plan and action == APPOINTMENT:
                 records += pipeline.records_from_plan(plan, index or None, log=self.log)
+                if not records:
+                    # Не план переміщення за додатком 16 — читаємо як звичайну
+                    # таблицю, впізнаючи графи за заголовками.
+                    self.log("Форму додатка 16 не впізнано — читаю таблицю за заголовками граф.")
+                    records += pipeline.records_from_table(
+                        plan, index or None, log=self.log, action=action
+                    )
+            elif plan:
+                records += pipeline.records_from_table(
+                    plan, index or None, log=self.log, action=action
+                )
             if self.new_order_document_paths:
                 records += pipeline.records_from_documents(
                     list(self.new_order_document_paths), index or None, log=self.log
                 )
             if self.new_order_manual_people:
                 records += pipeline.records_from_manual(
-                    list(self.new_order_manual_people), action=self.new_order_action.get()
+                    list(self.new_order_manual_people), action=action
                 )
         except FileNotFoundError as error:
             self.log(f"Не знайдено файл: {error.filename or error}")

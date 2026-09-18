@@ -355,3 +355,31 @@ def test_all_three_kinds_are_offered(shell, unlock):
     assert [
         shell.order_action_box.itemText(index) for index in range(shell.order_action_box.count())
     ] == ["призначення", "звільнення", "присвоєння звання"]
+
+def test_dismissal_plan_table_in_the_window(shell, unlock, tmp_path):
+    """План звільнення читається за заголовками граф — просто перетягнутий файл."""
+    from openpyxl import Workbook
+
+    from test_order_table_plan import DISMISSAL_HEADER, DISMISSAL_ROWS
+
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.append(["ПЛАН ЗВІЛЬНЕННЯ осіб офіцерського складу"])
+    sheet.append(DISMISSAL_HEADER)
+    for row in DISMISSAL_ROWS:
+        sheet.append(row)
+    path = tmp_path / "План звільнення.xlsx"
+    workbook.save(path)
+
+    shell.open_orders_window()
+    shell.new_order_action.set("звільнення")
+    shell.new_order_law_points.set("пункту другого частини п'ятої статті 26")
+    shell.accept_order_source_path(str(path))
+    shell.new_order_out_folder.set(str(tmp_path / "готове"))
+
+    shell.run_order_compose()
+    assert shell.order_items_table.topLevelItemCount() == 2
+    assert shell._order_check.ready, [p.line() for p in shell._order_check.problems]
+
+    shell.run_order_assemble()
+    assert [item.name for item in (tmp_path / "готове").glob("*.docx")]
