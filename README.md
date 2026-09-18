@@ -36,8 +36,13 @@ Portable-Python без встановлення — `scripts/portable/README.md`
 - `src/nodeautomationtoolkit/builtin_nodes` — модулі логіки: таблиця частин і
   маршрутизація (`recipient_mapping`), повідомлення (`message_order`), примірники
   (`copy_generator`), порівняння документів, теги шаблонів.
-- `src/nodeautomationtoolkit/personnel` — довідники (CSV) і заготовки з Excel-генератора
-  наказів; до генераторів ще не підключені.
+- `src/nodeautomationtoolkit/personnel` — довідники (CSV): звання, посади, відмінки,
+  рівні шпк, перевірка РНОКПП.
+- `src/nodeautomationtoolkit/order_index` — локальний індекс попередніх наказів
+  (посади, підрозділи, пункти про осіб); лежить лише на комп'ютері користувача.
+- `src/nodeautomationtoolkit/order_generator` — генератор наказів по особовому складу:
+  індексація → генерація → перевірка → збірка (`pipeline.py`). Ще в роботі: у вікні
+  програми він за кнопкою **🔒 Накази** й тимчасовим паролем.
 - `scripts/e2e_*` — наскрізні перевірки на вигаданих наказах; `scripts/diagnostics` —
   знеособлений звіт.
 - `tests` — тести.
