@@ -15,7 +15,7 @@ _PKG_REL = "http://schemas.openxmlformats.org/package/2006/relationships"
 
 # Друкується Tkinter-генератором у журнал, щоб одразу було видно, що після
 # перезапуску завантажено актуальний вихідний модуль, а не старий процес/EXE.
-ROUTING_VERSION = "2026-09-15-v13-glued-item-numbers"
+ROUTING_VERSION = "2026-09-23-v14-internal-management-move"
 
 _ORDER_SIGNER_START_RE = re.compile(
     r"^\s*(?:т\.?\s*в\.?\s*о\.?|тимчасово\s+виконуюч(?:ий|а)?|"
@@ -1405,6 +1405,30 @@ def _get_item_main_text(lines: list[str]) -> str:
     return "\n".join(selected_lines)
 
 
+#: «Пункт управління» / КП — це командний пункт, а не управління як орган.
+_COMMAND_POST_RE = re.compile(
+    r"\b(?:передов\w*|запасн\w*|головн\w*|)?\s*"
+    r"(?:командн\w*\s+пункт\w*|пункт\w*\s+управління|ЗКП|ГКП|ППУ|КП)\s+",
+    re.IGNORECASE | re.UNICODE,
+)
+_MANAGEMENT_WORD_RE = re.compile(r"\bуправлінн\w*", re.IGNORECASE | re.UNICODE)
+
+
+def is_internal_management_move(lines: list[str]) -> bool:
+    """Чи є пункт переміщенням з посади в управлінні на посаду в управлінні.
+
+    У пункті «звідки» пишеться малими, «КУДИ» — ВЕЛИКИМИ (AGENT.md, 9.5.5).
+    Внутрішнє переміщення — коли «управління» стоїть в обох частинах. Просто
+    двох згадок замало: назва однієї посади сама буває з двома
+    («…розвідувального управління штабу управління»). Біографія й підстави
+    не враховуються: «освіта: … академія державного управління» — не посада.
+    """
+    main_text = _get_item_main_text(lines).replace("­", "")
+    main_text = _COMMAND_POST_RE.sub("", main_text)
+    words = [match.group(0) for match in _MANAGEMENT_WORD_RE.finditer(main_text)]
+    return any(word.isupper() for word in words) and any(not word.isupper() for word in words)
+
+
 #: Невидимі символи, які Word і системи документообігу лишають у тексті:
 #: пропуски нульової ширини, «з'єднувачі», BOM.
 _INVISIBLE_TEXT_CHARS_RE = re.compile("[\u200b\u200c\u200d\u2060\ufeff]")
@@ -1996,6 +2020,9 @@ def map_military_units(
     skipped_items: list[dict] = []
     management_paragraphs: dict[str, dict] = {}
     routing_audit: list[dict] = []
+    # Межі КОЖНОГО пункту в рядках тексту — для повідомлень, які можуть
+    # не переносити окремі пункти (внутрішнє переміщення в управлінні).
+    item_spans: list[dict] = []
 
     # Власна підстава звільнення може стояти НЕ в першому рядку пункту: текст
     # часто розриває мʼякий перенос, і «У ЗАПАС ЗА ПІДПУНКТОМ …» опиняється на
@@ -2263,6 +2290,18 @@ def map_military_units(
             # але слово «управління» може бути саме в такому рядку.
             and bool(re.search(r"\bуправлінн\w*\b", full_item_text, re.IGNORECASE))
         )
+        internal_management_move = is_management_change and is_internal_management_move(
+            block["lines"]
+        )
+        item_spans.append(
+            {
+                "label": block.get("label", ""),
+                "start_line": block.get("start_line", 0),
+                "end_line": block.get("end_line", 0),
+                "heading_ranges": list(block.get("heading_ranges", [])),
+                "internal_management_move": internal_management_move,
+            }
+        )
         applied_rules = []
         if context_recipient_names:
             applied_rules.append("адресат із шапки розділу/наказу")
@@ -2272,6 +2311,8 @@ def map_military_units(
             applied_rules.append("внутрішнє переміщення: адресат із контексту")
         if is_management_change:
             applied_rules.append("зміна до управління: витяг виключено із загального переліку")
+        if internal_management_move:
+            applied_rules.append("внутрішнє переміщення в управлінні")
         routing_audit.append(
             {
                 "label": block.get("label", ""),
@@ -2367,6 +2408,7 @@ def map_military_units(
                 management_key = f"{management_key or 'Управління'} ({len(management_paragraphs) + 1})"
             management_paragraphs[management_key] = {
                 "unit_code": management_key, "open_name": "Управління",
+                "internal_move": internal_management_move,
                 "recipient_to": "", "destination_where": "", "abbreviation": "",
                 "header_lines": header_lines,
                 "items": [{
@@ -2431,6 +2473,7 @@ def map_military_units(
         "unmatched_items": unmatched_items,
         "skipped_items": skipped_items,
         "routing_audit": routing_audit,
+        "item_spans": item_spans,
         "preamble_recipient": ", ".join(
             sorted(open_name for _sender_key, open_name in header_zvidky_units)
         ),

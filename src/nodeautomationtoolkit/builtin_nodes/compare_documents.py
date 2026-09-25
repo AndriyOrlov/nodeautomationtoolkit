@@ -211,10 +211,20 @@ def compare_docx_documents(
     reference_path: str | Path,
     generated_path: str | Path,
     mode: str = "extract",
+    ignore_blank_paragraphs: bool = True,
 ) -> CompareResult:
-    """Попарно порівнює еталонний та згенерований DOCX документи."""
+    """Попарно порівнює еталонний та згенерований DOCX документи.
+
+    `ignore_blank_paragraphs` (за замовчуванням): порожні абзаци не беруть участі
+    в порівнянні й не рахуються розбіжністю — лишній чи відсутній Enter у роботі
+    студента не є помилкою змісту. Правила «1 Enter перед пунктом, 2 перед
+    підписантом» тоді теж не перевіряються.
+    """
     ref_paras = _parse_docx_paragraphs(reference_path)
     gen_paras = _parse_docx_paragraphs(generated_path)
+    if ignore_blank_paragraphs:
+        ref_paras = [paragraph for paragraph in ref_paras if not paragraph.is_blank]
+        gen_paras = [paragraph for paragraph in gen_paras if not paragraph.is_blank]
 
     discrepancies: list[DiffDiscrepancy] = []
 
@@ -357,7 +367,8 @@ def compare_docx_documents(
                     )
 
     # 2. Перевірка правил ентерів (1 порожній рядок перед пунктом, 2 перед підписантом)
-    _check_blank_line_rules(gen_paras, discrepancies)
+    if not ignore_blank_paragraphs:
+        _check_blank_line_rules(gen_paras, discrepancies)
 
     is_identical = len(discrepancies) == 0
 

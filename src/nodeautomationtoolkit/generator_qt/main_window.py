@@ -525,6 +525,13 @@ class QtShellMixin(OrdersWindowMixin):
         strip.add(button("📂 Папка результату", "secondary", self.open_extracts_output_folder))
         strip.add(button("ⓘ Теги шаблону", "sky", self.show_template_tags))
         strip.add(button("🔍 Порівняти з еталоном", "amber", self.open_compare_extracts))
+        self.btn_order_review = self._lock(button("🎓 Перевірити наказ", "sky", self.run_order_review_action))
+        self.btn_order_review.setToolTip(
+            "Перевірити обрані накази без еталона: нумерація, адресати, РНОКПП, підписант, "
+            "історія осіб і написання посад за попередніми наказами. Звіт і позначена копія — "
+            "у теці «Перевірка» поруч із наказом; оригінал не змінюється."
+        )
+        strip.add(self.btn_order_review)
         self._strip_status[1] = strip.finish().status
         layout.addWidget(strip)
 
@@ -577,12 +584,25 @@ class QtShellMixin(OrdersWindowMixin):
         source.body.addWidget(tags_note)
         layout.addWidget(source)
 
+        def message_options(row: QHBoxLayout) -> None:
+            skip_box = check_box(
+                "Не додавати внутрішнє переміщення в управлінні",
+                self.message_skip_internal_management,
+            )
+            skip_box.setToolTip(
+                "Пункт, де «управління» є і в посаді «звідки», і в посаді «КУДИ», "
+                "не переноситься у шифрований зміст. Витягів до управління це не стосується."
+            )
+            row.addWidget(skip_box)
+            row.addStretch(1)
+
         layout.addWidget(
             run_params_card(
                 "Реквізити цього прогону",
                 executor_var=self.message_executor,
                 folder_var=self.message_out_folder,
                 on_pick_folder=self.select_message_output_folder,
+                options=message_options,
             )
         )
 
@@ -721,6 +741,9 @@ class QtShellMixin(OrdersWindowMixin):
 
     def run_generate_messages(self):
         return self._guarded(super().run_generate_messages)
+
+    def run_order_review_action(self):
+        return self._guarded(super().run_order_review_action)
 
     def generate_messages_for_dropped_order(self, path: str) -> None:
         """Наказ, перетягнутий у рамку вкладки повідомлень: обрати й одразу створити."""

@@ -63,6 +63,7 @@ rem resolves relative ones against the spec folder, not the project root.
   --collect-submodules nodeautomationtoolkit.generator_qt ^
   --collect-submodules nodeautomationtoolkit.order_generator ^
   --collect-submodules nodeautomationtoolkit.order_index ^
+  --collect-submodules nodeautomationtoolkit.order_review ^
   --collect-all docx ^
   --hidden-import win32timezone ^
   --add-data "%ROOT%src\nodeautomationtoolkit\generator_qt\icons;nodeautomationtoolkit\generator_qt\icons" ^
@@ -74,6 +75,8 @@ rem resolves relative ones against the spec folder, not the project root.
 if errorlevel 1 goto :failed
 
 if not exist "dist\%APP_NAME%\%APP_NAME%.exe" goto :failed
+rem Word macros (order check) next to the exe: NAT_CheckOrderWithProgram finds both there.
+xcopy /E /I /Y "%ROOT%word_macro" "dist\%APP_NAME%\word_macro" >nul
 
 echo.
 echo Готово: dist\%APP_NAME%\%APP_NAME%.exe  (версiя %NEW_VERSION%)

@@ -505,3 +505,92 @@ def test_zone_ignores_non_orders_and_busy_state(shell, tmp_path, monkeypatch):
     finally:
         shell._busy_depth = 0
     assert started == [] and shell.manual_order_paths == []
+
+
+def test_messages_tab_has_internal_management_checkbox(shell, legacy, tmp_path):
+    from PySide6.QtWidgets import QCheckBox
+
+    boxes = [
+        box for box in shell.tab_messages_page.findChildren(QCheckBox)
+        if "внутрішнє переміщення в управлінні" in box.text()
+    ]
+    assert len(boxes) == 1
+    assert shell.message_skip_internal_management.get() is True
+    assert boxes[0].isChecked()
+
+    boxes[0].click()
+    assert shell.message_skip_internal_management.get() is False
+
+    shell.config_file = str(tmp_path / "config.json")
+    legacy.App.save_config(shell)
+    shell.message_skip_internal_management.set(True)
+    legacy.App.load_config(shell)
+    assert shell.message_skip_internal_management.get() is False
+
+
+def test_compare_window_ignores_blank_paragraphs_by_default(shell, tmp_path, monkeypatch):
+    from nodeautomationtoolkit.generator_qt import compare_window
+
+    calls = []
+    monkeypatch.setattr(
+        compare_window,
+        "compare_docx_documents",
+        lambda *args, **kwargs: calls.append(kwargs) or (_ for _ in ()).throw(RuntimeError("stop")),
+    )
+    monkeypatch.setattr(compare_window.QMessageBox, "critical", lambda *args, **kwargs: None)
+    reference = _order(tmp_path, "еталон.docx")
+    checked = _order(tmp_path, "студент.docx")
+
+    window = shell._open_compare("витяги", checked)
+    assert window.ignore_blank_box.isChecked()
+    window.reference_edit.setText(reference)
+    window.run_comparison()
+    window.ignore_blank_box.setChecked(False)
+    window.run_comparison()
+    assert [call["ignore_blank_paragraphs"] for call in calls] == [True, False]
+    window.close()
+
+
+def test_order_review_button_writes_report_without_touching_the_order(
+    shell, legacy, tmp_path, monkeypatch, dialogs
+):
+    import openpyxl
+
+    order = tmp_path / "Наказ № 5 від 01.09.2026.docx"
+    order.write_bytes(b"original")
+    text = "\n".join([
+        "НАКАЗ",
+        "§ 1",
+        "Відповідно до пункту 1 Положення ПРИЗНАЧИТИ:",
+        "1. Капітана ТЕСТЕНКА Олега Васильовича, командира роти - КОМАНДИРОМ БАТАЛЬЙОНУ.",
+        "3. Капітана ПРИКЛАДЕНКА Івана Петровича, командира роти - КОМАНДИРОМ БАТАЛЬЙОНУ.",
+        "",
+        "Командир військової частини А0001",
+        "полковник                    Петро ТЕСТОВИЙ",
+    ])
+    marked = []
+
+    class FakeWord:
+        Visible = True
+        DisplayAlerts = 1
+
+    monkeypatch.setattr(shell, "_read_word_text", lambda path, normalize=True: text)
+    monkeypatch.setattr(legacy, "default_index_folder", lambda configured="": "")
+    monkeypatch.setattr(legacy.win32com.client, "DispatchEx", lambda *_args: FakeWord())
+    monkeypatch.setattr(legacy, "force_quit_word", lambda word: None)
+    monkeypatch.setattr(
+        legacy, "save_marked_copy", lambda word, source, output, findings: marked.append(output) or (1, 0)
+    )
+    shell.excel_path.set("")
+    shell._set_orders([str(order)])
+
+    [review_button] = _find_buttons(shell.tab_extracts_page, "Перевірити наказ")
+    review_button.click()
+
+    report = tmp_path / "Перевірка" / "Перевірка_Наказ № 5 від 01.09.2026.xlsx"
+    rows = list(openpyxl.load_workbook(report).active.iter_rows(values_only=True))
+    assert rows[0] == ("Серйозність", "Що перевірялось", "Де", "Що не так", "Як виправити")
+    assert ("помилка", "Нумерація пунктів", "Пункт 3", "після пункту 1 йде пункт 3") == rows[1][:4]
+    assert marked == [str(tmp_path / "Перевірка" / "Наказ № 5 від 01.09.2026 — перевірка.docx")]
+    assert order.read_bytes() == b"original"
+    assert any(name == "showinfo" and "помилок 1" in args[1] for name, args in dialogs)

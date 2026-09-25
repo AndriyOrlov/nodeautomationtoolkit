@@ -11,6 +11,7 @@ import os
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QColor, QFont, QGuiApplication, QTextBlockFormat, QTextCharFormat, QTextCursor
 from PySide6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QFileDialog,
     QGridLayout,
@@ -72,6 +73,13 @@ class CompareWindow(QWidget):
         if mode in MODES:
             self.mode_combo.setCurrentText(mode)
         controls.addWidget(self.mode_combo)
+        self.ignore_blank_box = QCheckBox("Ігнорувати порожні абзаци")
+        self.ignore_blank_box.setChecked(True)
+        self.ignore_blank_box.setToolTip(
+            "Зайвий чи відсутній Enter не вважається розбіжністю; "
+            "правила порожніх рядків перед пунктом і підписантом не перевіряються."
+        )
+        controls.addWidget(self.ignore_blank_box)
         controls.addWidget(button("⇄ Порівняти файли", "run", self.run_comparison))
         controls.addStretch(1)
         controls.addWidget(label("Легенда:", "MutedLabel"))
@@ -154,7 +162,12 @@ class CompareWindow(QWidget):
             QMessageBox.warning(self, "Помилка вибору", "Вкажіть дійсні шляхи до обох DOCX файлів.")
             return
         try:
-            result = compare_docx_documents(reference, generated, mode=self.mode_combo.currentText())
+            result = compare_docx_documents(
+                reference,
+                generated,
+                mode=self.mode_combo.currentText(),
+                ignore_blank_paragraphs=self.ignore_blank_box.isChecked(),
+            )
         except Exception as error:
             QMessageBox.critical(self, "Помилка порівняння", f"Не вдалося порівняти файли:\n{error}")
             return

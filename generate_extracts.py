@@ -54,6 +54,15 @@ from nodeautomationtoolkit.builtin_nodes.copy_generator import (
     _ORDER_BODY_KEYWORDS,
 )
 from nodeautomationtoolkit.builtin_nodes.blank_images import remove_blank_images
+from nodeautomationtoolkit.order_review import WARNING as REVIEW_WARNING
+from nodeautomationtoolkit.order_review import Finding as ReviewFinding
+from nodeautomationtoolkit.order_review import review_order
+from nodeautomationtoolkit.order_review.check import (
+    default_index_folder,
+    findings_to_tsv,
+    group_findings,
+)
+from nodeautomationtoolkit.order_review.marking import save_marked_copy
 from nodeautomationtoolkit.builtin_nodes.template_tags import (
     SIGNER_TAGS, tag_aliases, expand_common_tags, certifier_tags, signer_tags,
 )
@@ -270,8 +279,11 @@ def load_saved_analysis_reports(order_path: str, output_folder: str) -> dict:
     }
 
 
-def read_document_text(doc) -> str:
+def read_document_text(doc, normalize: bool = True) -> str:
     """Текст документа, зібраний З АБЗАЦІВ, а не з `Content.Text`.
+
+    `normalize=False` — без `normalize_item_numbering`: перевірці наказу треба
+    бачити «1.Капітана» таким, як його набрали.
 
     `Content.Text` склеює цілий рядок таблиці в один рядок тексту, тоді як
     `doc.Paragraphs` рахує кожну комірку окремим абзацом. Через це нумерація
@@ -300,7 +312,8 @@ def read_document_text(doc) -> str:
             if number and not re.match(r"^\s*\d", paragraph_text):
                 paragraph_text = f"{number} {paragraph_text}"
         lines.append(paragraph_text)
-    return normalize_item_numbering("\n".join(lines))
+    text = "\n".join(lines)
+    return normalize_item_numbering(text) if normalize else text
 
 
 _LIST_ITEM_NUMBER_RE = re.compile(r"^\d{1,3}(?:\.\d{1,3})*[\.\)]$")
@@ -1053,6 +1066,37 @@ def build_message_recipient_list(mapping: dict, routes: dict) -> list[str]:
     return groups["corps"] + groups["units"] + groups["tck"]
 
 
+def message_skipped_item_lines(routes: dict) -> tuple[set[int], list[str]]:
+    """Рядки наказу, які НЕ переносяться у зміст повідомлення.
+
+    Це пункти внутрішнього переміщення в управлінні (з посади в управлінні на
+    посаду в управлінні): повідомляти про них нікого. Разом із пунктом
+    прибирається й шапка (§, «Відповідно до …:»), під якою не лишилось жодного
+    іншого пункту, — інакше вона висіла б у повідомленні сама. Номери решти
+    пунктів не змінюються: це номери пунктів наказу.
+    """
+    items = routes.get("item_spans") or []
+    skipped = [item for item in items if item.get("internal_management_move")]
+    if not skipped:
+        return set(), []
+
+    lines: set[int] = set()
+    for item in skipped:
+        lines.update(range(int(item["start_line"]), int(item["end_line"]) + 1))
+
+    kept_heading_starts = {
+        int(heading_range[0])
+        for item in items
+        if not item.get("internal_management_move")
+        for heading_range in item.get("heading_ranges") or []
+    }
+    for item in skipped:
+        for start, end in item.get("heading_ranges") or []:
+            if int(start) not in kept_heading_starts:
+                lines.update(range(int(start), int(end) + 1))
+    return lines, [str(item.get("label", "")).strip() for item in skipped]
+
+
 def build_addressee_kind_text(groups: dict[str, list[str]]) -> str:
     """Текст для тегу {{тцк чі вч}} — кому саме адресоване повідомлення.
 
@@ -1790,6 +1834,88 @@ def _carry_source_formatting(doc, start: int, end: int, source_paragraph) -> Non
                 pass
 
 
+# =============================================================================
+# ПЕРЕВІРКА НАКАЗУ — спільна для кнопки в програмі й макросу Word
+# =============================================================================
+def review_order_text(text: str, order_name: str, mapping: dict, index_folder: str):
+    """Перевіряє СИРИЙ текст наказу (без `normalize_item_numbering`).
+
+    Номер і дата — з назви файлу, як і скрізь; підписний хвіст відсікається;
+    до знахідок `order_review` додаються частини, яких немає в таблиці.
+    """
+    body, signer = text_before_order_signer(text)
+    order_number, order_date = extract_metadata_from_filename(os.path.basename(order_name))
+    result = review_order(
+        body,
+        order_number=order_number,
+        order_date=order_date,
+        signer=signer,
+        mapping=mapping,
+        index_folder=index_folder or None,
+        full_text=text,  # порожні абзаци перед підписантом — у body їх уже немає
+    )
+    if mapping:
+        content ="\n".join(body.splitlines()[find_content_start_line(body):])
+        similar: list = []
+        for unit in collect_new_unit_names(content, mapping, similar=similar):
+            result.findings.append(ReviewFinding(
+                REVIEW_WARNING, "Частини немає в таблиці", "Наказ", f"«{unit}»",
+                "Перевірте написання назви або додайте рядок у таблицю.", (unit,),
+            ))
+        for unit, row in similar:
+            result.findings.append(ReviewFinding(
+                REVIEW_WARNING, "Частини немає в таблиці", "Наказ",
+                f"«{unit}» збігається з рядком таблиці «{row}» не повністю",
+                "Перевірте написання в наказі або в стовпці A.", (unit,),
+            ))
+    return result
+
+
+def run_review_cli(argv: list[str]) -> int:
+    """Консольна перевірка для макросу Word «Перевірити програмою».
+
+    Макрос передає текст відкритого документа (UTF-8, з номерами автонумерації)
+    і назву файлу; у відповідь — `findings_to_tsv`. Таблиця й індекс — з config.json
+    програми, як у кнопки «🎓 Перевірити наказ». Вікон не показує.
+    """
+    import argparse
+
+    parser = argparse.ArgumentParser(prog="generate_extracts_qt.py --review-text")
+    parser.add_argument("--review-text", required=True)
+    parser.add_argument("--order-name", default="")
+    parser.add_argument("--out", required=True)
+    parser.add_argument("--config", default="")
+    parser.add_argument("--index", default=None, help="тека індексу; порожній рядок — без індексу")
+    args = parser.parse_args(argv)
+
+    config_path = args.config or os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
+    config = {}
+    try:
+        with open(config_path, encoding="utf-8") as handle:
+            config = json.load(handle)
+    except (OSError, ValueError):
+        pass
+    notes = []
+    mapping = {}
+    excel = str(config.get("excel_path") or "")
+    if excel and os.path.isfile(excel):
+        mapping = read_recipient_mapping(path=excel).get("mapping", {})
+    else:
+        notes.append("Таблицю відповідностей не вибрано в програмі — адресати пунктів не перевірялись.")
+    if args.index is not None:
+        index_folder = args.index
+    else:
+        index_folder = default_index_folder(str(config.get("new_order_index_folder") or ""))
+
+    with open(args.review_text, encoding="utf-8-sig") as handle:
+        text = handle.read()
+    result = review_order_text(text, args.order_name or "наказ.docx", mapping, index_folder)
+    result.notes[:0] = notes
+    with open(args.out, "w", encoding="utf-8", newline="\n") as handle:
+        handle.write(findings_to_tsv(result))
+    return 0
+
+
 class App:
     def __init__(self, root):
         self.root = root
@@ -1807,6 +1933,8 @@ class App:
         self.executor = tk.StringVar()
         self.group_corps_var = tk.BooleanVar(value=True)
         self.duplex_2up_layout = tk.BooleanVar(value=True)
+        # Повідомлення: не переносити пункти внутрішнього переміщення в управлінні.
+        self.message_skip_internal_management = tk.BooleanVar(value=True)
 
         # Підписант оригіналу наказу (Командувач/Командир — зчитується автоматично з наказу)
         self.order_signer_position = tk.StringVar()
@@ -2026,6 +2154,10 @@ class App:
                         self.group_corps_var.set(data["group_corps"])
                     if "duplex_2up_layout" in data:
                         self.duplex_2up_layout.set(data["duplex_2up_layout"])
+                    if "message_skip_internal_management" in data:
+                        self.message_skip_internal_management.set(
+                            data["message_skip_internal_management"]
+                        )
 
                     self.p2_orders_folder.set(data.get("p2_orders_folder", ""))
                     self.p2_single_file.set(data.get("p2_single_file", ""))
@@ -2097,6 +2229,7 @@ class App:
             "p2_certifier_name": self.p2_certifier_name.get(),
             "group_corps": self.group_corps_var.get(),
             "duplex_2up_layout": self.duplex_2up_layout.get(),
+            "message_skip_internal_management": self.message_skip_internal_management.get(),
             "p2_orders_folder": self.p2_orders_folder.get(),
             "p2_single_file": self.p2_single_file.get(),
             "p2_source_mode": self.p2_source_mode.get(),
@@ -2632,7 +2765,10 @@ class App:
         tag_range.Paragraphs(1).Range.Delete()
         content_start = insert_point
         try:
+            skip_paragraphs = content_source.get("skip_paragraphs") or set()
             for p_index in range(first_para, last_para + 1):
+                if p_index in skip_paragraphs:
+                    continue
                 source_paragraph = source_doc.Paragraphs(p_index)
                 source_range = source_paragraph.Range.Duplicate
                 if "\x0c" in (source_range.Text or ""):
@@ -3276,7 +3412,22 @@ class App:
             if self.message_executor.get().strip():
                 replacements["{{виконавець}}"] = self.message_executor.get().strip()
 
-            decision = generate_decision_order(text=order_text, mapping=mapping, new_header="")
+            # Внутрішнє переміщення в управлінні — не для повідомлень (галочка
+            # на вкладці). Витягів до управління це не стосується.
+            skip_lines, skipped_labels = set(), []
+            if self.message_skip_internal_management.get():
+                skip_lines, skipped_labels = message_skipped_item_lines(routes)
+            if skipped_labels:
+                self.log(
+                    "Не додано до повідомлення (внутрішнє переміщення в управлінні): "
+                    + ", ".join(skipped_labels)
+                )
+            content_text = "\n".join(
+                line for index, line in enumerate(order_text.splitlines())
+                if index not in skip_lines
+            )
+
+            decision = generate_decision_order(text=content_text, mapping=mapping, new_header="")
             encrypted_content = decision.get("decision_text", "")
 
             # Відповідність рядків тексту абзацам Word — так само, як у витягах.
@@ -3292,11 +3443,20 @@ class App:
                 line_map = source_line_to_para[: len(order_lines)]
                 body_start_line = find_content_start_line(order_text)
                 if line_map and 0 <= body_start_line < len(line_map):
+                    # Абзац пропускається, лише якщо ВСІ його рядки пропущені.
+                    paragraph_lines: dict[int, list[int]] = {}
+                    for line_index, paragraph_index in enumerate(line_map):
+                        paragraph_lines.setdefault(paragraph_index, []).append(line_index)
                     content_source = {
                         "doc": source_doc,
                         "first_para": line_map[body_start_line],
                         "last_para": line_map[-1],
                         "mapping": mapping,
+                        "skip_paragraphs": {
+                            paragraph_index
+                            for paragraph_index, indices in paragraph_lines.items()
+                            if skip_lines and all(index in skip_lines for index in indices)
+                        },
                     }
             except Exception as map_error:
                 self.log(
@@ -3341,6 +3501,10 @@ class App:
                 f"Невпізнаних назв, виділених жовтим: {highlights}\n"
                 f"Частин, яких немає в таблиці: {table_gaps['new_units']}\n"
                 f"Без шифру або корпусу в таблиці: {table_gaps['problems']}"
+                + (
+                    f"\nНе додано (внутрішнє переміщення в управлінні): {', '.join(skipped_labels)}"
+                    if skipped_labels else ""
+                )
                 + (f"\nУВАГА: не вмістилося адресатів: {recipient_overflow}" if recipient_overflow else ""),
             )
         except Exception as error:
@@ -3403,19 +3567,20 @@ class App:
             self.p2_out_folder_manual.set(True)
             self.save_config()
 
-    def _read_word_text(self, doc_path: str) -> str:
+    def _read_word_text(self, doc_path: str, normalize: bool = True) -> str:
         """Текст наказу через Word, з кешем за файлом і часом його зміни.
 
         Запуск окремого екземпляра Word коштує близько секунди, а той самий наказ
         читається кілька разів за сеанс: розрахунок розсилки, оновлення підписанта,
         потім генерація витягів. Поки файл не змінився, вдруге Word не запускаємо.
+        `normalize=False` — сирий текст для перевірки наказу (`read_document_text`).
         """
         cache = getattr(self, "_word_text_cache", None)
         if cache is None:
             cache = self._word_text_cache = {}
         try:
             stat = os.stat(doc_path)
-            cache_key = (os.path.abspath(doc_path), stat.st_mtime_ns, stat.st_size)
+            cache_key = (os.path.abspath(doc_path), stat.st_mtime_ns, stat.st_size, normalize)
         except OSError:
             cache_key = None
         if cache_key is not None and cache_key in cache:
@@ -3428,7 +3593,7 @@ class App:
             word.Visible = False
             word.DisplayAlerts = 0  # wdAlertsNone: не показувати блокуючі діалоги (напр. "Зберегти зміни?")
             doc = word.Documents.Open(os.path.abspath(doc_path), ReadOnly=True)
-            text = read_document_text(doc)
+            text = read_document_text(doc, normalize=normalize)
             if cache_key is not None:
                 # Кеш свідомо маленький: тексти наказів важкі, а користь дає
                 # лише останній оброблюваний файл (і сусідні в пакеті).
@@ -3856,6 +4021,100 @@ class App:
             )
         finally:
             self._set_extract_action_buttons_state(NORMAL)
+
+    # =========================================================================
+    # ПЕРЕВІРКА НАКАЗУ (наприклад, складеного студентом)
+    # =========================================================================
+    def run_order_review_action(self):
+        """Перевіряє обрані накази без еталона: правила оформлення + індекс попередніх наказів.
+
+        Нічого не генерує й не змінює оригінал: поруч із наказом у теці
+        «Перевірка» з'являються звіт Excel і позначена копія з примітками Word.
+        """
+        self.save_config()
+        order_paths, _from_copies = self._selected_order_paths()
+        if not order_paths:
+            messagebox.showwarning("Помилка", "Оберіть наказ (або кілька), який треба перевірити.")
+            return
+
+        mapping = {}
+        excel = self.excel_path.get()
+        if excel and os.path.isfile(excel):
+            mapping = read_recipient_mapping(path=excel).get("mapping", {})
+        else:
+            self.log("УВАГА: таблицю відповідностей не вибрано — адресати пунктів не перевірялись.")
+        index_folder = default_index_folder(self.new_order_index_folder.get())
+
+        self.log("\n=== ПЕРЕВІРКА НАКАЗІВ ===")
+        reports, failures = [], []
+        for number, order_path in enumerate(order_paths, start=1):
+            name = os.path.basename(order_path)
+            self.log(f"\n[{number}/{len(order_paths)}] Перевірка: {name}")
+            try:
+                reports.append((name, *self._review_one_order(order_path, mapping, index_folder)))
+            except Exception as error:
+                explanation = explain_error(error)
+                self.log(f"  ПОМИЛКА перевірки «{name}»:\n    " + explanation.replace("\n", "\n    "))
+                failures.append((name, explanation))
+
+        lines = [
+            f"{name}: помилок {result.errors}, зауважень {result.warnings}"
+            for name, result, _folder in reports
+        ]
+        lines += [f"{name}: не перевірено — {error.splitlines()[0]}" for name, error in failures]
+        folders = sorted({folder for _name, _result, folder in reports})
+        messagebox.showinfo(
+            "Перевірка наказів",
+            "\n".join(lines[:15])
+            + (f"\n… ще {len(lines) - 15}" if len(lines) > 15 else "")
+            + ("\n\nЗвіт і позначена копія:\n" + "\n".join(folders[:3]) if folders else ""),
+        )
+
+    def _review_one_order(self, order_path: str, mapping: dict, index_folder: str):
+        """Перевіряє один наказ; повертає (результат, тека зі звітом)."""
+        # Сирий текст: «1.Капітана» без пропуску перевірка має побачити таким, як є.
+        result = review_order_text(
+            self._read_word_text(order_path, normalize=False), order_path, mapping, index_folder
+        )
+
+        for note in result.notes:
+            self.log(f"  {note}")
+        self.log(f"  Помилок: {result.errors}; зауважень: {result.warnings}.")
+        # У журнал — лише правило й номери пунктів, без ПІБ і РНОКПП.
+        for line in group_findings(result.findings):
+            self.log(f"  {line}")
+
+        folder = os.path.join(os.path.dirname(os.path.abspath(order_path)), "Перевірка")
+        os.makedirs(folder, exist_ok=True)
+        base = sanitize_filename(Path(order_path).stem)
+        ordered = sorted(result.findings, key=lambda finding: finding.level != "помилка")
+        _save_table_to_excel(
+            os.path.join(folder, f"Перевірка_{base}.xlsx"),
+            ["Серйозність", "Що перевірялось", "Де", "Що не так", "Як виправити"],
+            [(f.level, f.rule, f.where, f.what, f.how) for f in ordered]
+            + [("інфо", "Перевірка", "", note, "") for note in result.notes],
+        )
+
+        word = None
+        try:
+            word = win32com.client.DispatchEx("Word.Application")
+            word.Visible = False
+            word.DisplayAlerts = 0
+            marked, unplaced = save_marked_copy(
+                word, order_path, os.path.join(folder, f"{base} — перевірка.docx"), ordered
+            )
+            self.log(
+                f"  Позначена копія: {marked} позначок у тексті"
+                + (f", {unplaced} приміток на початку документа" if unplaced else "") + "."
+            )
+        except Exception as error:
+            self.log(f"  УВАГА: позначену копію не створено ({explain_error(error).splitlines()[0]}); "
+                     "звіт Excel збережено.")
+        finally:
+            if word:
+                force_quit_word(word)
+        self.log(f"  Звіт: {folder}")
+        return result, folder
 
     def _run_extracts_scope_action(
         self,

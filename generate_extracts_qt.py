@@ -15,6 +15,10 @@ if str(PROJECT_ROOT) not in sys.path:
 def main() -> int:
     import generate_extracts as legacy  # сам додає src у sys.path
 
+    # Макрос Word «Перевірити програмою»: перевірка без вікна (word_macro/NATProgramCheck.bas).
+    if "--review-text" in sys.argv:
+        return legacy.run_review_cli(sys.argv[1:])
+
     from nodeautomationtoolkit.generator_qt.main_window import launch
 
     return launch(legacy, sys.argv)

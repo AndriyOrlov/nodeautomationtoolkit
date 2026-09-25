@@ -60,6 +60,7 @@ app.message_cover_template_path = Var(os.path.join(E2E, "message_cover.docx"))
 app.message_content_template_path = Var(os.path.join(E2E, "message_content.docx"))
 app.message_out_folder = Var(out_folder)
 app.message_executor = Var("Тест Тестенко 00-000")
+app.message_skip_internal_management = Var(True)
 # run_generate_messages читає підписанта наказу й засвідчувача так само, як
 # run_extracts; без цих полів прогін падав ще до генерації.
 app.order_signer_position = Var("")
