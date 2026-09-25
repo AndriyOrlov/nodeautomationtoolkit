@@ -3,8 +3,7 @@ chcp 65001 >nul
 title Generator Vytyagiv (Qt)
 cd /d "%~dp0"
 
-rem New PySide6 shell over the same generator logic.
-rem The classic Tk window is still available via start_generator.bat.
+rem Starts the generator window (PySide6). There is no Tk version any more.
 rem Interpreter lookup order:
 rem   1) portable  - python\python.exe next to the program (nothing to install)
 rem   2) .venv     - developer virtual environment

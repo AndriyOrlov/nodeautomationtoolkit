@@ -25,7 +25,10 @@ from PySide6.QtGui import QGuiApplication  # noqa: E402
 from PySide6.QtWidgets import QApplication, QLineEdit  # noqa: E402
 
 from nodeautomationtoolkit.generator_qt import compat  # noqa: E402
-from nodeautomationtoolkit.generator_qt.main_window import create_qt_app_class, install_qt_bridge  # noqa: E402
+from nodeautomationtoolkit.generator_qt.main_window import (  # noqa: E402
+    create_qt_app_class,
+    install_qt_bridge,
+)
 from nodeautomationtoolkit.generator_qt.widgets import LogConsole  # noqa: E402
 
 
@@ -416,3 +419,178 @@ def test_old_config_with_single_file_opens_in_single_mode(shell, legacy, tmp_pat
     legacy.App.load_config(shell)
     assert shell.p2_source_mode.get() == "file"
     assert shell._selected_p2_order_paths() == [order]
+
+
+# ── Інструкція, папки результату, рамка перетягування наказу ────────────────
+
+
+def _find_buttons(widget, text_part):
+    from nodeautomationtoolkit.generator_qt.compat import TkButton
+
+    return [child for child in widget.findChildren(TkButton) if text_part in child.text()]
+
+
+def test_instruction_button_opens_dialog_with_text(shell, qt_app):
+    from nodeautomationtoolkit.generator_qt.instruction_dialog import INSTRUCTION_FILE
+
+    assert INSTRUCTION_FILE.is_file()
+    [instruction_button] = _find_buttons(shell.main_window, "Інструкція")
+    instruction_button.click()
+    qt_app.processEvents()
+    dialog = shell._instruction_dialog
+    assert dialog is not None and dialog.isVisible()
+    text = dialog.viewer.toPlainText()
+    assert "Таблиця частин" in text and "Повідомлення" in text
+    dialog.close()
+
+
+def test_result_folder_buttons_on_extracts_and_messages(shell, tmp_path, monkeypatch, dialogs):
+    opened = []
+    monkeypatch.setattr(os, "startfile", lambda path: opened.append(path), raising=False)
+    assert _find_buttons(shell.tab_extracts_page, "Папка результату")
+    assert _find_buttons(shell.tab_messages_page, "Папка результату")
+
+    shell.out_folder.set(str(tmp_path))
+    shell.open_extracts_output_folder()
+    assert opened == [str(tmp_path)]
+
+    order = _order(tmp_path, "Наказ № 40 від 01.09.2026.docx")
+    shell.message_out_folder.set("")
+    shell.doc_path.set(order)
+    shell.open_message_output_folder()  # Messages_Output ще немає — попередження
+    assert dialogs and dialogs[-1][0] == "showwarning"
+
+    (tmp_path / "Messages_Output").mkdir()
+    shell.open_message_output_folder()
+    assert opened[-1] == str(tmp_path / "Messages_Output")
+
+
+def test_order_dropped_into_zone_is_selected_and_messages_start(shell, tmp_path, monkeypatch):
+    from PySide6.QtCore import QMimeData, QPointF, QUrl
+    from PySide6.QtGui import QDropEvent
+
+    from nodeautomationtoolkit.generator_qt.widgets import OrderDropZone
+
+    started = []
+    monkeypatch.setattr(type(shell), "run_generate_messages", lambda self: started.append(self.doc_path.get()))
+    order = _order(tmp_path, "Наказ № 41 від 01.09.2026.docx")
+    [zone] = shell.tab_messages_page.findChildren(OrderDropZone)
+
+    mime = QMimeData()
+    mime.setUrls([QUrl.fromLocalFile(str(tmp_path / "~$Наказ.docx")), QUrl.fromLocalFile(order)])
+    event = QDropEvent(
+        QPointF(5, 5), Qt.DropAction.CopyAction, mime, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier
+    )
+    zone.dropEvent(event)
+
+    assert shell.manual_order_paths == [os.path.abspath(order)]
+    assert started == [os.path.abspath(order)]
+
+
+def test_zone_ignores_non_orders_and_busy_state(shell, tmp_path, monkeypatch):
+    from PySide6.QtCore import QUrl
+
+    from nodeautomationtoolkit.generator_qt.widgets import dropped_order_paths
+
+    table = tmp_path / "словник.xlsx"
+    table.write_bytes(b"")
+    assert dropped_order_paths([QUrl.fromLocalFile(str(table))]) == []
+
+    started = []
+    monkeypatch.setattr(type(shell), "run_generate_messages", lambda self: started.append(True))
+    order = _order(tmp_path, "Наказ № 42 від 01.09.2026.docx")
+    shell._busy_depth = 1
+    try:
+        shell.generate_messages_for_dropped_order(order)
+    finally:
+        shell._busy_depth = 0
+    assert started == [] and shell.manual_order_paths == []
+
+
+def test_messages_tab_has_internal_management_checkbox(shell, legacy, tmp_path):
+    from PySide6.QtWidgets import QCheckBox
+
+    boxes = [
+        box for box in shell.tab_messages_page.findChildren(QCheckBox)
+        if "внутрішнє переміщення в управлінні" in box.text()
+    ]
+    assert len(boxes) == 1
+    assert shell.message_skip_internal_management.get() is True
+    assert boxes[0].isChecked()
+
+    boxes[0].click()
+    assert shell.message_skip_internal_management.get() is False
+
+    shell.config_file = str(tmp_path / "config.json")
+    legacy.App.save_config(shell)
+    shell.message_skip_internal_management.set(True)
+    legacy.App.load_config(shell)
+    assert shell.message_skip_internal_management.get() is False
+
+
+def test_compare_window_ignores_blank_paragraphs_by_default(shell, tmp_path, monkeypatch):
+    from nodeautomationtoolkit.generator_qt import compare_window
+
+    calls = []
+    monkeypatch.setattr(
+        compare_window,
+        "compare_docx_documents",
+        lambda *args, **kwargs: calls.append(kwargs) or (_ for _ in ()).throw(RuntimeError("stop")),
+    )
+    monkeypatch.setattr(compare_window.QMessageBox, "critical", lambda *args, **kwargs: None)
+    reference = _order(tmp_path, "еталон.docx")
+    checked = _order(tmp_path, "студент.docx")
+
+    window = shell._open_compare("витяги", checked)
+    assert window.ignore_blank_box.isChecked()
+    window.reference_edit.setText(reference)
+    window.run_comparison()
+    window.ignore_blank_box.setChecked(False)
+    window.run_comparison()
+    assert [call["ignore_blank_paragraphs"] for call in calls] == [True, False]
+    window.close()
+
+
+def test_order_review_button_writes_report_without_touching_the_order(
+    shell, legacy, tmp_path, monkeypatch, dialogs
+):
+    import openpyxl
+
+    order = tmp_path / "Наказ № 5 від 01.09.2026.docx"
+    order.write_bytes(b"original")
+    text = "\n".join([
+        "НАКАЗ",
+        "§ 1",
+        "Відповідно до пункту 1 Положення ПРИЗНАЧИТИ:",
+        "1. Капітана ТЕСТЕНКА Олега Васильовича, командира роти - КОМАНДИРОМ БАТАЛЬЙОНУ.",
+        "3. Капітана ПРИКЛАДЕНКА Івана Петровича, командира роти - КОМАНДИРОМ БАТАЛЬЙОНУ.",
+        "",
+        "Командир військової частини А0001",
+        "полковник                    Петро ТЕСТОВИЙ",
+    ])
+    marked = []
+
+    class FakeWord:
+        Visible = True
+        DisplayAlerts = 1
+
+    monkeypatch.setattr(shell, "_read_word_text", lambda path, normalize=True: text)
+    monkeypatch.setattr(legacy, "default_index_folder", lambda configured="": "")
+    monkeypatch.setattr(legacy.win32com.client, "DispatchEx", lambda *_args: FakeWord())
+    monkeypatch.setattr(legacy, "force_quit_word", lambda word: None)
+    monkeypatch.setattr(
+        legacy, "save_marked_copy", lambda word, source, output, findings: marked.append(output) or (1, 0)
+    )
+    shell.excel_path.set("")
+    shell._set_orders([str(order)])
+
+    [review_button] = _find_buttons(shell.tab_extracts_page, "Перевірити наказ")
+    review_button.click()
+
+    report = tmp_path / "Перевірка" / "Перевірка_Наказ № 5 від 01.09.2026.xlsx"
+    rows = list(openpyxl.load_workbook(report).active.iter_rows(values_only=True))
+    assert rows[0] == ("Серйозність", "Що перевірялось", "Де", "Що не так", "Як виправити")
+    assert ("помилка", "Нумерація пунктів", "Пункт 3", "після пункту 1 йде пункт 3") == rows[1][:4]
+    assert marked == [str(tmp_path / "Перевірка" / "Наказ № 5 від 01.09.2026 — перевірка.docx")]
+    assert order.read_bytes() == b"original"
+    assert any(name == "showinfo" and "помилок 1" in args[1] for name, args in dialogs)

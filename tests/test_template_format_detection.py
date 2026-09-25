@@ -7,9 +7,9 @@ Word відмовляється відкривати файл, якщо його
 
 import importlib.util
 import sys
+from pathlib import Path
 
 import pytest
-from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SRC_PATH = PROJECT_ROOT / "src"
@@ -134,3 +134,22 @@ def test_copy_does_not_modify_original_template(tmp_path):
     copy_template_for_editing(str(template), str(output))
 
     assert template.read_bytes() == _OLE2_SIGNATURE
+
+
+def test_missing_template_names_the_file(tmp_path):
+    """Зниклий зразок має називати себе, а не «[WinError 2]» без шляху.
+
+    shutil.copy2 у Windows кидає FileNotFoundError БЕЗ назви файлу, тож
+    користувач бачив лише код помилки й не знав, якого саме файлу немає.
+    """
+    absent = tmp_path / "зниклий зразок.docx"
+
+    with pytest.raises(generator.UserError) as error:
+        copy_template_for_editing(
+            str(absent), str(tmp_path / "result.docx"), label="зразок витягу"
+        )
+
+    text = str(error.value)
+    assert str(absent) in text
+    assert "зразок витягу" in text
+    assert "Що зробити:" in text

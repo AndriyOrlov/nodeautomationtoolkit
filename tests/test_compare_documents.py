@@ -3,15 +3,9 @@
 import io
 import zipfile
 from pathlib import Path
-from xml.etree import ElementTree as ET
-
-import pytest
 
 from nodeautomationtoolkit.builtin_nodes.compare_documents import (
-    DocParagraph,
     compare_docx_documents,
-    generate_ai_chat_report,
-    _parse_docx_paragraphs,
 )
 
 
@@ -131,3 +125,54 @@ def test_ai_chat_report_is_confidential_and_rule_only(tmp_path: Path):
     assert "Фактично у генераторі" in report
     assert "Що виправити в коді" in report
     assert "Запит до AI" in report
+
+
+_BLANK = "<w:p/>"
+_ITEM_1 = '<w:p><w:r><w:t>1. Старшого лейтенанта призначити до військової частини А1111.</w:t></w:r></w:p>'
+_ITEM_2 = '<w:p><w:r><w:t>2. Капітана призначити до військової частини А2222.</w:t></w:r></w:p>'
+_SIGNER = '<w:p><w:r><w:t>Командир військової частини А0001</w:t></w:r></w:p>'
+
+
+def _pair(tmp_path: Path, reference: list[str], checked: list[str]) -> tuple[Path, Path]:
+    ref_path = tmp_path / "ref.docx"
+    gen_path = tmp_path / "gen.docx"
+    ref_path.write_bytes(_create_test_docx(reference))
+    gen_path.write_bytes(_create_test_docx(checked))
+    return ref_path, gen_path
+
+
+def test_blank_paragraphs_are_ignored_by_default(tmp_path: Path):
+    """Зайві чи відсутні Enter у перевірюваному документі — не розбіжність."""
+    ref_path, gen_path = _pair(
+        tmp_path,
+        [_ITEM_1, _BLANK, _ITEM_2, _BLANK, _BLANK, _SIGNER],
+        [_BLANK, _ITEM_1, _BLANK, _BLANK, _BLANK, _ITEM_2, _SIGNER, _BLANK],
+    )
+    res = compare_docx_documents(ref_path, gen_path, mode="витяги")
+    assert res.is_identical is True
+    assert res.discrepancies == []
+    assert all(row["status"] == "EQUAL" for row in res.side_by_side_rows)
+    assert len(res.side_by_side_rows) == 3
+
+
+def test_blank_paragraphs_do_not_hide_real_differences(tmp_path: Path):
+    ref_path, gen_path = _pair(
+        tmp_path,
+        [_ITEM_1, _BLANK, _ITEM_2, _BLANK, _BLANK, _SIGNER],
+        [_ITEM_1, _BLANK, _BLANK, _SIGNER],
+    )
+    res = compare_docx_documents(ref_path, gen_path, mode="витяги")
+    assert not res.is_identical
+    assert [d.item_label for d in res.discrepancies] == ["Пункт 2."]
+
+
+def test_blank_paragraphs_can_still_be_compared_when_asked(tmp_path: Path):
+    ref_path, gen_path = _pair(
+        tmp_path,
+        [_ITEM_1, _BLANK, _ITEM_2, _BLANK, _BLANK, _SIGNER],
+        [_ITEM_1, _ITEM_2, _SIGNER],
+    )
+    res = compare_docx_documents(ref_path, gen_path, mode="витяги", ignore_blank_paragraphs=False)
+    issue_types = {d.issue_type for d in res.discrepancies}
+    assert "Відсутній ентер перед пунктом" in issue_types
+    assert "Відступ перед підписантом" in issue_types

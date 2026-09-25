@@ -7,8 +7,8 @@
 import pytest
 
 from nodeautomationtoolkit.builtin_nodes.copy_generator import (
-    find_signature_name_tail,
     find_body_start_paragraph_index,
+    find_signature_name_tail,
 )
 
 

@@ -21,7 +21,6 @@
 import pathlib
 
 import pytest
-
 from _undefined_names import find_undefined_names
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -39,25 +38,7 @@ CHECKED = [
 # наказів, і що саме мало бути на місці цих імен — не очевидно, тож вгадувати
 # не можна. Список звужується, а не росте: якщо дефект виправлять, тест
 # скаже прибрати рядок звідси; якщо зʼявиться новий — тест впаде.
-KNOWN_UNFIXED = {
-    # Діалог PyQt: `_run` читає `before_text`/`after_text`/`extra`, яких у
-    # ньому ніхто не створює. Поруч є віджети `self._before`, `self._after`,
-    # `self._extra` — схоже, при правці загубились виклики до них. До
-    # генератора наказів цей файл не належить.
-    "src/nodeautomationtoolkit/ui/order_analysis_dialog.py": {
-        ("OrderAnalysisDialog._run", "before_text"),
-        ("OrderAnalysisDialog._run", "after_text"),
-        ("OrderAnalysisDialog._run", "extra"),
-    },
-    # COM-гілка витягів: `DataTable` не імпортовано, тож гілка завжди падає
-    # `NameError`, збій ковтається, і роботу робить запасний шлях на
-    # python-docx. Дописати імпорт НЕ МОЖНА: це вмикає мертву гілку, і
-    # `test_signatory_slash_line_breaks` одразу падає. Гілку треба лагодити
-    # цілком (разом із полями сторінки, розд. 12.2) або прибирати.
-    "src/nodeautomationtoolkit/builtin_nodes/word_batch.py": {
-        ("_try_create_extracts_via_word_com", "DataTable"),
-    },
-}
+KNOWN_UNFIXED: dict[str, set[tuple[str, str]]] = {}
 
 
 def _describe(problems) -> str:

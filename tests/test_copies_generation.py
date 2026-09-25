@@ -1,9 +1,8 @@
 import inspect
 
 from generate_extracts import (
-    extract_metadata_from_filename,
-    format_ukr_date,
     build_extracts_filename,
+    extract_metadata_from_filename,
     plan_2up_page_layout,
 )
 from nodeautomationtoolkit.builtin_nodes.copy_generator import format_certifier_block
@@ -77,7 +76,7 @@ def test_plan_2up_page_layout():
 
 
 def test_copy_filename_and_title_support():
-    from generate_extracts import build_copy_two_filename, sanitize_filename
+    from generate_extracts import build_copy_two_filename
     
     filename = build_copy_two_filename("355/1", "27.07.2026", "Наказ_355.docx")
     assert filename == "2,3_№355-1 від 27.07.2026.docx"
@@ -87,7 +86,7 @@ def test_copy_filename_and_title_support():
 
 
 def test_signer_boundary_detection():
-    from generate_extracts import _find_order_signer, text_before_order_signer
+    from generate_extracts import text_before_order_signer
 
     order_text = (
         "НАКАЗ КОМАНДУВАЧА\n"

@@ -1,6 +1,6 @@
-# Анотації не обчислюються під час імпорту: без ttkbootstrap `tb` — це
-# `tkinter.ttk`, у якому немає `Window`, і `root: tb.Window` валив імпорт
-# модуля (а з ним — збирання всіх тестів на CI).
+# Інтерфейс будує Qt-оболонка (`generate_extracts_qt.py`, `generator_qt`). Логіка
+# написана під API tkinter (StringVar, messagebox, filedialog, константи), і оболонка
+# перед запуском підміняє ці імена своєю реалізацією (`install_qt_bridge`).
 from __future__ import annotations
 
 import os
@@ -12,25 +12,8 @@ import time
 from datetime import datetime
 from pathlib import Path
 import tkinter as tk
-from tkinter import filedialog, messagebox, ttk
-from tkinter.scrolledtext import ScrolledText
-
-# ttkbootstrap для сучасного та привабливого інтерфейсу
-try:
-    import ttkbootstrap as tb
-    from ttkbootstrap.constants import *
-    HAS_TTKBOOTSTRAP = True
-except ImportError:
-    HAS_TTKBOOTSTRAP = False
-    import tkinter.ttk as tb
-    from tkinter.constants import *
-
-# windnd для drag-and-drop перетягування файлів на вікно
-try:
-    import windnd
-    HAS_WINDND = True
-except ImportError:
-    HAS_WINDND = False
+from tkinter import filedialog, messagebox
+from tkinter.constants import *
 
 import win32com.client
 import openpyxl
@@ -41,9 +24,16 @@ src_path = os.path.join(project_root, "src")
 if src_path not in sys.path:
     sys.path.insert(0, src_path)
 
+# Номер версії — один на всю програму (`src/nodeautomationtoolkit/__init__.py`).
+# Домовленість із користувачем 18.09.2026: КОЖНА наша зміна в програмі збільшує
+# останнє число на одиницю, щоб у вікні було видно, чи запущена вже виправлена
+# версія, чи ще стара.
+from nodeautomationtoolkit import __version__ as APP_VERSION
+
 from nodeautomationtoolkit.builtin_nodes.recipient_mapping import (
     read_recipient_mapping,
     _build_unit_fuzzy_pattern,
+    keep_open_names_of,
     _table_cipher,
     map_military_units,
     normalize_item_numbering,
@@ -63,8 +53,16 @@ from nodeautomationtoolkit.builtin_nodes.copy_generator import (
     retry_on_busy_word,
     _ORDER_BODY_KEYWORDS,
 )
-from nodeautomationtoolkit.builtin_nodes.compare_window import DocxCompareWindow
 from nodeautomationtoolkit.builtin_nodes.blank_images import remove_blank_images
+from nodeautomationtoolkit.order_review import WARNING as REVIEW_WARNING
+from nodeautomationtoolkit.order_review import Finding as ReviewFinding
+from nodeautomationtoolkit.order_review import review_order
+from nodeautomationtoolkit.order_review.check import (
+    default_index_folder,
+    findings_to_tsv,
+    group_findings,
+)
+from nodeautomationtoolkit.order_review.marking import save_marked_copy
 from nodeautomationtoolkit.builtin_nodes.template_tags import (
     SIGNER_TAGS, tag_aliases, expand_common_tags, certifier_tags, signer_tags,
 )
@@ -281,8 +279,11 @@ def load_saved_analysis_reports(order_path: str, output_folder: str) -> dict:
     }
 
 
-def read_document_text(doc) -> str:
+def read_document_text(doc, normalize: bool = True) -> str:
     """Текст документа, зібраний З АБЗАЦІВ, а не з `Content.Text`.
+
+    `normalize=False` — без `normalize_item_numbering`: перевірці наказу треба
+    бачити «1.Капітана» таким, як його набрали.
 
     `Content.Text` склеює цілий рядок таблиці в один рядок тексту, тоді як
     `doc.Paragraphs` рахує кожну комірку окремим абзацом. Через це нумерація
@@ -311,7 +312,8 @@ def read_document_text(doc) -> str:
             if number and not re.match(r"^\s*\d", paragraph_text):
                 paragraph_text = f"{number} {paragraph_text}"
         lines.append(paragraph_text)
-    return normalize_item_numbering("\n".join(lines))
+    text = "\n".join(lines)
+    return normalize_item_numbering(text) if normalize else text
 
 
 _LIST_ITEM_NUMBER_RE = re.compile(r"^\d{1,3}(?:\.\d{1,3})*[\.\)]$")
@@ -413,72 +415,14 @@ def is_generated_copy_filename(filename: str) -> bool:
     return name.startswith(COPY_FILENAME_PREFIX.lower() + "_") or _LEGACY_COPY_PREFIX in name
 
 
-def apply_ukrainian_typography(text: str) -> str:
-    """Замінює пробіли після коротких прийменників, сполучників та скорочень на нерозривні (\u00A0)."""
-    result = text or ""
-    # Код ВОС має лишатися суцільним: «ВОС - 0602002» не можна розривати між
-    # рядками, інакше номер зависає під самим краєм сторінки.
-    result = re.sub(
-        r"(?i)\b(ВОС)\s*(-|–|—)\s*(\d+)",
-        lambda m: f"{m.group(1)} {m.group(2)} {m.group(3)}",
-        result,
-    )
-    pattern = r"(?i)\b(з|із|зі|та|до|в|у|на|і|й|по|за|від|при|під|над|про|для|без|через|шпк|вос-?\d*|зс|р\.н\.|в/ч|в\.ч\.|№|п\.|пп\.|ст\.)\s+"
-    return re.sub(pattern, lambda m: f"{m.group(1)} ", result)
-
-
-def clean_duplicated_units(text: str) -> str:
-    """Усуває повторення фраз 'військової частини' та однакових шифрів підряд із збереженням регістру."""
-    def _rep_phrase(match):
-        m_txt = match.group(0)
-        letters = [c for c in m_txt if c.isalpha()]
-        if letters and all(c.isupper() for c in letters):
-            return "ВІЙСЬКОВОЇ ЧАСТИНИ "
-        return "військової частини "
-
-    t = re.sub(
-        r"\b(?:військов(?:ої|а|у|ій|ою)\s+частин(?:и|а|у|і|ою)\s*){2,}",
-        _rep_phrase,
-        text or "",
-        flags=re.IGNORECASE,
-    )
-    t = re.sub(
-        r"\b(військов\w+\s+частин\w+\s+[АA]\d+)(?:\s+\1\b)+",
-        r"\1",
-        t,
-        flags=re.IGNORECASE,
-    )
-    t = re.sub(
-        r"\b(ВІЙСЬКОВ\w+\s+ЧАСТИН\w+\s+[АA]\d+)(?:\s+\1\b)+",
-        r"\1",
-        t,
-    )
-    return t
-
-
-def ensure_blank_line_before_items(text: str) -> str:
-    """Гарантує наявність рівно 1 порожнього рядка перед кожним пунктом наказу
-    та рівно 2 порожніх рядків перед підписантом наказу.
-    Якщо порожній рядок вже є — додатковий не вставляється, якщо їх кілька — згортається до потрібної кількості."""
-    lines = (text or "").splitlines()
-    result = []
-    for idx, line in enumerate(lines):
-        clean = line.strip()
-        is_item = bool(re.match(r"^\d{1,3}(?:\.\d{1,3})*[\.\)]\s+", clean))
-        is_signer = bool(_ORDER_SIGNER_START_RE.match(clean))
-
-        if is_signer and idx > 0 and result:
-            while result and result[-1].strip() == "":
-                result.pop()
-            result.append("")
-            result.append("")
-        elif is_item and idx > 0 and result:
-            while len(result) > 1 and result[-1].strip() == "" and result[-2].strip() == "":
-                result.pop()
-            if result[-1].strip() != "":
-                result.append("")
-        result.append(line)
-    return "\n".join(result)
+#: Правила набору (нерозривні пробіли, повтори «військової частини», порожні
+#: рядки) спільні з генератором наказів — лежать у пакеті, а не тут.
+from nodeautomationtoolkit.builtin_nodes.typography import (  # noqa: E402
+    ORDER_SIGNER_START_RE as _ORDER_SIGNER_START_RE,
+    apply_ukrainian_typography,
+    clean_duplicated_units,
+    ensure_blank_line_before_items,
+)
 
 
 def is_biographical_paragraph(p_text: str) -> bool:
@@ -647,6 +591,32 @@ def _unit_name_tail_length(text: str, end: int, max_words: int = 3) -> int:
     return position - end
 
 
+def unmatched_open_unit_spans(text: str, mapping=None) -> list[tuple[int, int]]:
+    """`find_unmatched_open_unit_spans` без назв рядків таблиці з позначкою «$».
+
+    Такі назви лишаються відкритими навмисно, тож жовтої позначки не отримують.
+    """
+    spans = find_unmatched_open_unit_spans(text)
+    kept_names = keep_open_names_of(mapping)
+    if not spans or not kept_names:
+        return spans
+    from nodeautomationtoolkit.builtin_nodes.message_order import soften_unit_text
+
+    kept_patterns = [_build_unit_fuzzy_pattern(soften_unit_text(name)) for name in kept_names]
+    result = []
+    for start, end in spans:
+        span_text = soften_unit_text(text[start:end]).casefold()
+        window = soften_unit_text(text[max(0, start - 200):end + 200])
+        if any(
+            span_text in match.group(0).casefold()
+            for pattern in kept_patterns
+            for match in pattern.finditer(window)
+        ):
+            continue
+        result.append((start, end))
+    return result
+
+
 def collect_new_unit_names(text: str, mapping: dict, similar: list | None = None) -> list[str]:
     """Відкриті назви частин із наказу, яких немає в таблиці (стовпець A).
 
@@ -660,12 +630,12 @@ def collect_new_unit_names(text: str, mapping: dict, similar: list | None = None
 
     known_patterns = [
         _build_unit_fuzzy_pattern(soften_unit_text(str(name)))
-        for name in (mapping or {})
+        for name in (*(mapping or {}), *keep_open_names_of(mapping))
         if str(name).strip()
     ]
     names: list[str] = []
     seen: set[str] = set()
-    for start, end in find_unmatched_open_unit_spans(ciphered):
+    for start, end in unmatched_open_unit_spans(ciphered, mapping):
         tail = _unit_name_tail_length(ciphered, end)
         name = re.sub(r"\s+", " ", ciphered[start:end + tail]).strip()
         key = name.casefold()
@@ -699,6 +669,12 @@ def describe_cipher_problems(problems: list) -> list[str]:
             lines.append(
                 f"УВАГА: для «{problem[1]}» у стовпці D стоїть «{problem[2]}», але рядка "
                 "цього корпусу з шифром у таблиці немає — ланку корпусу не додано."
+            )
+        elif problem[0] == "merged_cell":
+            lines.append(
+                f"УВАГА: у стовпці A «{problem[1]}» записано дві частини, а шифр у рядку той самий, "
+                f"що й у «{problem[2]}» — першу частину в повідомленні не зашифровано. "
+                "Запишіть її окремим рядком зі своїм шифром."
             )
     return lines
 
@@ -1090,6 +1066,37 @@ def build_message_recipient_list(mapping: dict, routes: dict) -> list[str]:
     return groups["corps"] + groups["units"] + groups["tck"]
 
 
+def message_skipped_item_lines(routes: dict) -> tuple[set[int], list[str]]:
+    """Рядки наказу, які НЕ переносяться у зміст повідомлення.
+
+    Це пункти внутрішнього переміщення в управлінні (з посади в управлінні на
+    посаду в управлінні): повідомляти про них нікого. Разом із пунктом
+    прибирається й шапка (§, «Відповідно до …:»), під якою не лишилось жодного
+    іншого пункту, — інакше вона висіла б у повідомленні сама. Номери решти
+    пунктів не змінюються: це номери пунктів наказу.
+    """
+    items = routes.get("item_spans") or []
+    skipped = [item for item in items if item.get("internal_management_move")]
+    if not skipped:
+        return set(), []
+
+    lines: set[int] = set()
+    for item in skipped:
+        lines.update(range(int(item["start_line"]), int(item["end_line"]) + 1))
+
+    kept_heading_starts = {
+        int(heading_range[0])
+        for item in items
+        if not item.get("internal_management_move")
+        for heading_range in item.get("heading_ranges") or []
+    }
+    for item in skipped:
+        for start, end in item.get("heading_ranges") or []:
+            if int(start) not in kept_heading_starts:
+                lines.update(range(int(start), int(end) + 1))
+    return lines, [str(item.get("label", "")).strip() for item in skipped]
+
+
 def build_addressee_kind_text(groups: dict[str, list[str]]) -> str:
     """Текст для тегу {{тцк чі вч}} — кому саме адресоване повідомлення.
 
@@ -1114,25 +1121,6 @@ def build_addressee_kind_text(groups: dict[str, list[str]]) -> str:
 _MESSAGE_ADDRESSEE_KIND_TAGS = ("{{тцк чі вч}}", "{{тцк чи вч}}")
 
 
-_ORDER_SIGNER_START_RE = re.compile(
-    # «в.о.» без «т» — окремий вживаний варіант, якого тут бракувало. Крапки
-    # обов'язкові: без них шаблон ловив би звичайне «в …» на початку рядка.
-    #
-    # Родові форми («командувача», «начальника») сюди додавати НЕ МОЖНА, хоч і
-    # спокусливо: підписний блок часто дворядковий — «Тимчасово виконуючий
-    # обов'язки / командувача військ …», — а `_analyze_order` шукає підписанта
-    # З КІНЦЯ і бере ОСТАННІЙ збіг. Тоді початком блока ставав його ж другий
-    # рядок, і в тег {{підписант}} потрапляла половина блока.
-    # Скорочення закінчується крапкою, тому кінцевий `\b` до нього не
-    # застосовний (між «.» і пробілом межі слова немає) — замість нього
-    # заглядання вперед на пробіл.
-    r"^\s*(?:"
-    r"(?:т\s*\.\s*)?в\s*\.\s*о\s*\.?(?=\s)"
-    r"|тимчасово\s+виконуюч(?:ий|а)?\b"
-    r"|(?:командувач|командир|начальник|заступник\s+командувача)\b"
-    r")",
-    re.IGNORECASE | re.UNICODE,
-)
 #: Перелік звань окремо: він потрібен і прив'язаним до початку рядка (звичайний
 #: підписний блок), і всередині рядка (коли звання стоїть поруч із посадою).
 _RANK_ALTERNATIVES = (
@@ -1444,12 +1432,120 @@ def is_path_writable(path: str) -> bool:
         return False
 
 
-def copy_template_for_editing(template_path: str, output_path: str) -> str:
+class UserError(Exception):
+    """Помилка, яку показуємо користувачу простими словами.
+
+    `what` — що саме сталося, `todo` — що з цим робити. Текст складається
+    так, щоб його зрозуміла людина, яка ніколи не відкривала журнал програми:
+    без кодів, без англійських слів, з назвою конкретного файлу.
+    """
+
+    def __init__(self, what: str, todo: str = "", detail: str = ""):
+        self.what = what.strip()
+        self.todo = todo.strip()
+        self.detail = detail.strip()
+        super().__init__(self.what)
+
+    def __str__(self) -> str:
+        parts = [f"Що сталося: {self.what}"]
+        if self.todo:
+            parts.append(f"Що зробити: {self.todo}")
+        if self.detail:
+            parts.append(f"(технічні подробиці: {self.detail})")
+        return "\n".join(parts)
+
+
+# Коди Windows, які трапляються в цій програмі найчастіше. Windows часто
+# повідомляє їх БЕЗ назви файлу («[WinError 2] The system cannot find the
+# file specified»), тому саме тут вони перетворюються на зрозумілий текст.
+_WINDOWS_DRIVE_ERRORS = (21, 53, 67, 1231, 1265)  # диск/мережева тека недоступні
+_WINDOWS_BUSY_ERRORS = (32, 33)                   # файл тримає інша програма
+
+
+def _error_file_name(error: BaseException) -> str:
+    """Назва файлу з помилки, якщо ОС її повідомила."""
+    for attribute in ("filename", "filename2"):
+        value = getattr(error, attribute, None)
+        if value:
+            return str(value)
+    return ""
+
+
+def explain_error(error: BaseException) -> str:
+    """Перекладає будь-який збій на просту мову: що сталося і що робити.
+
+    Показується і у вікні, і в журналі. Технічний текст не викидається —
+    він лишається в кінці, щоб було з чим прийти по допомогу.
+    """
+    if isinstance(error, UserError):
+        return str(error)
+
+    technical = f"{type(error).__name__}: {error}".strip()
+    winerror = getattr(error, "winerror", None)
+    name = _error_file_name(error)
+    named = f"«{os.path.basename(name)}»" if name else "потрібний файл"
+    where = f"\n{name}" if name else ""
+
+    if isinstance(error, FileNotFoundError) or winerror in (2, 3):
+        return str(UserError(
+            f"комп'ютер не знайшов {named} — такого файлу на диску немає." + where,
+            "Файл перейменували, перемістили або видалили. Відкрийте «Зразки та "
+            "реквізити» й виберіть його заново кнопкою «Вибрати», а наказ — "
+            "кнопкою вибору наказу в головному вікні.",
+            technical,
+        ))
+
+    if isinstance(error, PermissionError) or winerror in _WINDOWS_BUSY_ERRORS:
+        return str(UserError(
+            f"файл {named} зараз зайнятий іншою програмою або закритий для запису." + where,
+            "Закрийте цей файл у Word чи Excel (і перевірте, чи не відкритий він "
+            "у вікні попереднього перегляду) і натисніть кнопку ще раз.",
+            technical,
+        ))
+
+    if winerror in _WINDOWS_DRIVE_ERRORS:
+        return str(UserError(
+            "диск або мережева тека, де лежить потрібний файл, зараз недоступні." + where,
+            "Перевірте, чи підключений диск (наприклад, E:) і чи є мережа, "
+            "потім повторіть.",
+            technical,
+        ))
+
+    if type(error).__name__ == "com_error":
+        return str(UserError(
+            "Word не виконав дію: він або зайнятий, або показує власне вікно "
+            "(наприклад, запит на збереження), або його закрили під час роботи.",
+            "Закрийте всі вікна Word, переконайтесь, що жоден документ не чекає "
+            "відповіді, і повторіть. Якщо не допомогло — перезавантажте комп'ютер.",
+            technical,
+        ))
+
+    return str(UserError(
+        "сталася несподівана помилка, і програма зупинила саме цей файл.",
+        "Спробуйте ще раз. Якщо повториться — збережіть текст із журналу "
+        "(нижнє поле вікна) і покажіть його розробнику.",
+        technical,
+    ))
+
+
+def copy_template_for_editing(
+    template_path: str, output_path: str, label: str = "зразок"
+) -> str:
     """Створює робочу копію шаблону з коректним для його вмісту розширенням.
 
     Повертає шлях робочої копії. Якщо він відрізняється від `output_path`,
     викликач має після `SaveAs2` прибрати проміжний файл.
     """
+    if not os.path.isfile(template_path):
+        # shutil.copy2 у Windows кидає «[WinError 2] The system cannot find the
+        # file specified» БЕЗ назви файлу, а detect_word_extension мовчки
+        # проковтує відсутній файл — через це причина збою була невидима.
+        raise UserError(
+            f"немає файлу, який вибраний як {label}:\n{template_path}",
+            "Такого файлу на диску немає: його перейменували, перемістили або "
+            "видалили. Відкрийте «Зразки та реквізити», натисніть «Вибрати» "
+            f"біля рядка «{label}» і вкажіть файл заново.",
+        )
     real_ext = detect_word_extension(template_path)
     if real_ext.lower() == os.path.splitext(output_path)[1].lower():
         working_path = output_path
@@ -1738,10 +1834,94 @@ def _carry_source_formatting(doc, start: int, end: int, source_paragraph) -> Non
                 pass
 
 
+# =============================================================================
+# ПЕРЕВІРКА НАКАЗУ — спільна для кнопки в програмі й макросу Word
+# =============================================================================
+def review_order_text(text: str, order_name: str, mapping: dict, index_folder: str):
+    """Перевіряє СИРИЙ текст наказу (без `normalize_item_numbering`).
+
+    Номер і дата — з назви файлу, як і скрізь; підписний хвіст відсікається;
+    до знахідок `order_review` додаються частини, яких немає в таблиці.
+    """
+    body, signer = text_before_order_signer(text)
+    order_number, order_date = extract_metadata_from_filename(os.path.basename(order_name))
+    result = review_order(
+        body,
+        order_number=order_number,
+        order_date=order_date,
+        signer=signer,
+        mapping=mapping,
+        index_folder=index_folder or None,
+        full_text=text,  # порожні абзаци перед підписантом — у body їх уже немає
+    )
+    if mapping:
+        content ="\n".join(body.splitlines()[find_content_start_line(body):])
+        similar: list = []
+        for unit in collect_new_unit_names(content, mapping, similar=similar):
+            result.findings.append(ReviewFinding(
+                REVIEW_WARNING, "Частини немає в таблиці", "Наказ", f"«{unit}»",
+                "Перевірте написання назви або додайте рядок у таблицю.", (unit,),
+            ))
+        for unit, row in similar:
+            result.findings.append(ReviewFinding(
+                REVIEW_WARNING, "Частини немає в таблиці", "Наказ",
+                f"«{unit}» збігається з рядком таблиці «{row}» не повністю",
+                "Перевірте написання в наказі або в стовпці A.", (unit,),
+            ))
+    return result
+
+
+def run_review_cli(argv: list[str]) -> int:
+    """Консольна перевірка для макросу Word «Перевірити програмою».
+
+    Макрос передає текст відкритого документа (UTF-8, з номерами автонумерації)
+    і назву файлу; у відповідь — `findings_to_tsv`. Таблиця й індекс — з config.json
+    програми, як у кнопки «🎓 Перевірити наказ». Вікон не показує.
+    """
+    import argparse
+
+    parser = argparse.ArgumentParser(prog="generate_extracts_qt.py --review-text")
+    parser.add_argument("--review-text", required=True)
+    parser.add_argument("--order-name", default="")
+    parser.add_argument("--out", required=True)
+    parser.add_argument("--config", default="")
+    parser.add_argument("--index", default=None, help="тека індексу; порожній рядок — без індексу")
+    args = parser.parse_args(argv)
+
+    config_path = args.config or os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
+    config = {}
+    try:
+        with open(config_path, encoding="utf-8") as handle:
+            config = json.load(handle)
+    except (OSError, ValueError):
+        pass
+    notes = []
+    mapping = {}
+    excel = str(config.get("excel_path") or "")
+    if excel and os.path.isfile(excel):
+        mapping = read_recipient_mapping(path=excel).get("mapping", {})
+    else:
+        notes.append("Таблицю відповідностей не вибрано в програмі — адресати пунктів не перевірялись.")
+    if args.index is not None:
+        index_folder = args.index
+    else:
+        index_folder = default_index_folder(str(config.get("new_order_index_folder") or ""))
+
+    with open(args.review_text, encoding="utf-8-sig") as handle:
+        text = handle.read()
+    result = review_order_text(text, args.order_name or "наказ.docx", mapping, index_folder)
+    result.notes[:0] = notes
+    with open(args.out, "w", encoding="utf-8", newline="\n") as handle:
+        handle.write(findings_to_tsv(result))
+    return 0
+
+
 class App:
-    def __init__(self, root: tb.Window):
+    def __init__(self, root):
         self.root = root
-        self.root.title("Node Automation Toolkit — Генератор витягів та примірників")
+        self.root.title(
+            f"Node Automation Toolkit {APP_VERSION} — Генератор витягів та примірників"
+        )
         self.root.geometry("1180x880")
         self.root.minsize(920, 700)
 
@@ -1753,6 +1933,8 @@ class App:
         self.executor = tk.StringVar()
         self.group_corps_var = tk.BooleanVar(value=True)
         self.duplex_2up_layout = tk.BooleanVar(value=True)
+        # Повідомлення: не переносити пункти внутрішнього переміщення в управлінні.
+        self.message_skip_internal_management = tk.BooleanVar(value=True)
 
         # Підписант оригіналу наказу (Командувач/Командир — зчитується автоматично з наказу)
         self.order_signer_position = tk.StringVar()
@@ -1795,6 +1977,38 @@ class App:
         self.p2_preview_delay = tk.StringVar(value=str(PREVIEW_DEFAULT_DELAY))
         self.last_copy_two_paths: list[str] = []
 
+        # Конфігурація вкладки «Накази» — генератор наказів по особовому складу.
+        # «new_order_» означає наказ, який ми складаємо; «order_signer_» вище —
+        # підписант чужого наказу, з якого робимо витяги.
+        self.new_order_archive_folder = tk.StringVar()
+        self.new_order_index_folder = tk.StringVar()
+        self.new_order_index_force = tk.BooleanVar(value=False)
+        self.new_order_plan_path = tk.StringVar()
+        self.new_order_document_paths: list[str] = []
+        self.new_order_source_summary = tk.StringVar(
+            value="Джерела не обрано — план переміщення або документи"
+        )
+        self.new_order_template_path = tk.StringVar()
+        self.new_order_out_folder = tk.StringVar()
+        self.new_order_executor = tk.StringVar()
+        self.new_order_number = tk.StringVar()
+        self.new_order_date = tk.StringVar()
+        self.new_order_section = tk.StringVar()
+        self.new_order_points = tk.StringVar(value="пункту ___")
+        # Вид наказу: «призначення» (за замовчуванням) або «звільнення».
+        self.new_order_action = tk.StringVar(value="призначення")
+        self.new_order_law_points = tk.StringVar(value="пункту ___ частини ___ статті 26")
+        # Особи, введені вручну. У конфіг НЕ пишуться: там ПІБ і РНОКПП.
+        self.new_order_manual_people: list[dict[str, str]] = []
+        self.new_order_kind = tk.StringVar(value="осіб офіцерського складу")
+        self.new_order_unit = tk.StringVar()
+        self.new_order_target_unit = tk.StringVar()
+        self.new_order_bases = tk.StringVar()
+        self.new_order_footer_bases = tk.StringVar()
+        self.new_order_signer_position = tk.StringVar()
+        self.new_order_signer_rank = tk.StringVar()
+        self.new_order_signer_name = tk.StringVar()
+
         # Конфігурація вкладки «Повідомлення».
         self.message_cover_template_path = tk.StringVar()
         self.message_content_template_path = tk.StringVar()
@@ -1809,19 +2023,14 @@ class App:
         self._progress_title = ""
         self._progress_started_at = None
 
-        # Налаштування теми
-        self.current_theme = tk.StringVar(value="cosmo")
         self.config_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
 
         self.load_config()
         self.create_widgets()
 
-        # Підключення Drag-and-Drop
-        if HAS_WINDND:
-            try:
-                windnd.hook_dropfiles(self.root, func=self.handle_drag_and_drop)
-            except Exception as e:
-                print(f"Помилка ініціалізації Drag-and-Drop: {e}")
+    def create_widgets(self):
+        """Інтерфейс будує Qt-оболонка (`QtShellMixin.create_widgets`)."""
+        raise NotImplementedError("Запускайте генератор через generate_extracts_qt.py")
 
     def handle_drag_and_drop(self, raw_files):
         """Обробка перетягування файлів мишею (Drag-and-Drop) у вікно програми."""
@@ -1945,6 +2154,10 @@ class App:
                         self.group_corps_var.set(data["group_corps"])
                     if "duplex_2up_layout" in data:
                         self.duplex_2up_layout.set(data["duplex_2up_layout"])
+                    if "message_skip_internal_management" in data:
+                        self.message_skip_internal_management.set(
+                            data["message_skip_internal_management"]
+                        )
 
                     self.p2_orders_folder.set(data.get("p2_orders_folder", ""))
                     self.p2_single_file.set(data.get("p2_single_file", ""))
@@ -1974,15 +2187,30 @@ class App:
                         str(data.get("p2_preview_delay", PREVIEW_DEFAULT_DELAY))
                     )
 
+                    for field in (
+                        "archive_folder", "index_folder", "plan_path", "template_path",
+                        "out_folder", "executor", "number", "date", "section", "unit",
+                        "target_unit", "bases", "footer_bases",
+                        "signer_position", "signer_rank", "signer_name", "law_points",
+                    ):
+                        value = data.get(f"new_order_{field}")
+                        if value:
+                            getattr(self, f"new_order_{field}").set(value)
+                    for field, default in (
+                        ("points", "пункту ___"),
+                        ("kind", "осіб офіцерського складу"),
+                        ("action", "призначення"),
+                    ):
+                        getattr(self, f"new_order_{field}").set(data.get(f"new_order_{field}") or default)
+                    self.new_order_document_paths = [
+                        path for path in data.get("new_order_document_paths", []) if os.path.isfile(path)
+                    ]
+
                     self.message_cover_template_path.set(data.get("message_cover_template_path", ""))
                     self.message_content_template_path.set(data.get("message_content_template_path", ""))
                     self.message_out_folder.set(data.get("message_out_folder", ""))
                     self.message_executor.set(data.get("message_executor", ""))
 
-                    theme = data.get("theme", "cosmo")
-                    self.current_theme.set(theme)
-                    if hasattr(self.root, "style"):
-                        self.root.style.theme_use(theme)
             except Exception:
                 pass
 
@@ -2001,6 +2229,7 @@ class App:
             "p2_certifier_name": self.p2_certifier_name.get(),
             "group_corps": self.group_corps_var.get(),
             "duplex_2up_layout": self.duplex_2up_layout.get(),
+            "message_skip_internal_management": self.message_skip_internal_management.get(),
             "p2_orders_folder": self.p2_orders_folder.get(),
             "p2_single_file": self.p2_single_file.get(),
             "p2_source_mode": self.p2_source_mode.get(),
@@ -2013,66 +2242,27 @@ class App:
             "p2_executor": self.p2_executor.get(),
             "p2_preview": self.p2_preview.get(),
             "p2_preview_delay": self.p2_preview_delay.get(),
+            **{
+                f"new_order_{field}": getattr(self, f"new_order_{field}").get()
+                for field in (
+                    "archive_folder", "index_folder", "plan_path", "template_path",
+                    "out_folder", "executor", "number", "date", "section", "points",
+                    "kind", "unit", "target_unit", "bases", "footer_bases",
+                    "signer_position", "signer_rank", "signer_name",
+                    "action", "law_points",
+                )
+            },
+            "new_order_document_paths": list(self.new_order_document_paths),
             "message_cover_template_path": self.message_cover_template_path.get(),
             "message_content_template_path": self.message_content_template_path.get(),
             "message_out_folder": self.message_out_folder.get(),
             "message_executor": self.message_executor.get(),
-            "theme": self.current_theme.get(),
         }
         try:
             with open(self.config_file, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=4)
         except Exception:
             pass
-
-    def toggle_theme(self):
-        new_theme = "darkly" if self.current_theme.get() in ("cosmo", "flatly", "litera") else "cosmo"
-        self.current_theme.set(new_theme)
-        if HAS_TTKBOOTSTRAP and hasattr(self.root, "style"):
-            try:
-                self.root.style.theme_use(new_theme)
-            except Exception:
-                pass
-        self.theme_btn.config(text="🌙 Темна тема" if new_theme == "cosmo" else "☀️ Світла тема")
-        self.save_config()
-
-    def _make_scrollable(self, page):
-        """Робить вкладку прокручуваною: смуга збоку + колесо миші.
-
-        Вміст вкладок вищий за вікно на звичайному ноутбуці, і нижні блоки
-        (кнопки, журнал) просто обрізались — дотягнутись до них не було чим.
-        Полотно тримає вміст, смуга збоку його гортає, а ширина внутрішньої
-        рамки завжди дорівнює ширині вкладки, щоб не з'являлась горизонтальна
-        прокрутка. Повертає рамку, в яку далі кладеться сам вміст вкладки.
-        """
-        canvas = tk.Canvas(page, highlightthickness=0, borderwidth=0)
-        scrollbar = tb.Scrollbar(page, orient=VERTICAL, command=canvas.yview)
-        content = tb.Frame(canvas, padding=10)
-
-        window_id = canvas.create_window((0, 0), window=content, anchor="nw")
-        canvas.configure(yscrollcommand=scrollbar.set)
-        canvas.pack(side=LEFT, fill=BOTH, expand=True)
-        scrollbar.pack(side=RIGHT, fill=Y)
-
-        def _sync_scrollregion(_event=None):
-            canvas.configure(scrollregion=canvas.bbox("all"))
-
-        def _sync_width(event):
-            canvas.itemconfigure(window_id, width=event.width)
-
-        content.bind("<Configure>", _sync_scrollregion)
-        canvas.bind("<Configure>", _sync_width)
-
-        def _on_mousewheel(event):
-            # Списки, дерева та журнал гортають себе самі — інакше колесо
-            # прокручувало б і їх, і вкладку одночасно.
-            if isinstance(event.widget, (tk.Text, tk.Listbox, ttk.Treeview)):
-                return
-            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
-
-        canvas.bind("<Enter>", lambda _event: canvas.bind_all("<MouseWheel>", _on_mousewheel))
-        canvas.bind("<Leave>", lambda _event: canvas.unbind_all("<MouseWheel>"))
-        return content
 
     # -------------------------------------------------------------------------
     # СМУГА ПРОГРЕСУ ГЕНЕРАЦІЇ
@@ -2125,907 +2315,9 @@ class App:
         except Exception:
             pass
 
-    def create_widgets(self):
-        main_container = tb.Frame(self.root, padding=12)
-        main_container.pack(fill=BOTH, expand=True)
-
-        # Верхній Header
-        header_frame = tb.Frame(main_container)
-        header_frame.pack(fill=X, pady=(0, 10))
-
-        title_box = tb.Frame(header_frame)
-        title_box.pack(side=LEFT, fill=Y)
-
-        title_label = tb.Label(
-            title_box,
-            text="⚡ Node Automation Toolkit",
-            font=("Segoe UI", 16, "bold"),
-            bootstyle="primary",
-        )
-        title_label.pack(anchor=W)
-
-        subtitle_label = tb.Label(
-            title_box,
-            text="Автоматизація діловодства: розрахунок розсилки, витяги та примірники наказів",
-            font=("Segoe UI", 9),
-            bootstyle="secondary",
-        )
-        subtitle_label.pack(anchor=W)
-
-        self.theme_btn = tb.Button(
-            header_frame,
-            text="🌙 Темна тема" if self.current_theme.get() == "cosmo" else "☀️ Світла тема",
-            bootstyle="secondary-outline",
-            command=self.toggle_theme,
-        )
-        self.theme_btn.pack(side=RIGHT, padx=4)
-
-        # Смуга прогресу генерації — над вкладками, щоб її було видно з будь-якої
-        # вкладки й не доводилось шукати стан у журналі.
-        self.progress_frame = tb.Frame(main_container)
-        self.progress_frame.pack(fill=X, pady=(0, 8))
-        self.progress_frame.columnconfigure(0, weight=1)
-
-        self.progress_bar = tb.Progressbar(
-            self.progress_frame,
-            variable=self.progress_value,
-            maximum=100.0,
-            bootstyle="success-striped",
-        )
-        self.progress_bar.grid(row=0, column=0, sticky="ew")
-
-        self.progress_label = tb.Label(
-            self.progress_frame,
-            textvariable=self.progress_text,
-            font=("Segoe UI", 9),
-            bootstyle="secondary",
-            width=34,
-            anchor=W,
-        )
-        self.progress_label.grid(row=0, column=1, sticky=W, padx=(8, 0))
-
-        # Головні робочі вкладки
-        self.notebook = tb.Notebook(main_container, bootstyle="primary")
-        self.notebook.pack(fill=BOTH, expand=True)
-
-        self.tab_copies_page = tb.Frame(self.notebook)
-        self.notebook.add(self.tab_copies_page, text="  📑 1. Примірники 2/3  ")
-        self.tab_copies = self._make_scrollable(self.tab_copies_page)
-
-        self.tab_extracts_page = tb.Frame(self.notebook)
-        self.notebook.add(self.tab_extracts_page, text="  📄 2. Розрахунок та витяги  ")
-        self.tab_extracts = self._make_scrollable(self.tab_extracts_page)
-
-        self.tab_messages_page = tb.Frame(self.notebook)
-        self.notebook.add(self.tab_messages_page, text="  💬 3. Повідомлення  ")
-        self.tab_messages = self._make_scrollable(self.tab_messages_page)
-
-        self._build_tab_extracts()
-        self._build_tab_copies()
-        self._build_tab_messages()
-
-    # =========================================================================
-    # ВКЛАДКА 1: РОЗРАХУНОК ТА ВИТЯГИ
-    # =========================================================================
-    def _build_tab_extracts(self):
-        tab = self.tab_extracts
-        tab.columnconfigure(0, weight=1)
-        tab.rowconfigure(3, weight=3)
-        tab.rowconfigure(4, weight=1)
-
-        # У головному вікні лишається ОДИН вибір — наказ або кілька наказів.
-        # Зразки, реквізити й папки заповнюються один раз і живуть в окремому
-        # вікні «Зразки», щоб щоденна робота була в один клік.
-        source_card = tb.Labelframe(tab, text=" Накази для обробки ", padding=10, bootstyle="info")
-        source_card.grid(row=0, column=0, sticky="ew", pady=(0, 8))
-        source_card.columnconfigure(0, weight=1)
-
-        pick_bar = tb.Frame(source_card)
-        pick_bar.grid(row=0, column=0, sticky="ew")
-        tb.Button(
-            pick_bar, text="📂 Обрати накази (один або кілька)",
-            bootstyle="info", command=self.select_orders,
-        ).pack(side=LEFT, padx=(0, 6))
-        tb.Button(
-            pick_bar, text="🗂 Обрати папку з наказами",
-            bootstyle="info-outline", command=self.select_orders_folder,
-        ).pack(side=LEFT, padx=(0, 6))
-        tb.Button(
-            pick_bar, text="✖ Очистити список",
-            bootstyle="secondary-outline", command=self.clear_orders,
-        ).pack(side=LEFT)
-        tb.Button(
-            pick_bar, text="🧩 Зразки та реквізити",
-            bootstyle="warning", command=self.open_samples_window,
-        ).pack(side=RIGHT)
-
-        tb.Label(
-            source_card, textvariable=self.source_summary,
-            font=("Segoe UI", 10, "bold"), bootstyle="primary",
-        ).grid(row=1, column=0, sticky=W, pady=(8, 4))
-
-        self.orders_tree = tb.Treeview(
-            source_card, columns=("use", "file"), show="headings",
-            height=4, selectmode="browse", bootstyle="info",
-        )
-        self.orders_tree.heading("use", text="Обробляти")
-        self.orders_tree.heading("file", text="Файл наказу")
-        self.orders_tree.column("use", width=100, minwidth=100, stretch=False, anchor="center")
-        self.orders_tree.column("file", width=620, minwidth=250, stretch=True, anchor=W)
-        self.orders_tree.grid(row=2, column=0, sticky="ew")
-        self.orders_tree.bind(
-            "<Button-1>", lambda event: self._toggle_source_mark(event, self.orders_tree)
-        )
-        self.orders_tree.bind(
-            "<<TreeviewSelect>>",
-            lambda _event: self._activate_order_from_tree(self.orders_tree, alongside=False),
-        )
-
-        tb.Label(
-            source_card,
-            text="💡 Сюди ж можна просто перетягнути файли наказів або папку (Drag-and-Drop)",
-            font=("Segoe UI", 9, "italic"),
-            bootstyle="secondary",
-        ).grid(row=3, column=0, sticky=W, pady=(4, 0))
-
-        copy_sources = tb.Labelframe(
-            source_card,
-            text=" Примірники № 2 з останнього пакетного проходу (мають перевагу над списком вище) ",
-            padding=4,
-            bootstyle="success",
-        )
-        copy_sources.grid(row=4, column=0, sticky="ew", pady=(8, 0))
-        copy_sources.columnconfigure(0, weight=1)
-        self.copy_two_tree = tb.Treeview(
-            copy_sources,
-            columns=("use", "file"),
-            show="headings",
-            height=3,
-            selectmode="browse",
-            bootstyle="success",
-        )
-        self.copy_two_tree.heading("use", text="Використати")
-        self.copy_two_tree.heading("file", text="Файл примірника № 2")
-        self.copy_two_tree.column("use", width=100, minwidth=100, stretch=False, anchor="center")
-        self.copy_two_tree.column("file", width=620, minwidth=250, stretch=True, anchor=W)
-        self.copy_two_tree.grid(row=0, column=0, sticky="ew")
-        self.copy_two_tree.bind(
-            "<Button-1>", lambda event: self._toggle_source_mark(event, self.copy_two_tree)
-        )
-        self.copy_two_tree.bind(
-            "<<TreeviewSelect>>",
-            lambda _event: self._activate_order_from_tree(self.copy_two_tree, alongside=True),
-        )
-        self.copy_two_tree.insert(
-            "", tk.END,
-            values=("—", "Спершу сформуйте примірники № 2 у вкладці «Примірники 2/3»."),
-        )
-
-        # Блок 2: реквізити, які змінюються від наказу до наказу.
-        def extract_options(box):
-            tb.Checkbutton(
-                box,
-                text="🖨️ Друк «2 сторінки на 1 аркуш»",
-                variable=self.duplex_2up_layout,
-                bootstyle="success-round-toggle",
-            ).pack(side=LEFT, padx=(0, 16))
-            tb.Checkbutton(
-                box,
-                text="Групувати підпорядковані частини по Корпусах",
-                variable=self.group_corps_var,
-                bootstyle="primary-round-toggle",
-            ).pack(side=LEFT)
-
-        self._build_run_params(
-            tab, 1, " Реквізити цього прогону ",
-            self.executor, self.out_folder, self.select_folder,
-            people=(
-                (
-                    "Підписант оригіналу наказу (зчитується автоматично після пунктів):",
-                    self.order_signer_position, self.order_signer_rank, self.order_signer_name,
-                ),
-                (
-                    "Засвідчувач витягів («Згідно з оригіналом»):",
-                    self.certifier_position, self.certifier_rank, self.certifier_name,
-                ),
-            ),
-            options=extract_options,
-        )
-
-        # Блок 3: Кнопки дій
-        actions_bar = tb.Frame(tab)
-        actions_bar.grid(row=2, column=0, sticky="ew", pady=(0, 8))
-
-        self.btn_calc = tb.Button(
-            actions_bar,
-            text="📊 1. Розрахувати розсилку",
-            bootstyle="primary",
-            command=self.run_rozrahunok_action,
-        )
-        self.btn_calc.pack(side=LEFT, padx=(0, 6))
-
-        self.btn_extracts = tb.Button(
-            actions_bar,
-            text="📑 2. Створити всі витяги",
-            bootstyle="success",
-            command=self.run_extracts_action,
-        )
-        self.btn_extracts.pack(side=LEFT, padx=6)
-
-        self.btn_management_extracts = tb.Button(
-            actions_bar,
-            text="🏛️ 3. Витяги до управління",
-            bootstyle="warning",
-            command=self.run_management_extracts_action,
-        )
-        self.btn_management_extracts.pack(side=LEFT, padx=6)
-
-        self.btn_full_cycle = tb.Button(
-            actions_bar,
-            text="⚙️ 4. Повний цикл",
-            bootstyle="danger",
-            command=self.run_full_cycle,
-        )
-        self.btn_full_cycle.pack(side=LEFT, padx=6)
-
-        tb.Button(
-            actions_bar,
-            text="ℹ️ Теги шаблону",
-            bootstyle="info-outline",
-            command=self.show_template_tags,
-        ).pack(side=LEFT, padx=6)
-
-        tb.Button(
-            actions_bar,
-            text="🔍 Порівняти (Compare)",
-            bootstyle="warning-outline",
-            command=self.open_compare_extracts,
-        ).pack(side=LEFT, padx=6)
-
-        tb.Button(
-            actions_bar,
-            text="🧹 Очистити журнал",
-            bootstyle="secondary-outline",
-            command=self.clear_log,
-        ).pack(side=RIGHT)
-
-        # Блок 4: Результати аналізу
-        results_card = tb.Labelframe(tab, text=" Результати аналізу ", padding=6, bootstyle="primary")
-        results_card.grid(row=3, column=0, sticky="nsew", pady=(0, 6))
-        results_card.columnconfigure(0, weight=1)
-        results_card.rowconfigure(0, weight=1)
-
-        self.results_notebook = tb.Notebook(results_card, bootstyle="info")
-        self.results_notebook.grid(row=0, column=0, sticky="nsew")
-
-        self.result_views: dict[str, ttk.Treeview] = {}
-        self.result_tabs: dict[str, tb.Frame] = {}
-
-        self._create_result_tab(
-            "calculation", "📊 Розсилка",
-            ["Військова частина / Відправник", "Пункти витягу", "Кількість"],
-            "— Очікується розрахунок розсилки —"
-        )
-        self._create_result_tab(
-            "unmatched", "⚠️ Пропущені",
-            ["Пункт", "Текст пункту", "Причина"],
-            "— Пропущені пункти відсутні —"
-        )
-        self._create_result_tab(
-            "routing", "🔍 Контроль маршрутизації",
-            ["Пункт", "Збіги з таблиці", "Застосовані правила", "Підсумкові адресати"],
-            "— Очікується аналіз маршрутизації —"
-        )
-        self._create_result_tab(
-            "layout", "📐 Макет витягів",
-            ["Стан макета"],
-            "— Очікується формування витягів —"
-        )
-
-        # Блок 5: Журнал (Log)
-        log_card = tb.Labelframe(tab, text=" Журнал виконання ", padding=4, bootstyle="secondary")
-        log_card.grid(row=4, column=0, sticky="nsew")
-        log_card.columnconfigure(0, weight=1)
-        log_card.rowconfigure(1, weight=1)
-
-        log_toolbar = tb.Frame(log_card)
-        log_toolbar.grid(row=0, column=0, sticky="ew", padx=2, pady=(0, 2))
-        tb.Button(
-            log_toolbar,
-            text="📋 Скопіювати журнал",
-            bootstyle="info-outline",
-            command=lambda: self.copy_log(self.log_text),
-        ).pack(side=LEFT, padx=(0, 4))
-        tb.Button(
-            log_toolbar,
-            text="🔒 Копіювати знеособлено",
-            bootstyle="warning-outline",
-            command=lambda: self.copy_log(self.log_text, redacted=True),
-        ).pack(side=LEFT, padx=(0, 4))
-        tb.Button(
-            log_toolbar,
-            text="🧹 Очистити",
-            bootstyle="secondary-outline",
-            command=self.clear_log,
-        ).pack(side=LEFT)
-
-        self.log_text = ScrolledText(log_card, height=5, wrap=tk.WORD, font=("Segoe UI", 9))
-        self.log_text.grid(row=1, column=0, sticky="nsew")
-        self._setup_text_copy_menu(self.log_text)
-
-        self.log("Готовий до роботи. Оберіть наказ (або кілька) і натисніть потрібну дію.")
-        self._refresh_orders_view()
-
-    # =========================================================================
-    # ВКЛАДКА 2: ПРИМІРНИКИ 2/3
-    # =========================================================================
-    def _build_tab_copies(self):
-        tab = self.tab_copies
-        tab.columnconfigure(0, weight=1)
-        tab.rowconfigure(3, weight=3)
-        tab.rowconfigure(4, weight=1)
-
-        # Тут так само лише джерело: накази або папка з наказами. Заготовка
-        # примірника, засвідчувач і виконавець — у вікні «Зразки».
-        copies_card = tb.Labelframe(tab, text=" Накази для примірників ", padding=10, bootstyle="primary")
-        copies_card.grid(row=0, column=0, sticky="ew", pady=(0, 8))
-        copies_card.columnconfigure(0, weight=1)
-
-        p2_pick_bar = tb.Frame(copies_card)
-        p2_pick_bar.grid(row=0, column=0, sticky="ew")
-        tb.Button(
-            p2_pick_bar, text="📂 Обрати накази (один або кілька)",
-            bootstyle="primary", command=self.select_p2_file,
-        ).pack(side=LEFT, padx=(0, 6))
-        tb.Button(
-            p2_pick_bar, text="🗂 Обрати папку з наказами",
-            bootstyle="primary-outline", command=self.select_p2_folder,
-        ).pack(side=LEFT, padx=(0, 6))
-        tb.Button(
-            p2_pick_bar, text="✖ Очистити список",
-            bootstyle="secondary-outline", command=self.clear_p2_orders,
-        ).pack(side=LEFT)
-        tb.Button(
-            p2_pick_bar, text="🧩 Зразки та реквізити",
-            bootstyle="warning", command=self.open_samples_window,
-        ).pack(side=RIGHT)
-
-        tb.Label(
-            copies_card, textvariable=self.p2_source_summary,
-            font=("Segoe UI", 10, "bold"), bootstyle="primary",
-        ).grid(row=1, column=0, sticky=W, pady=(8, 4))
-
-        self.p2_orders_tree = tb.Treeview(
-            copies_card, columns=("use", "file"), show="headings",
-            height=4, selectmode="none", bootstyle="primary",
-        )
-        self.p2_orders_tree.heading("use", text="Обробляти")
-        self.p2_orders_tree.heading("file", text="Файл наказу")
-        self.p2_orders_tree.column("use", width=100, minwidth=100, stretch=False, anchor="center")
-        self.p2_orders_tree.column("file", width=620, minwidth=250, stretch=True, anchor=W)
-        self.p2_orders_tree.grid(row=2, column=0, sticky="ew")
-        self.p2_orders_tree.bind(
-            "<Button-1>", lambda event: self._toggle_source_mark(event, self.p2_orders_tree)
-        )
-
-        tb.Label(
-            copies_card,
-            text=(
-                "💡 Сюди ж можна перетягнути накази або папку (Drag-and-Drop). "
-                "Формується примірник № 2; правила для № 3 ще не погоджені."
-            ),
-            font=("Segoe UI", 9, "italic"),
-            bootstyle="secondary",
-        ).grid(row=3, column=0, sticky=W, pady=(4, 0))
-
-        # Блок 2: реквізити прогону примірників.
-        def copies_options(box):
-            tb.Checkbutton(
-                box,
-                text="🐢 Режим превʼю (повільно, з видимим Word)",
-                variable=self.p2_preview,
-                bootstyle="info-round-toggle",
-            ).pack(side=LEFT, padx=(0, 10))
-            tb.Label(box, text="пауза, сек:").pack(side=LEFT, padx=(0, 4))
-            tb.Entry(box, textvariable=self.p2_preview_delay, width=6).pack(side=LEFT)
-            tb.Button(
-                box,
-                text="⇊ Засвідчувач як у витягах",
-                bootstyle="secondary-outline",
-                command=self.copy_certifier_from_extracts,
-            ).pack(side=LEFT, padx=(16, 0))
-
-        self._build_run_params(
-            tab, 1, " Реквізити цього прогону ",
-            self.p2_executor, self.p2_out_folder, self.select_p2_out_folder,
-            executor_hint="порожньо = з витягів",
-            people=(
-                (
-                    "Засвідчувач примірників («Згідно з оригіналом»):",
-                    self.p2_certifier_position, self.p2_certifier_rank, self.p2_certifier_name,
-                ),
-            ),
-            options=copies_options,
-        )
-
-        # Блок 3: Кнопки запуску
-        p2_actions = tb.Frame(tab)
-        p2_actions.grid(row=2, column=0, sticky="ew", pady=(0, 8))
-
-        self.btn_run_p2 = tb.Button(
-            p2_actions,
-            text="🚀 Сформувати примірники (заміна останньої сторінки)",
-            bootstyle="primary",
-            command=self.run_generate_copies,
-        )
-        self.btn_run_p2.pack(side=LEFT, padx=(0, 8))
-
-        tb.Button(
-            p2_actions,
-            text="ℹ️ Правила примірника 2",
-            bootstyle="info-outline",
-            command=self.show_p2_info,
-        ).pack(side=LEFT, padx=(0, 8))
-
-        tb.Button(
-            p2_actions,
-            text="🔍 Порівняти з еталоном (Compare)",
-            bootstyle="warning-outline",
-            command=self.open_compare_copies,
-        ).pack(side=LEFT)
-
-        # Блок 4: Таблиця створених примірників
-        copies_list_card = tb.Labelframe(tab, text=" Сформовані примірники наказів ", padding=6, bootstyle="success")
-        copies_list_card.grid(row=3, column=0, sticky="nsew", pady=(0, 8))
-        copies_list_card.columnconfigure(0, weight=1)
-        copies_list_card.rowconfigure(0, weight=1)
-
-        tree_frame = tb.Frame(copies_list_card)
-        tree_frame.grid(row=0, column=0, sticky="nsew")
-        tree_frame.columnconfigure(0, weight=1)
-        tree_frame.rowconfigure(0, weight=1)
-
-        p2_cols = ["№", "Назва файлу", "Номер наказу", "Дата наказу", "Сторінок", "Арк. для друку", "Повний шлях"]
-        self.p2_tree = tb.Treeview(tree_frame, columns=p2_cols, show="headings", selectmode="extended", bootstyle="success")
-        p2_vscroll = tb.Scrollbar(tree_frame, orient=VERTICAL, command=self.p2_tree.yview)
-        p2_hscroll = tb.Scrollbar(tree_frame, orient=HORIZONTAL, command=self.p2_tree.xview)
-        self.p2_tree.configure(yscrollcommand=p2_vscroll.set, xscrollcommand=p2_hscroll.set)
-
-        self.p2_tree.grid(row=0, column=0, sticky="nsew")
-        p2_vscroll.grid(row=0, column=1, sticky="ns")
-        p2_hscroll.grid(row=1, column=0, sticky="ew")
-
-        widths = {
-            "№": 45,
-            "Назва файлу": 230,
-            "Номер наказу": 110,
-            "Дата наказу": 110,
-            "Сторінок": 75,
-            "Арк. для друку": 120,
-            "Повний шлях": 350,
-        }
-        for col in p2_cols:
-            self.p2_tree.heading(col, text=col)
-            self.p2_tree.column(col, width=widths.get(col, 120), anchor=W)
-        self.p2_tree.insert("", tk.END, values=("1", "— Очікується запуск формування примірників —", "—", "—", "—", "—", "—"))
-
-        p2_selected_actions = tb.Frame(copies_list_card)
-        p2_selected_actions.grid(row=1, column=0, sticky="ew", pady=(6, 0))
-
-        tb.Button(
-            p2_selected_actions,
-            text="➡️ Передати вибраний примірник у витяги",
-            bootstyle="success",
-            command=self.transfer_selected_copy_to_extracts,
-        ).pack(side=LEFT, padx=(0, 6))
-
-        tb.Button(
-            p2_selected_actions,
-            text="☑️ Вибрати всі",
-            bootstyle="info-outline",
-            command=self.select_all_copies,
-        ).pack(side=LEFT, padx=(0, 6))
-
-        tb.Button(
-            p2_selected_actions,
-            text="◻️ Зняти вибір",
-            bootstyle="secondary-outline",
-            command=self.deselect_all_copies,
-        ).pack(side=LEFT, padx=(0, 6))
-
-        tb.Button(
-            p2_selected_actions,
-            text="📂 Папка результату",
-            bootstyle="secondary-outline",
-            command=self.open_p2_output_folder,
-        ).pack(side=LEFT, padx=(0, 6))
-
-        tb.Button(
-            p2_selected_actions,
-            text="👁️ Відкрити у Word",
-            bootstyle="info-outline",
-            command=self.open_selected_copy_in_word,
-        ).pack(side=LEFT)
-
-        # Блок 5: Журнал для примірників
-        p2_log_card = tb.Labelframe(tab, text=" Журнал примірників ", padding=4, bootstyle="secondary")
-        p2_log_card.grid(row=4, column=0, sticky="nsew")
-        p2_log_card.columnconfigure(0, weight=1)
-        p2_log_card.rowconfigure(1, weight=1)
-
-        p2_log_toolbar = tb.Frame(p2_log_card)
-        p2_log_toolbar.grid(row=0, column=0, sticky="ew", padx=2, pady=(0, 2))
-        tb.Button(
-            p2_log_toolbar,
-            text="📋 Скопіювати журнал",
-            bootstyle="info-outline",
-            command=lambda: self.copy_log(self.p2_log_text),
-        ).pack(side=LEFT, padx=(0, 4))
-        tb.Button(
-            p2_log_toolbar,
-            text="🔒 Копіювати знеособлено",
-            bootstyle="warning-outline",
-            command=lambda: self.copy_log(self.p2_log_text, redacted=True),
-        ).pack(side=LEFT, padx=(0, 4))
-        tb.Button(
-            p2_log_toolbar,
-            text="🧹 Очистити",
-            bootstyle="secondary-outline",
-            command=lambda: self.p2_log_text.delete(1.0, tk.END),
-        ).pack(side=LEFT)
-
-        self.p2_log_text = ScrolledText(p2_log_card, height=4, wrap=tk.WORD, font=("Segoe UI", 9))
-        self.p2_log_text.grid(row=1, column=0, sticky="nsew")
-        self._setup_text_copy_menu(self.p2_log_text)
-
-        self._refresh_p2_orders_view()
-
     def _on_p2_source_mode_changed(self):
         """Сумісність із Drag-and-Drop: після зміни джерела оновлюємо список."""
         self._refresh_p2_orders_view()
-
-    # =========================================================================
-    # ВКЛАДКА 3: ПОВІДОМЛЕННЯ ПРО ПРИЙНЯТТЯ
-    # =========================================================================
-    def _build_tab_messages(self):
-        tab = self.tab_messages
-        tab.columnconfigure(0, weight=1)
-        tab.rowconfigure(3, weight=1)
-
-        card = tb.Labelframe(tab, text=" Повідомлення про прийняття наказу ", padding=10, bootstyle="info")
-        card.grid(row=0, column=0, sticky="ew", pady=(0, 8))
-        card.columnconfigure(0, weight=1)
-
-        tb.Label(
-            card,
-            text="Повідомлення формуються по одному наказу за запуск.",
-            font=("Segoe UI", 10, "bold"),
-            bootstyle="primary",
-        ).grid(row=0, column=0, sticky=W)
-        tb.Label(card, textvariable=self.message_source_summary, bootstyle="secondary").grid(
-            row=1, column=0, sticky=W, pady=(4, 0)
-        )
-
-        msg_pick_bar = tb.Frame(card)
-        msg_pick_bar.grid(row=2, column=0, sticky="ew", pady=(8, 0))
-        tb.Button(
-            msg_pick_bar, text="📂 Обрати один наказ",
-            bootstyle="info", command=self.select_message_order,
-        ).pack(side=LEFT, padx=(0, 6))
-        tb.Button(
-            msg_pick_bar, text="🧩 Зразки та реквізити",
-            bootstyle="warning", command=self.open_samples_window,
-        ).pack(side=LEFT)
-
-        tb.Label(
-            card,
-            text=(
-                "Стандартні теги: {{номер_наказу}}, {{дата_наказу}}, {{кому_список}}, {{куди}}, "
-                "{{тцк чі вч}}, {{виконавець}}. "
-                "Кожен {{кому_список}} у таблиці = один унікальний адресат. "
-                "У другому шаблоні: {{зміст_шифр}}. Невпізнані відкриті назви частин виділяються жовтим."
-            ),
-            font=("Segoe UI", 9, "italic"),
-            bootstyle="secondary",
-            wraplength=900,
-            justify=LEFT,
-        ).grid(row=3, column=0, sticky=W, pady=(7, 0))
-
-        self._build_run_params(
-            tab, 1, " Реквізити цього прогону ",
-            self.message_executor, self.message_out_folder, self.select_message_output_folder,
-        )
-
-        actions = tb.Frame(tab)
-        actions.grid(row=2, column=0, sticky="ew", pady=(0, 8))
-        self.btn_generate_messages = tb.Button(
-            actions,
-            text="✉️ Створити 2 повідомлення",
-            bootstyle="success",
-            command=self.run_generate_messages,
-        )
-        self.btn_generate_messages.pack(side=LEFT, padx=(0, 8))
-
-        tb.Button(
-            actions,
-            text="🔍 Порівняти з еталоном (Compare)",
-            bootstyle="warning-outline",
-            command=self.open_compare_messages,
-        ).pack(side=LEFT)
-        tb.Button(actions, text="ℹ️ Теги повідомлень", bootstyle="info-outline", command=self.show_message_tags).pack(
-            side=LEFT, padx=(8, 0)
-        )
-
-        # Журнал для повідомлень
-        msg_log_card = tb.Labelframe(tab, text=" Журнал повідомлень ", padding=4, bootstyle="secondary")
-        msg_log_card.grid(row=3, column=0, sticky="nsew")
-        msg_log_card.columnconfigure(0, weight=1)
-        msg_log_card.rowconfigure(1, weight=1)
-
-        msg_log_toolbar = tb.Frame(msg_log_card)
-        msg_log_toolbar.grid(row=0, column=0, sticky="ew", padx=2, pady=(0, 2))
-        tb.Button(
-            msg_log_toolbar,
-            text="📋 Скопіювати журнал",
-            bootstyle="info-outline",
-            command=lambda: self.copy_log(self.log_text),
-        ).pack(side=LEFT, padx=(0, 4))
-        tb.Button(
-            msg_log_toolbar,
-            text="🔒 Копіювати знеособлено",
-            bootstyle="warning-outline",
-            command=lambda: self.copy_log(self.log_text, redacted=True),
-        ).pack(side=LEFT, padx=(0, 4))
-        tb.Button(
-            msg_log_toolbar,
-            text="🧹 Очистити",
-            bootstyle="secondary-outline",
-            command=self.clear_log,
-        ).pack(side=LEFT)
-
-        msg_log_text = ScrolledText(msg_log_card, height=5, wrap=tk.WORD, font=("Segoe UI", 9))
-        msg_log_text.grid(row=1, column=0, sticky="nsew")
-        self._setup_text_copy_menu(msg_log_text)
-
-    # =========================================================================
-    # РЕКВІЗИТИ ПРОГОНУ (те, що змінюється часто — у кожній вкладці генерації)
-    # =========================================================================
-    def _build_run_params(
-        self,
-        tab,
-        row,
-        title,
-        executor_var,
-        out_folder_var,
-        out_folder_command,
-        executor_hint="",
-        people=(),
-        options=None,
-    ):
-        """Компактна смуга «виконавець + папка результату + засвідчувач».
-
-        Ці поля правлять чи не щоразу, тому вони мають бути під рукою на самій
-        вкладці генерації. Рідкісне (словник, зразки, заготовки) лишається у
-        вікні «Зразки». Поля зв'язані з тими самими змінними, тож правка тут і
-        правка у вікні зразків — це одне й те саме значення.
-        """
-        card = tb.Labelframe(tab, text=title, padding=10, bootstyle="secondary")
-        card.grid(row=row, column=0, sticky="ew", pady=(0, 8))
-        card.columnconfigure(1, weight=2)
-        card.columnconfigure(3, weight=3)
-
-        tb.Label(card, text="Виконавець:").grid(row=0, column=0, sticky=W, padx=(0, 8), pady=3)
-        tb.Entry(card, textvariable=executor_var).grid(row=0, column=1, sticky="ew", pady=3)
-
-        tb.Label(card, text="Папка результату:").grid(row=0, column=2, sticky=W, padx=(14, 8), pady=3)
-        folder_box = tb.Frame(card)
-        folder_box.grid(row=0, column=3, sticky="ew", pady=3)
-        folder_box.columnconfigure(0, weight=1)
-        tb.Entry(folder_box, textvariable=out_folder_var).grid(row=0, column=0, sticky="ew")
-        tb.Button(
-            folder_box, text="📂", bootstyle="secondary-outline", width=3, command=out_folder_command
-        ).grid(row=0, column=1, padx=(4, 0))
-
-        next_row = 1
-        if executor_hint:
-            tb.Label(card, text=executor_hint, bootstyle="secondary").grid(
-                row=next_row, column=1, sticky=W, pady=(0, 2)
-            )
-            next_row += 1
-
-        for person_title, position_var, rank_var, name_var in people:
-            person = tb.Frame(card)
-            person.grid(row=next_row, column=0, columnspan=4, sticky="ew", pady=(6, 0))
-            person.columnconfigure(1, weight=3)
-            person.columnconfigure(3, weight=1)
-            person.columnconfigure(5, weight=2)
-            tb.Label(person, text=person_title, font=("Segoe UI", 9, "bold")).grid(
-                row=0, column=0, columnspan=6, sticky=W, pady=(0, 2)
-            )
-            tb.Label(person, text="Посада:").grid(row=1, column=0, sticky=W, padx=(0, 6))
-            tb.Entry(person, textvariable=position_var).grid(row=1, column=1, sticky="ew", padx=(0, 12))
-            tb.Label(person, text="Звання:").grid(row=1, column=2, sticky=W, padx=(0, 6))
-            tb.Entry(person, textvariable=rank_var).grid(row=1, column=3, sticky="ew", padx=(0, 12))
-            tb.Label(person, text="ПІБ:").grid(row=1, column=4, sticky=W, padx=(0, 6))
-            tb.Entry(person, textvariable=name_var).grid(row=1, column=5, sticky="ew")
-            next_row += 1
-
-        if options is not None:
-            options_box = tb.Frame(card)
-            options_box.grid(row=next_row, column=0, columnspan=4, sticky="ew", pady=(6, 0))
-            options(options_box)
-
-        return row + 1
-
-    # =========================================================================
-    # ОКРЕМЕ ВІКНО: ЗРАЗКИ, ШАБЛОНИ ТА РЕКВІЗИТИ
-    # =========================================================================
-    def _samples_file_row(self, parent, row, label, variable, command, edit_command=None):
-        """Один рядок «підпис — шлях — кнопки» у вікні зразків."""
-        tb.Label(parent, text=label).grid(row=row, column=0, sticky=W, padx=(0, 8), pady=3)
-        tb.Entry(parent, textvariable=variable).grid(row=row, column=1, sticky="ew", pady=3)
-        buttons = tb.Frame(parent)
-        buttons.grid(row=row, column=2, padx=(6, 0), pady=3)
-        tb.Button(buttons, text="📂 Вибрати", bootstyle="info-outline", command=command).pack(side=LEFT)
-        if edit_command is not None:
-            tb.Button(
-                buttons, text="✏️ Відкрити", bootstyle="secondary-outline", command=edit_command
-            ).pack(side=LEFT, padx=(4, 0))
-        return row + 1
-
-    def open_samples_window(self):
-        """Окреме вікно зі зразками, шаблонами та реквізитами.
-
-        Усе, що заповнюється один раз, зібрано тут, щоб у головному вікні
-        лишився тільки вибір наказу. Поля зв'язані з тими самими змінними,
-        тож зміни діють одразу, а закриття вікна зберігає налаштування.
-        """
-        existing = getattr(self, "_samples_window", None)
-        if existing is not None and existing.winfo_exists():
-            existing.deiconify()
-            existing.lift()
-            existing.focus_force()
-            return
-
-        window = tb.Toplevel(self.root)
-        self._samples_window = window
-        window.title("Зразки, шаблони та реквізити")
-        window.geometry("880x480")
-        window.columnconfigure(0, weight=1)
-        window.rowconfigure(0, weight=1)
-
-        notebook = tb.Notebook(window, bootstyle="info", padding=8)
-        notebook.grid(row=0, column=0, sticky="nsew", padx=10, pady=(10, 0))
-
-        pages = {}
-        for key, title in (
-            ("extracts", "  📄 Витяги  "),
-            ("copies", "  📑 Примірники 2/3  "),
-            ("messages", "  💬 Повідомлення  "),
-        ):
-            page = tb.Frame(notebook, padding=10)
-            page.columnconfigure(1, weight=1)
-            notebook.add(page, text=title)
-            pages[key] = page
-
-        self._build_samples_extracts(pages["extracts"])
-        self._build_samples_copies(pages["copies"])
-        self._build_samples_messages(pages["messages"])
-
-        bottom = tb.Frame(window, padding=10)
-        bottom.grid(row=1, column=0, sticky="ew")
-        tb.Label(
-            bottom,
-            text="Зразки заповнюються один раз — далі в головному вікні лишається тільки вибір наказу.",
-            bootstyle="secondary",
-        ).pack(side=LEFT)
-
-        def close_samples():
-            self.save_config()
-            self.log("Зразки та реквізити збережено.")
-            window.destroy()
-            self._samples_window = None
-
-        tb.Button(bottom, text="💾 Зберегти та закрити", bootstyle="success", command=close_samples).pack(side=RIGHT)
-        window.protocol("WM_DELETE_WINDOW", close_samples)
-
-    def _build_samples_extracts(self, page):
-        row = self._samples_file_row(page, 0, "Словник (Excel):", self.excel_path, self.select_excel)
-        row = self._samples_file_row(
-            page, row, "Зразок витягу:", self.template_path, self.select_template, self.edit_template
-        )
-        tb.Label(
-            page,
-            text=(
-                "Зразок витягу — це DOCX із тегами {{кому}}, {{куди}}, {{зміст}}, {{пункти}} "
-                "та реквізитами підписанта й засвідчувача.\n"
-                "Виконавець, папка результату, засвідчувач і параметри друку — на самій "
-                "вкладці «Розрахунок та витяги»: вони змінюються від наказу до наказу."
-            ),
-            bootstyle="secondary",
-            wraplength=820,
-            justify=LEFT,
-        ).grid(row=row, column=0, columnspan=3, sticky=W, pady=(10, 0))
-        row += 1
-
-        tb.Button(
-            page, text="ℹ️ Теги шаблону {{…}}", bootstyle="info-outline", command=self.show_template_tags
-        ).grid(row=row, column=0, columnspan=3, sticky=W, pady=(10, 0))
-
-    def _build_samples_copies(self, page):
-        row = self._samples_file_row(
-            page, 0, "Заготовка примірника:", self.p2_back_page_path,
-            self.select_p2_back_page, self.edit_p2_back_page,
-        )
-        tb.Label(
-            page,
-            text=(
-                "Заготовка примірника — повноцінний зразок (шапка, теги, {{зміст}}), "
-                "у який переноситься текст наказу.\n"
-                "Виконавець, папка результатів, засвідчувач примірників і режим превʼю — "
-                "на вкладці «Примірники 2/3»."
-            ),
-            bootstyle="secondary",
-            wraplength=820,
-            justify=LEFT,
-        ).grid(row=row, column=0, columnspan=3, sticky=W, pady=(10, 0))
-        row += 1
-
-        tb.Button(
-            page, text="ℹ️ Правила примірника 2", bootstyle="info-outline", command=self.show_p2_info
-        ).grid(row=row, column=0, columnspan=3, sticky=W, pady=(10, 0))
-
-    def _build_samples_messages(self, page):
-        row = self._samples_file_row(
-            page, 0, "Зразок супроводу:", self.message_cover_template_path, self.select_message_cover_template
-        )
-        row = self._samples_file_row(
-            page, row, "Зразок зі змістом:", self.message_content_template_path, self.select_message_content_template
-        )
-        tb.Label(
-            page,
-            text=(
-                "Два зразки: титульне повідомлення й повідомлення зі змістом наказу.\n"
-                "Виконавець і папка результату — на вкладці «Повідомлення»."
-            ),
-            bootstyle="secondary",
-            wraplength=820,
-            justify=LEFT,
-        ).grid(row=row, column=0, columnspan=3, sticky=W, pady=(10, 0))
-        row += 1
-
-        tb.Button(
-            page, text="ℹ️ Теги повідомлень", bootstyle="info-outline", command=self.show_message_tags
-        ).grid(row=row, column=0, columnspan=3, sticky=W, pady=(10, 0))
-
-    # =========================================================================
-    # ДОПОМІЖНІ МЕТОДИ ІНТЕРФЕЙСУ
-    # =========================================================================
-    def _create_result_tab(
-        self, key: str, title: str, default_cols: list[str] | None = None, placeholder_text: str = ""
-    ):
-        tab = tb.Frame(self.results_notebook, padding=4)
-        tab.columnconfigure(0, weight=1)
-        tab.rowconfigure(0, weight=1)
-        tree = tb.Treeview(tab, show="headings", selectmode="browse", bootstyle="primary")
-        vertical = tb.Scrollbar(tab, orient=VERTICAL, command=tree.yview)
-        horizontal = tb.Scrollbar(tab, orient=HORIZONTAL, command=tree.xview)
-        tree.configure(yscrollcommand=vertical.set, xscrollcommand=horizontal.set)
-        tree.grid(row=0, column=0, sticky="nsew")
-        vertical.grid(row=0, column=1, sticky="ns")
-        horizontal.grid(row=1, column=0, sticky="ew")
-        self.results_notebook.add(tab, text=title)
-        self.result_views[key] = tree
-        self.result_tabs[key] = tab
-
-        if default_cols:
-            tree["columns"] = default_cols
-            for col in default_cols:
-                tree.heading(col, text=col)
-                tree.column(col, width=160, minwidth=100, stretch=True, anchor=W)
-            if placeholder_text:
-                row_vals = [placeholder_text] + ["—"] * (len(default_cols) - 1)
-                tree.insert("", tk.END, values=tuple(row_vals))
 
     def show_template_tags(self):
         messagebox.showinfo(
@@ -3140,81 +2432,12 @@ class App:
         self._populate_result_tab("layout", ["Стан макета"], rows)
         self.results_notebook.select(self.result_tabs["layout" if warnings else "calculation"])
 
-    def log(self, message: str):
-        self.log_text.insert(tk.END, message + "\n")
-        self.log_text.see(tk.END)
-        self.root.update_idletasks()
-
-    def log_p2(self, message: str):
-        self.p2_log_text.insert(tk.END, message + "\n")
-        self.p2_log_text.see(tk.END)
-        self.root.update_idletasks()
-
-    def _preview_pause(self, seconds: float) -> None:
-        """Пауза режиму превʼю, під час якої вікно лишається живим.
-
-        Звичайний `time.sleep` заморожує цикл подій Tk: журнал не гортається,
-        а вікно виглядає зависшим — тобто рівно протилежне до того, задля чого
-        режим і потрібен. Тому чекаємо короткими відрізками, а між ними даємо
-        Tk перемалюватись. Кнопку запуску на час прогону вимкнено, тож
-        повторного входу це не спричиняє.
-        """
-        deadline = time.monotonic() + max(0.0, seconds)
-        while True:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                break
-            time.sleep(min(0.05, remaining))
-            self.root.update()
-
-    def clear_log(self):
-        self.log_text.delete(1.0, tk.END)
-
-    def copy_log(self, text_widget=None, redacted: bool = False):
-        widget = text_widget or self.log_text
-        content = widget.get("1.0", tk.END).strip()
-        if not content:
-            return
-        if redacted:
-            content = redact_sensitive_text(content)
-        self.root.clipboard_clear()
-        self.root.clipboard_append(content)
-        self.root.update()
-        self.log(
-            "🔒 Журнал скопійовано з автоматичним знеособленням. "
-            "Перед пересиланням перевірте текст: нетипові назви й персональні дані можуть залишитися."
-            if redacted
-            else "📋 Текст журналу успішно скопійовано в буфер обміну!"
-        )
-
-    def _setup_text_copy_menu(self, text_widget):
-        """Додає контекстне меню (ПКМ) та гарячі клавіші для легкого копіювання логів."""
-        menu = tk.Menu(text_widget, tearoff=0)
-        menu.add_command(label="Копіювати виділене (Ctrl+C)", command=lambda: text_widget.event_generate("<<Copy>>"))
-        menu.add_command(label="Виділити все (Ctrl+A)", command=lambda: text_widget.tag_add(tk.SEL, "1.0", tk.END))
-        menu.add_separator()
-        menu.add_command(label="Скопіювати весь журнал", command=lambda: self.copy_log(text_widget))
-        menu.add_command(label="Очистити", command=lambda: text_widget.delete("1.0", tk.END))
-
-        def _popup(event):
-            menu.tk_popup(event.x_root, event.y_root)
-
-        text_widget.bind("<Button-3>", _popup)
-        text_widget.bind("<Control-a>", lambda e: (text_widget.tag_add(tk.SEL, "1.0", tk.END), "break")[1])
-        text_widget.bind("<Control-A>", lambda e: (text_widget.tag_add(tk.SEL, "1.0", tk.END), "break")[1])
-        text_widget.bind("<Control-c>", lambda e: text_widget.event_generate("<<Copy>>"))
-        text_widget.bind("<Control-C>", lambda e: text_widget.event_generate("<<Copy>>"))
-
     # ── Вибір файлів ─────────────────────────────────────────────────────────
     def select_excel(self):
         path = filedialog.askopenfilename(filetypes=[("Excel files", "*.xlsx *.xls")])
         if path:
             self.excel_path.set(path)
             self.save_config()
-
-    def select_doc(self):
-        """Сумісність зі старими викликами: той самий вибір наказів."""
-        self.select_orders()
 
     def select_template(self):
         path = filedialog.askopenfilename(filetypes=[("Word files", "*.docx *.doc")])
@@ -3542,7 +2765,10 @@ class App:
         tag_range.Paragraphs(1).Range.Delete()
         content_start = insert_point
         try:
+            skip_paragraphs = content_source.get("skip_paragraphs") or set()
             for p_index in range(first_para, last_para + 1):
+                if p_index in skip_paragraphs:
+                    continue
                 source_paragraph = source_doc.Paragraphs(p_index)
                 source_range = source_paragraph.Range.Duplicate
                 if "\x0c" in (source_range.Text or ""):
@@ -3715,7 +2941,7 @@ class App:
                 doc.Range(start, start + len(core)).Text = ciphered
 
             # Відкриті назви, які лишилися без шифру, підсвічуємо жовтим.
-            for span_start, span_end in find_unmatched_open_unit_spans(ciphered):
+            for span_start, span_end in unmatched_open_unit_spans(ciphered, mapping):
                 doc.Range(start + span_start, start + span_end).HighlightColorIndex = 7  # wdYellow
                 highlighted += 1
         return highlighted
@@ -3865,7 +3091,7 @@ class App:
         parts = App._analyze_order(source_doc)
         return parts["body_start"], parts["last_paragraph"]
 
-    def _insert_plain_content(self, doc, tag_range, encrypted_content: str) -> int:
+    def _insert_plain_content(self, doc, tag_range, encrypted_content: str, mapping=None) -> int:
         """Запасний спосіб вставки змісту — простим текстом.
 
         Використовується ЛИШЕ тоді, коли перенести форматування з наказу не
@@ -3923,7 +3149,7 @@ class App:
                 p_format.SpaceAfter = 6
 
         highlighted = 0
-        for span_start, span_end in find_unmatched_open_unit_spans(formatted_content):
+        for span_start, span_end in unmatched_open_unit_spans(formatted_content, mapping):
             doc.Range(content_start + span_start, content_start + span_end).HighlightColorIndex = 7
             highlighted += 1
         return highlighted
@@ -3941,9 +3167,11 @@ class App:
         # Якщо результат уже відкритий у Word, зберегти його неможливо.
         # Перевіряємо це ДО всієї роботи й повідомляємо зрозуміло.
         if not is_path_writable(output_path):
-            raise RuntimeError(
-                f"Файл «{os.path.basename(output_path)}» відкритий в іншій програмі "
-                "(найімовірніше у Word). Закрийте його та повторіть генерацію."
+            raise UserError(
+                f"файл «{os.path.basename(output_path)}» уже відкритий — "
+                "найімовірніше у Word, з минулого разу.",
+                "Закрийте це вікно Word і натисніть кнопку ще раз. "
+                "Поки файл відкритий, програма не може його перезаписати.",
             )
 
         # Робоча копія шаблону створюється у тимчасовій папці, а не за
@@ -3954,7 +3182,9 @@ class App:
         temp_dir = os.path.join(os.path.dirname(os.path.abspath(output_path)), "_nat_temp")
         os.makedirs(temp_dir, exist_ok=True)
         working_path = copy_template_for_editing(
-            template_path, os.path.join(temp_dir, os.path.basename(output_path))
+            template_path,
+            os.path.join(temp_dir, os.path.basename(output_path)),
+            label="шаблон повідомлення",
         )
         doc = word.Documents.Open(os.path.abspath(working_path), ReadOnly=False)
         try:
@@ -4001,7 +3231,10 @@ class App:
 
                     if not copied_with_formatting:
                         highlighted_count = self._insert_plain_content(
-                            doc, find_obj.Parent, encrypted_content
+                            doc,
+                            find_obj.Parent,
+                            encrypted_content,
+                            (content_source or {}).get("mapping"),
                         )
             for bookmark_name in executor_bookmarks:
                 self._position_message_executor_at_page_bottom(doc, bookmark_name)
@@ -4179,7 +3412,22 @@ class App:
             if self.message_executor.get().strip():
                 replacements["{{виконавець}}"] = self.message_executor.get().strip()
 
-            decision = generate_decision_order(text=order_text, mapping=mapping, new_header="")
+            # Внутрішнє переміщення в управлінні — не для повідомлень (галочка
+            # на вкладці). Витягів до управління це не стосується.
+            skip_lines, skipped_labels = set(), []
+            if self.message_skip_internal_management.get():
+                skip_lines, skipped_labels = message_skipped_item_lines(routes)
+            if skipped_labels:
+                self.log(
+                    "Не додано до повідомлення (внутрішнє переміщення в управлінні): "
+                    + ", ".join(skipped_labels)
+                )
+            content_text = "\n".join(
+                line for index, line in enumerate(order_text.splitlines())
+                if index not in skip_lines
+            )
+
+            decision = generate_decision_order(text=content_text, mapping=mapping, new_header="")
             encrypted_content = decision.get("decision_text", "")
 
             # Відповідність рядків тексту абзацам Word — так само, як у витягах.
@@ -4195,11 +3443,20 @@ class App:
                 line_map = source_line_to_para[: len(order_lines)]
                 body_start_line = find_content_start_line(order_text)
                 if line_map and 0 <= body_start_line < len(line_map):
+                    # Абзац пропускається, лише якщо ВСІ його рядки пропущені.
+                    paragraph_lines: dict[int, list[int]] = {}
+                    for line_index, paragraph_index in enumerate(line_map):
+                        paragraph_lines.setdefault(paragraph_index, []).append(line_index)
                     content_source = {
                         "doc": source_doc,
                         "first_para": line_map[body_start_line],
                         "last_para": line_map[-1],
                         "mapping": mapping,
+                        "skip_paragraphs": {
+                            paragraph_index
+                            for paragraph_index, indices in paragraph_lines.items()
+                            if skip_lines and all(index in skip_lines for index in indices)
+                        },
                     }
             except Exception as map_error:
                 self.log(
@@ -4244,11 +3501,16 @@ class App:
                 f"Невпізнаних назв, виділених жовтим: {highlights}\n"
                 f"Частин, яких немає в таблиці: {table_gaps['new_units']}\n"
                 f"Без шифру або корпусу в таблиці: {table_gaps['problems']}"
+                + (
+                    f"\nНе додано (внутрішнє переміщення в управлінні): {', '.join(skipped_labels)}"
+                    if skipped_labels else ""
+                )
                 + (f"\nУВАГА: не вмістилося адресатів: {recipient_overflow}" if recipient_overflow else ""),
             )
         except Exception as error:
-            self.log(f"ПОМИЛКА повідомлень: {error}")
-            messagebox.showerror("Помилка повідомлень", str(error))
+            explanation = explain_error(error)
+            self.log(f"ПОМИЛКА повідомлень:\n{explanation}")
+            messagebox.showerror("Повідомлення не створені", explanation)
         finally:
             if source_doc is not None:
                 try:
@@ -4258,19 +3520,6 @@ class App:
             if word:
                 force_quit_word(word)
             self.btn_generate_messages.config(state=NORMAL)
-
-    def open_compare_extracts(self):
-        """Відкриває вікно порівняння для режиму витягів."""
-        DocxCompareWindow(self.root, mode="витяги")
-
-    def open_compare_copies(self):
-        """Відкриває вікно порівняння для режиму примірників."""
-        gen_path = self.p2_single_file.get() if self.p2_source_mode.get() == "file" else ""
-        DocxCompareWindow(self.root, generated_path=gen_path, mode="примірник_2")
-
-    def open_compare_messages(self):
-        """Відкриває вікно порівняння для режиму повідомлень."""
-        DocxCompareWindow(self.root, mode="повідомлення_зміст")
 
     def select_p2_folder(self):
         path = filedialog.askdirectory()
@@ -4318,19 +3567,20 @@ class App:
             self.p2_out_folder_manual.set(True)
             self.save_config()
 
-    def _read_word_text(self, doc_path: str) -> str:
+    def _read_word_text(self, doc_path: str, normalize: bool = True) -> str:
         """Текст наказу через Word, з кешем за файлом і часом його зміни.
 
         Запуск окремого екземпляра Word коштує близько секунди, а той самий наказ
         читається кілька разів за сеанс: розрахунок розсилки, оновлення підписанта,
         потім генерація витягів. Поки файл не змінився, вдруге Word не запускаємо.
+        `normalize=False` — сирий текст для перевірки наказу (`read_document_text`).
         """
         cache = getattr(self, "_word_text_cache", None)
         if cache is None:
             cache = self._word_text_cache = {}
         try:
             stat = os.stat(doc_path)
-            cache_key = (os.path.abspath(doc_path), stat.st_mtime_ns, stat.st_size)
+            cache_key = (os.path.abspath(doc_path), stat.st_mtime_ns, stat.st_size, normalize)
         except OSError:
             cache_key = None
         if cache_key is not None and cache_key in cache:
@@ -4343,7 +3593,7 @@ class App:
             word.Visible = False
             word.DisplayAlerts = 0  # wdAlertsNone: не показувати блокуючі діалоги (напр. "Зберегти зміни?")
             doc = word.Documents.Open(os.path.abspath(doc_path), ReadOnly=True)
-            text = read_document_text(doc)
+            text = read_document_text(doc, normalize=normalize)
             if cache_key is not None:
                 # Кеш свідомо маленький: тексти наказів важкі, а користь дає
                 # лише останній оброблюваний файл (і сусідні в пакеті).
@@ -4394,19 +3644,6 @@ class App:
             self.copy_two_tree.insert("", tk.END, iid=f"copy2_{index}", values=(mark, path))
         self._select_order_path(self.copy_two_tree, self.doc_path.get())
         self._refresh_source_summary()
-
-    def _toggle_source_mark(self, event, tree):
-        """Ставить/знімає галочку в списку джерел (накази чи примірники № 2)."""
-        item = tree.identify_row(event.y)
-        if not item or event.x > 115:
-            return
-        values = list(tree.item(item, "values"))
-        if len(values) != 2 or values[0] not in ("☐", "☑"):
-            return
-        values[0] = "☐" if values[0] == "☑" else "☑"
-        tree.item(item, values=values)
-        self._refresh_source_summary()
-        return "break"
 
     @staticmethod
     def _marked_paths(tree) -> list[str]:
@@ -4717,6 +3954,38 @@ class App:
     # =========================================================================
     # ДІЇ: РОЗРАХУНОК ТА ВИТЯГИ
     # =========================================================================
+    def _missing_selected_files(self, *entries: tuple[str, str]) -> list[str]:
+        """Перелік «підпис: шлях» для обраних файлів, яких немає на диску.
+
+        Шляхи зберігаються в config.json, тож між запусками файл можуть
+        перейменувати, перемістити або лишити на відключеному диску. Без цієї
+        перевірки генерація доходить аж до копіювання зразка й падає з
+        «[WinError 2] The system cannot find the file specified» — уже після
+        розбору наказу й запису контрольних таблиць.
+        """
+        return [
+            f"{label}: {path}"
+            for label, path in entries
+            if path and not os.path.isfile(path)
+        ]
+
+    def _report_missing_files(self, missing: list[str]) -> None:
+        """Називає конкретні відсутні файли — і в журналі, і у вікні."""
+        details = "\n".join(f"• {item}" for item in missing)
+        self.log("ПОМИЛКА: не знайдено обраних файлів:\n" + details)
+        messagebox.showwarning(
+            "Немає потрібного файлу",
+            "Що сталося: файл(и), вибрані для роботи, не лежать там, де вказано:\n\n"
+            f"{details}\n\n"
+            "Найчастіше файл перейменували, перемістили або він на диску, "
+            "який зараз не підключений.\n\n"
+            "Що зробити:\n"
+            "1. Відкрийте «Зразки та реквізити».\n"
+            "2. Натисніть «Вибрати» біля рядка, названого вище.\n"
+            "3. Вкажіть потрібний файл і збережіть вікно.\n"
+            "4. Натисніть кнопку генерації ще раз.",
+        )
+
     def _set_extract_action_buttons_state(self, state):
         """Разом блокує дії вкладки, щоб два пакети не стартували паралельно."""
         for name in ("btn_calc", "btn_extracts", "btn_management_extracts"):
@@ -4734,6 +4003,11 @@ class App:
             )
             return
 
+        missing = self._missing_selected_files(("Словник Excel", self.excel_path.get()))
+        if missing:
+            self._report_missing_files(missing)
+            return
+
         self._set_extract_action_buttons_state(DISABLED)
         try:
             # Кожен наказ обробляється окремо: збій одного не має зривати
@@ -4747,6 +4021,100 @@ class App:
             )
         finally:
             self._set_extract_action_buttons_state(NORMAL)
+
+    # =========================================================================
+    # ПЕРЕВІРКА НАКАЗУ (наприклад, складеного студентом)
+    # =========================================================================
+    def run_order_review_action(self):
+        """Перевіряє обрані накази без еталона: правила оформлення + індекс попередніх наказів.
+
+        Нічого не генерує й не змінює оригінал: поруч із наказом у теці
+        «Перевірка» з'являються звіт Excel і позначена копія з примітками Word.
+        """
+        self.save_config()
+        order_paths, _from_copies = self._selected_order_paths()
+        if not order_paths:
+            messagebox.showwarning("Помилка", "Оберіть наказ (або кілька), який треба перевірити.")
+            return
+
+        mapping = {}
+        excel = self.excel_path.get()
+        if excel and os.path.isfile(excel):
+            mapping = read_recipient_mapping(path=excel).get("mapping", {})
+        else:
+            self.log("УВАГА: таблицю відповідностей не вибрано — адресати пунктів не перевірялись.")
+        index_folder = default_index_folder(self.new_order_index_folder.get())
+
+        self.log("\n=== ПЕРЕВІРКА НАКАЗІВ ===")
+        reports, failures = [], []
+        for number, order_path in enumerate(order_paths, start=1):
+            name = os.path.basename(order_path)
+            self.log(f"\n[{number}/{len(order_paths)}] Перевірка: {name}")
+            try:
+                reports.append((name, *self._review_one_order(order_path, mapping, index_folder)))
+            except Exception as error:
+                explanation = explain_error(error)
+                self.log(f"  ПОМИЛКА перевірки «{name}»:\n    " + explanation.replace("\n", "\n    "))
+                failures.append((name, explanation))
+
+        lines = [
+            f"{name}: помилок {result.errors}, зауважень {result.warnings}"
+            for name, result, _folder in reports
+        ]
+        lines += [f"{name}: не перевірено — {error.splitlines()[0]}" for name, error in failures]
+        folders = sorted({folder for _name, _result, folder in reports})
+        messagebox.showinfo(
+            "Перевірка наказів",
+            "\n".join(lines[:15])
+            + (f"\n… ще {len(lines) - 15}" if len(lines) > 15 else "")
+            + ("\n\nЗвіт і позначена копія:\n" + "\n".join(folders[:3]) if folders else ""),
+        )
+
+    def _review_one_order(self, order_path: str, mapping: dict, index_folder: str):
+        """Перевіряє один наказ; повертає (результат, тека зі звітом)."""
+        # Сирий текст: «1.Капітана» без пропуску перевірка має побачити таким, як є.
+        result = review_order_text(
+            self._read_word_text(order_path, normalize=False), order_path, mapping, index_folder
+        )
+
+        for note in result.notes:
+            self.log(f"  {note}")
+        self.log(f"  Помилок: {result.errors}; зауважень: {result.warnings}.")
+        # У журнал — лише правило й номери пунктів, без ПІБ і РНОКПП.
+        for line in group_findings(result.findings):
+            self.log(f"  {line}")
+
+        folder = os.path.join(os.path.dirname(os.path.abspath(order_path)), "Перевірка")
+        os.makedirs(folder, exist_ok=True)
+        base = sanitize_filename(Path(order_path).stem)
+        ordered = sorted(result.findings, key=lambda finding: finding.level != "помилка")
+        _save_table_to_excel(
+            os.path.join(folder, f"Перевірка_{base}.xlsx"),
+            ["Серйозність", "Що перевірялось", "Де", "Що не так", "Як виправити"],
+            [(f.level, f.rule, f.where, f.what, f.how) for f in ordered]
+            + [("інфо", "Перевірка", "", note, "") for note in result.notes],
+        )
+
+        word = None
+        try:
+            word = win32com.client.DispatchEx("Word.Application")
+            word.Visible = False
+            word.DisplayAlerts = 0
+            marked, unplaced = save_marked_copy(
+                word, order_path, os.path.join(folder, f"{base} — перевірка.docx"), ordered
+            )
+            self.log(
+                f"  Позначена копія: {marked} позначок у тексті"
+                + (f", {unplaced} приміток на початку документа" if unplaced else "") + "."
+            )
+        except Exception as error:
+            self.log(f"  УВАГА: позначену копію не створено ({explain_error(error).splitlines()[0]}); "
+                     "звіт Excel збережено.")
+        finally:
+            if word:
+                force_quit_word(word)
+        self.log(f"  Звіт: {folder}")
+        return result, folder
 
     def _run_extracts_scope_action(
         self,
@@ -4762,6 +4130,14 @@ class App:
                 "Помилка",
                 "Виберіть словник Excel, шаблон витягу і хоча б один наказ або примірник № 2.",
             )
+            return
+
+        missing = self._missing_selected_files(
+            ("Словник Excel", self.excel_path.get()),
+            ("Зразок витягу", self.template_path.get()),
+        )
+        if missing:
+            self._report_missing_files(missing)
             return
 
         self._set_extract_action_buttons_state(DISABLED)
@@ -4821,6 +4197,15 @@ class App:
             )
             return
 
+        missing = self._missing_selected_files(
+            ("Словник Excel", self.excel_path.get()),
+            ("Зразок витягу", self.template_path.get()),
+            ("Заготовка примірника (остання сторінка)", self.p2_back_page_path.get()),
+        )
+        if missing:
+            self._report_missing_files(missing)
+            return
+
         self._batch_running = True
         self.btn_full_cycle.config(state=DISABLED)
         try:
@@ -4861,8 +4246,10 @@ class App:
                 handler()
             except Exception as error:
                 traceback.print_exc()
-                self.log(f"  ПОМИЛКА ({name}): {error}")
-                failures.append((name, str(error)))
+                explanation = explain_error(error)
+                self.log(f"  ПОМИЛКА під час обробки «{name}»:\n    "
+                         + explanation.replace("\n", "\n    "))
+                failures.append((name, explanation))
         return failures
 
     def _report_batch_result(
@@ -4874,14 +4261,18 @@ class App:
             messagebox.showinfo("Успіх", f"{title}: успішно оброблено {succeeded} з {total} файл(ів).")
             return
 
-        details = "\n".join(f"• {name}: {error}" for name, error in failures[:10])
+        details = "\n\n".join(
+            f"Наказ «{name}» — не оброблено.\n{error}" for name, error in failures[:10]
+        )
         if len(failures) > 10:
-            details += f"\n… ще {len(failures) - 10}"
+            details += f"\n\n… і ще {len(failures) - 10} файл(ів) з такими самими збоями."
         self.log(f"\nНе вдалося виконати {action_name} для {len(failures)} файл(ів).")
         messagebox.showwarning(
             title,
-            f"Оброблено {succeeded} з {total} файл(ів).\n\n"
-            f"Не вдалося ({len(failures)}):\n{details}",
+            f"Готово: {succeeded} з {total} файл(ів). Не вийшло: {len(failures)}.\n\n"
+            "Нижче названо наказ, на якому програма зупинилась, і причину. "
+            "Назва наказу — це те, що оброблялося, а не обов'язково те, чого бракує.\n\n"
+            f"{details}",
         )
 
     def _log_routing_module(self):
@@ -5270,9 +4661,11 @@ class App:
             busy_candidates.append(management_out_file)
         for busy_candidate in busy_candidates:
             if busy_candidate and not is_path_writable(busy_candidate):
-                raise RuntimeError(
-                    f"Файл «{os.path.basename(busy_candidate)}» відкритий в іншій програмі "
-                    "(найімовірніше у Word). Закрийте його та повторіть генерацію."
+                raise UserError(
+                    f"файл витягів «{os.path.basename(busy_candidate)}» уже відкритий — "
+                    "найімовірніше у Word, з минулого разу.",
+                    "Закрийте це вікно Word і натисніть кнопку ще раз. "
+                    "Поки файл відкритий, програма не може записати в нього нові витяги.",
                 )
         temp_dir = os.path.join(self.out_folder.get(), "_nat_temp")
         os.makedirs(temp_dir, exist_ok=True)
@@ -5796,7 +5189,9 @@ class App:
                 # відповідати реальному вмісту шаблону (він може бути у форматі
                 # Word 97-2003), інакше Word відмовиться її відкрити.
                 temp_path = copy_template_for_editing(
-                    template_path, os.path.join(temp_dir, f"extract_{idx:04d}.docx")
+                    template_path,
+                    os.path.join(temp_dir, f"extract_{idx:04d}.docx"),
+                    label="зразок витягу",
                 )
                 doc = word.Documents.Open(os.path.abspath(temp_path), ReadOnly=False)
                 # Текст шаблону читаємо один раз: більшості з тих двох десятків
@@ -7003,7 +6398,9 @@ class App:
                     # Заготовка може бути у форматі Word 97-2003, тож робоча
                     # копія зберігає реальне розширення, а .docx дає SaveAs2.
                     working_copy = copy_template_for_editing(
-                        back_page_abs, os.path.join(target_dir, "_nat_tmpl.docx")
+                        back_page_abs,
+                        os.path.join(target_dir, "_nat_tmpl.docx"),
+                        label="заготовка примірника",
                     )
                     # Під кінець великого пакета Word може тимчасово відхиляти
                     # виклики — такий збій не є помилкою даних, тому повторюємо.
@@ -7048,8 +6445,10 @@ class App:
                 except Exception as order_error:
                     # Збій одного наказу не має зривати весь пакет.
                     traceback.print_exc()
-                    self.log_p2(f"  ПОМИЛКА ({fname}): {order_error}")
-                    failed_orders.append((fname, str(order_error)))
+                    explanation = explain_error(order_error)
+                    self.log_p2(f"  ПОМИЛКА під час обробки «{fname}»:\n    "
+                                + explanation.replace("\n", "\n    "))
+                    failed_orders.append((fname, explanation))
                     try:
                         if doc is not None:
                             doc.Close(False)
@@ -7081,9 +6480,15 @@ class App:
             self.log_p2(f"\n🎉 Завершено! Успішно сформовано {total_orders} примірник(ів) № 2.")
 
             if failed_orders:
-                details = "\n".join(f"• {name}: {error}" for name, error in failed_orders[:10])
+                details = "\n\n".join(
+                    f"Наказ «{name}» — примірник не створено.\n{error}"
+                    for name, error in failed_orders[:10]
+                )
                 if len(failed_orders) > 10:
-                    details += f"\n… ще {len(failed_orders) - 10}"
+                    details += (
+                        f"\n\n… і ще {len(failed_orders) - 10} наказ(ів) "
+                        "з такими самими збоями."
+                    )
                 self.log_p2(f"\nНе вдалося сформувати примірники: {len(failed_orders)} шт.")
                 messagebox.showwarning(
                     "Примірники сформовано частково",
@@ -7101,14 +6506,15 @@ class App:
             # Раніше винятку не було де перехопити: таблиця лишалась порожньою,
             # а користувач бачив лише traceback у консолі.
             traceback.print_exc()
-            self.log_p2(f"\n❌ ПОМИЛКА пакетної генерації: {error}")
+            explanation = explain_error(error)
+            self.log_p2(f"\n❌ ПОМИЛКА пакетної генерації:\n{explanation}")
             for rec in created_records:
                 self.p2_tree.insert("", tk.END, values=rec)
             if created_records:
                 self._set_copy_two_sources([record[-1] for record in created_records])
             messagebox.showerror(
-                "Помилка формування примірників",
-                f"Пакет перервано: {error}\n\n"
+                "Примірники сформовано не до кінця",
+                f"{explanation}\n\n"
                 f"Встигли сформувати: {len(created_records)} примірник(ів).",
             )
         finally:
@@ -7176,6 +6582,7 @@ class App:
 
 
 if __name__ == "__main__":
-    app_window = tb.Window(themename="cosmo")
-    app = App(app_window)
-    app_window.mainloop()
+    # Tk-версії більше немає: запуск цього файлу відкриває Qt-оболонку.
+    from generate_extracts_qt import main
+
+    raise SystemExit(main())

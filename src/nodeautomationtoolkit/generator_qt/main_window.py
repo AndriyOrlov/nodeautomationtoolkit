@@ -28,6 +28,8 @@ from PySide6.QtWidgets import (
 
 from . import compat, theme
 from .compare_window import CompareWindow
+from .instruction_dialog import InstructionDialog
+from .orders_window import OrdersWindowMixin
 from .samples_dialog import SamplesDialog
 from .widgets import (
     COPY_RESULT_COLUMNS,
@@ -35,6 +37,7 @@ from .widgets import (
     ORDER_COLUMNS,
     ORDER_WIDTHS,
     ActionStrip,
+    OrderDropZone,
     Badge,
     LogConsole,
     PillDelegate,
@@ -77,7 +80,6 @@ def install_qt_bridge(legacy) -> None:
     legacy.tk = compat.make_tk_namespace()
     legacy.messagebox = compat.MessageBoxBridge
     legacy.filedialog = compat.FileDialogBridge
-    legacy.HAS_WINDND = False
     legacy.DISABLED = compat.DISABLED
     legacy.NORMAL = compat.NORMAL
 
@@ -130,10 +132,10 @@ class GeneratorWindow(QMainWindow):
         super().closeEvent(event)
 
 
-class QtShellMixin:
-    """Qt-інтерфейс для `generate_extracts.App`. Порядок вкладок — як у Tk
-    (0 — примірники, 1 — витяги, 2 — повідомлення): на нього спирається
-    `handle_drag_and_drop`."""
+class QtShellMixin(OrdersWindowMixin):
+    """Qt-інтерфейс для `generate_extracts.App`. Порядок вкладок незмінний
+    (0 — примірники, 1 — витяги, 2 — повідомлення): на нього
+    спирається `handle_drag_and_drop`."""
 
     legacy = None  # модуль generate_extracts; задається в create_qt_app_class
     # Нові частини з наказу дописуються в таблицю заготовками (AGENT.md 9.5.7).
@@ -147,6 +149,7 @@ class QtShellMixin:
         self._busy_depth = 0
         self._lockable_buttons: list[compat.TkButton] = []
         self._samples_dialog: SamplesDialog | None = None
+        self._instruction_dialog: InstructionDialog | None = None
         self._compare_windows: list[CompareWindow] = []
         self._ui_ready = False
         super().__init__(compat.RootBridge(self.main_window))
@@ -261,7 +264,9 @@ class QtShellMixin:
         if version:
             layout.addWidget(Badge(f"v{version}", "teal"))
         layout.addStretch(1)
+        layout.addWidget(button("📖  Інструкція", "sky", self.open_instruction_window))
         layout.addWidget(self._lock(button("⚙  Зразки та шаблони", "amber", self.open_samples_window)))
+        layout.addWidget(button("🔒  Накази", "ghost", self.open_orders_window, "Генератор наказів (у роботі)"))
         return bar
 
     def _orders_table(
@@ -517,8 +522,16 @@ class QtShellMixin:
         )
         for widget in (self.btn_calc, self.btn_extracts, self.btn_management_extracts, self.btn_full_cycle):
             strip.add(widget)
+        strip.add(button("📂 Папка результату", "secondary", self.open_extracts_output_folder))
         strip.add(button("ⓘ Теги шаблону", "sky", self.show_template_tags))
         strip.add(button("🔍 Порівняти з еталоном", "amber", self.open_compare_extracts))
+        self.btn_order_review = self._lock(button("🎓 Перевірити наказ", "sky", self.run_order_review_action))
+        self.btn_order_review.setToolTip(
+            "Перевірити обрані накази без еталона: нумерація, адресати, РНОКПП, підписант, "
+            "історія осіб і написання посад за попередніми наказами. Звіт і позначена копія — "
+            "у теці «Перевірка» поруч із наказом; оригінал не змінюється."
+        )
+        strip.add(self.btn_order_review)
         self._strip_status[1] = strip.finish().status
         layout.addWidget(strip)
 
@@ -554,6 +567,12 @@ class QtShellMixin:
             label("Повідомлення формуються по одному наказу за запуск.", "MutedLabel")
         )
         source.body.addWidget(bind_label(label("", "SummaryLabel"), self.message_source_summary))
+        source.body.addWidget(
+            OrderDropZone(
+                "⇪  Перетягніть наказ сюди — одразу створяться обидва шифровані повідомлення",
+                self.generate_messages_for_dropped_order,
+            )
+        )
         tags_note = label(
             "Стандартні теги: {{номер_наказу}}/{{номер}}, {{дата_наказу}}/{{дата}}, {{кому_список}}, "
             "{{куди}}, {{тцк чі вч}}, {{виконавець}} та спільні теги підписанта/затверджувача. "
@@ -565,12 +584,25 @@ class QtShellMixin:
         source.body.addWidget(tags_note)
         layout.addWidget(source)
 
+        def message_options(row: QHBoxLayout) -> None:
+            skip_box = check_box(
+                "Не додавати внутрішнє переміщення в управлінні",
+                self.message_skip_internal_management,
+            )
+            skip_box.setToolTip(
+                "Пункт, де «управління» є і в посаді «звідки», і в посаді «КУДИ», "
+                "не переноситься у шифрований зміст. Витягів до управління це не стосується."
+            )
+            row.addWidget(skip_box)
+            row.addStretch(1)
+
         layout.addWidget(
             run_params_card(
                 "Реквізити цього прогону",
                 executor_var=self.message_executor,
                 folder_var=self.message_out_folder,
                 on_pick_folder=self.select_message_output_folder,
+                options=message_options,
             )
         )
 
@@ -579,6 +611,7 @@ class QtShellMixin:
             button("✉ Створити 2 повідомлення", "run", self.run_generate_messages)
         )
         strip.add(self.btn_generate_messages)
+        strip.add(button("📂 Папка результату", "secondary", self.open_message_output_folder))
         strip.add(button("🔍 Порівняти з еталоном", "amber", self.open_compare_messages))
         strip.add(button("ⓘ Теги повідомлень", "sky", self.show_message_tags))
         self._strip_status[2] = strip.finish().status
@@ -709,6 +742,19 @@ class QtShellMixin:
     def run_generate_messages(self):
         return self._guarded(super().run_generate_messages)
 
+    def run_order_review_action(self):
+        return self._guarded(super().run_order_review_action)
+
+    def generate_messages_for_dropped_order(self, path: str) -> None:
+        """Наказ, перетягнутий у рамку вкладки повідомлень: обрати й одразу створити."""
+        if self._busy_depth:
+            self.log("Перетягування проігноровано: зачекайте завершення поточного пакета.")
+            return
+        self._set_orders([path])
+        self.log(f"📥 [Drag-and-Drop] Наказ для повідомлень: {os.path.basename(path)} — створюю повідомлення.")
+        self._refresh_badges()
+        self.run_generate_messages()
+
     def accept_dropped_paths(self, paths: list[str]) -> None:
         if self._busy_depth:
             self.log("Перетягування проігноровано: зачекайте завершення поточного пакета.")
@@ -748,10 +794,6 @@ class QtShellMixin:
     def _preview_pause(self, seconds: float) -> None:
         compat.sleep_responsive(seconds)
 
-    def toggle_theme(self):
-        # Тема одна — «Obsidian». Значення теми Tk у конфігу не чіпаємо.
-        return None
-
     def open_samples_window(self):
         if self._samples_dialog is None:
             dialog = SamplesDialog(self, self.main_window)
@@ -760,6 +802,33 @@ class QtShellMixin:
         self._samples_dialog.show()
         self._samples_dialog.raise_()
         self._samples_dialog.activateWindow()
+
+    def open_instruction_window(self):
+        if self._instruction_dialog is None:
+            dialog = InstructionDialog(self.main_window)
+            dialog.finished.connect(lambda *_args: setattr(self, "_instruction_dialog", None))
+            self._instruction_dialog = dialog
+        self._instruction_dialog.show()
+        self._instruction_dialog.raise_()
+        self._instruction_dialog.activateWindow()
+
+    def _open_output_folder(self, folder: str, what: str) -> None:
+        if folder and os.path.isdir(folder):
+            os.startfile(folder)  # noqa: S606 - лише Windows, як і весь генератор
+        else:
+            self.legacy.messagebox.showwarning(
+                "Папка результату",
+                f"Папка {what} ще не створена. Вона з'явиться після першого запуску.",
+            )
+
+    def open_extracts_output_folder(self):
+        self._open_output_folder(self.out_folder.get(), "витягів")
+
+    def open_message_output_folder(self):
+        folder = self.message_out_folder.get()
+        if not folder and self.doc_path.get():
+            folder = os.path.join(os.path.dirname(os.path.abspath(self.doc_path.get())), "Messages_Output")
+        self._open_output_folder(folder, "повідомлень")
 
     def _open_compare(self, mode: str, generated_path: str = "") -> CompareWindow:
         window = CompareWindow(generated_path=generated_path, mode=mode, parent=self.main_window)
@@ -786,6 +855,8 @@ class QtShellMixin:
             window.close()
         if self._samples_dialog is not None:
             self._samples_dialog.close()
+        if self._instruction_dialog is not None:
+            self._instruction_dialog.close()
 
 
 def create_qt_app_class(legacy):
