@@ -59,8 +59,7 @@ def _line_to_paragraph(doc):
     mapping = []
     for index in range(1, doc.Paragraphs.Count + 1):
         raw = doc.Paragraphs(index).Range.Text
-        logical = raw.rstrip("\r" + CELL).splitlines() or [""]
-        mapping.extend([index] * len(logical))
+        mapping.extend([index] * generator.paragraph_line_count(raw))
     return mapping
 
 
@@ -131,3 +130,39 @@ def test_trailing_empty_paragraph_is_harmless():
 
 def test_empty_document_is_safe():
     assert read_document_text(_FakeDoc([])) == ""
+
+
+def test_break_at_paragraph_end_does_not_shift_the_map():
+    """Розрив сторінки чи мʼякий перенос у КІНЦІ абзацу дає ще один рядок.
+
+    Карта рахувала `raw.splitlines()` — на рядок менше, ніж текст. Після
+    такого абзацу межі пунктів зсувались на абзац: пункт губив біографію,
+    а сусідній захоплював чужий абзац (дубль у витягу).
+    """
+    doc = _FakeDoc(
+        [
+            "§ 1\r",
+            "1. Перший\r",
+            "біографія першого\x0c\r",  # розрив сторінки в кінці абзацу
+            "2. Другий\r",
+            "рядок\x0bбіографії\x0b\r",  # мʼякий перенос у кінці абзацу
+            "3. Третій\r",
+            "\x0c\r",  # абзац лише з розривом
+            "4. Четвертий\r",
+        ]
+    )
+    lines = read_document_text(doc).splitlines()
+    mapping = _line_to_paragraph(doc)
+
+    assert len(mapping) >= len(lines)
+    for number, word in ((1, "Перший"), (2, "Другий"), (3, "Третій"), (4, "Четвертий")):
+        line_index = lines.index(f"{number}. {word}")
+        paragraph = doc.Paragraphs(mapping[line_index]).Range.Text
+        assert paragraph.startswith(f"{number}. {word}")
+
+
+def test_page_break_only_paragraph_is_told_apart():
+    assert generator.is_page_break_only_text("\x0c\r")
+    assert generator.is_page_break_only_text(" \x0c \r")
+    assert not generator.is_page_break_only_text("біографія\x0c\r")
+    assert not generator.is_page_break_only_text("біографія\r")

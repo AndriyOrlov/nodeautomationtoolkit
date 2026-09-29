@@ -41,6 +41,30 @@ def _find(document, quotes) -> object | None:
     return None
 
 
+def _narrow(found, focus: str):
+    """Звужує знайдений фрагмент до `focus` (неправильне слово) у його межах.
+
+    Фрагмент лише вказує місце в наказі — виділяти треба саме помилку, а не
+    півабзацу. Не знайшлося — лишається весь фрагмент.
+    """
+    needle = " ".join(str(focus or "").split())[:_FIND_LIMIT].strip()
+    if not needle:
+        return found
+    narrowed = found.Duplicate
+    search = narrowed.Find
+    search.ClearFormatting()
+    if search.Execute(
+        FindText=needle.replace("^", "^^"),
+        MatchCase=False,
+        MatchWholeWord=" " not in needle,
+        MatchWildcards=False,
+        Forward=True,
+        Wrap=0,  # wdFindStop — лише в межах фрагмента
+    ):
+        return narrowed
+    return found
+
+
 def save_marked_copy(
     word, source_path: str, output_path: str, findings: list[Finding]
 ) -> tuple[int, int]:
@@ -58,6 +82,7 @@ def save_marked_copy(
                 found = document.Range(0, 0)
                 unplaced += 1
             else:
+                found = _narrow(found, finding.focus)
                 found.HighlightColorIndex = HIGHLIGHT.get(finding.level, DEFAULT_HIGHLIGHT)
                 marked += 1
             document.Comments.Add(found, comment_text(finding))

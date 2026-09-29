@@ -1,0 +1,5 @@
+# Windows-скрипти й модулі VBA мусять мати CRLF: з LF cmd розсипає рядки
+# на уламки й ламає мітки goto (AGENT.md, розд. 8.5), а Word ламає імпорт .bas.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.bas text eol=crlf
