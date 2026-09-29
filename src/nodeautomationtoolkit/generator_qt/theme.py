@@ -86,6 +86,11 @@ DIFF_TONES = {
     "MODIFIED": ("#3a2806", C["amber_text"], False),
     "HEADER": (None, C["blue_text"], True),
 }
+#: Слова в зміненому рядку порівняння: розбіжність — жовте, інша частина (шифр) — червоне.
+WORD_TONES = {
+    "changed": ("#5a3f08", C["amber_text"], False),
+    "unit": ("#7f1d2d", "#ffe4e6", True),
+}
 
 _FONT_FILES = (
     "segoeui.ttf",

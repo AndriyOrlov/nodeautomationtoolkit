@@ -157,8 +157,78 @@ def test_heading_without_remaining_items_is_dropped():
     assert not any("пункту 2 Положення" in line for line in kept)
 
 
+def test_latin_i_in_management_word():
+    # «управлiння» з латинською i — набір з іншої розкладки.
+    assert is_internal_management_move([INTERNAL.replace("управління", "управлiння")])
+    assert is_internal_management_move([INTERNAL.replace("УПРАВЛІННЯ", "УПРАВЛIННЯ")])
+
+
+def test_recipient_from_section_heading_does_not_block_skip():
+    # Частину названо в шапці §, а в самому пункті її немає: адресат
+    # успадкований, переміщення все одно всередині управління.
+    order_lines = [
+        "НАКАЗ",
+        "§ 1",
+        "Відповідно до пункту 1 Положення офіцерів 555 інформаційно-телекомунікаційного "
+        "вузла ЗВІЛЬНИТИ з займаних посад і ПРИЗНАЧИТИ:",
+        "",
+        INTERNAL,
+        "1985 р.н.",
+    ]
+    routes = map_military_units(text="\n".join(order_lines), mapping=MAPPING)
+    assert routes["item_spans"][0]["internal_management_move"] is True
+
+
+def test_unit_named_in_item_is_not_internal_move():
+    # «управління» тут — управління названої частини: її повідомляють.
+    item = (
+        "1. Майора ТЕСТЕНКА Олега Васильовича, офіцера управління 555 інформаційно-"
+        "телекомунікаційного вузла – СТАРШИМ ОФІЦЕРОМ УПРАВЛІННЯ 555 ІНФОРМАЦІЙНО-"
+        "ТЕЛЕКОМУНІКАЦІЙНОГО ВУЗЛА."
+    )
+    routes = map_military_units(text="\n".join(ORDER_LINES[:4] + [item, "1985 р.н."]), mapping=MAPPING)
+    assert routes["item_spans"][0]["internal_management_move"] is False
+
+
+def test_messages_read_order_by_paragraphs_with_list_numbers():
+    # `Content.Text` не містить номерів автонумерації Word: пункти зливались із
+    # шапкою, і внутрішнє переміщення не розпізнавалось (26.09.2026).
+    import inspect
+
+    source = inspect.getsource(_load_generator().App.run_generate_messages)
+    assert "read_document_text(source_doc" in source
+    assert "source_doc.Content.Text" not in source
+
+
+def test_lowercase_destination_is_found_by_structure():
+    # «КУДИ» набрано малими: межа — тире з пробілами або посада в орудному.
+    assert is_internal_management_move([INTERNAL.lower()])
+    assert is_internal_management_move(
+        ["1. Майора ТЕСТЕНКА Олега Васильовича, старшого офіцера відділу планування "
+         "управління зв'язку, старшим офіцером відділу організації управління зв'язку."]
+    )
+    assert is_internal_management_move(
+        ["1. Майора ТЕСТЕНКА Олега Васильовича, офіцера групи відновлення управління "
+         "підтримки персоналу управління, начальником групи цього самого управління."]
+    )
+    # З управління — не в управління.
+    assert not is_internal_management_move(
+        ["4. Капітана ВИГАДАНКА, офіцера відділу управління персоналу, "
+         "старшим офіцером відділу кадрів."]
+    )
+    # Одна посада з двома «управліннями», без частини «куди».
+    assert not is_internal_management_move(
+        ["1. Майора ТЕСТЕНКА, старшого офіцера відділу планування розвідувального "
+         "управління штабу управління."]
+    )
+
+
 def test_nothing_skipped_without_internal_moves():
-    # Усе малими — частини «КУДИ» немає, отже й переміщення в управління.
-    text = "\n".join(ORDER_LINES[:10]).replace(INTERNAL, INTERNAL.lower())
+    # Звідки — з управління, куди — ні: це не внутрішнє переміщення.
+    outside = (
+        "1. Майора ТЕСТЕНКА Олега Васильовича, старшого офіцера відділу планування "
+        "управління зв'язку - старшим офіцером відділу кадрів."
+    )
+    text = "\n".join(ORDER_LINES[:10]).replace(INTERNAL, outside)
     routes = map_military_units(text=text, mapping=MAPPING)
     assert _load_generator().message_skipped_item_lines(routes) == (set(), [])

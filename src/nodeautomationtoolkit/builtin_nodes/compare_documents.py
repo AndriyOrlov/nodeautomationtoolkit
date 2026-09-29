@@ -63,6 +63,8 @@ class DiffDiscrepancy:
     expected_rule: str = ""
     actual_rule: str = ""
     fix_suggestion: str = ""
+    #: «помилка» — відрізняється частина (шифр), червоне; решта — «увага».
+    severity: str = "увага"
 
 
 @dataclass
@@ -207,6 +209,53 @@ def _normalize_text_for_compare(t: str) -> str:
     return " ".join(t.split())
 
 
+#: Позначки слів у рядку: звичайна розбіжність і розбіжність частини (шифру).
+WORD_CHANGED = "changed"
+WORD_UNIT = "unit"
+
+
+def _is_unit_token(token: str, previous: str = "") -> bool:
+    """Чи є слово шифром частини («А1234», або «1234» одразу після «А»)."""
+    if re.search(r"[АA]\d{4}", token):
+        return True
+    return bool(re.fullmatch(r"\W*\d{4}\W*", token)) and previous.strip("«»\"'(") in ("А", "A")
+
+
+def word_diff(ref_text: str, gen_text: str) -> tuple[list[tuple[int, int, str]], list[tuple[int, int, str]]]:
+    """Які саме слова абзацу відрізняються: `(ref_spans, gen_spans)`.
+
+    Span — `(початок, кінець, вид)` у символах рядка; вид — `WORD_CHANGED` або
+    `WORD_UNIT` (відрізняється шифр частини — це помилка, червоне). Слова
+    порівнюються з тією самою нормалізацією лапок, тире й пробілів, що й абзаци,
+    тож «ʼ» проти «'» розбіжністю не є.
+    """
+    ref_tokens = [(m.start(), m.end(), m.group(0)) for m in re.finditer(r"\S+", ref_text or "")]
+    gen_tokens = [(m.start(), m.end(), m.group(0)) for m in re.finditer(r"\S+", gen_text or "")]
+    matcher = difflib.SequenceMatcher(
+        None,
+        [_normalize_text_for_compare(token) for _s, _e, token in ref_tokens],
+        [_normalize_text_for_compare(token) for _s, _e, token in gen_tokens],
+        autojunk=False,
+    )
+
+    def spans(tokens, start, end):
+        result = []
+        for index in range(start, end):
+            token_start, token_end, token = tokens[index]
+            previous = tokens[index - 1][2] if index else ""
+            kind = WORD_UNIT if _is_unit_token(token, previous) else WORD_CHANGED
+            result.append((token_start, token_end, kind))
+        return result
+
+    ref_spans, gen_spans = [], []
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == "equal":
+            continue
+        ref_spans += spans(ref_tokens, i1, i2)
+        gen_spans += spans(gen_tokens, j1, j2)
+    return ref_spans, gen_spans
+
+
 def compare_docx_documents(
     reference_path: str | Path,
     generated_path: str | Path,
@@ -278,15 +327,17 @@ def compare_docx_documents(
                     continue
 
                 status = "MODIFIED"
-                side_by_side_rows.append(
-                    {
-                        "status": status,
-                        "ref_line": r_text,
-                        "gen_line": g_text,
-                        "ref_p": rp,
-                        "gen_p": gp,
-                    }
-                )
+                row = {
+                    "status": status,
+                    "ref_line": r_text,
+                    "gen_line": g_text,
+                    "ref_p": rp,
+                    "gen_p": gp,
+                }
+                if rp and gp:
+                    # Лише слова, що відрізняються: вікно підсвічує їх, а не весь рядок.
+                    row["ref_spans"], row["gen_spans"] = word_diff(r_text, g_text)
+                side_by_side_rows.append(row)
 
                 if rp and gp:
                     label = _get_semantic_label(rp, gp)
@@ -491,6 +542,7 @@ def _analyze_text_and_format_discrepancy(
                 expected_rule="Підстановка згідно зі словником Excel",
                 actual_rule="Підставлено інший або нерозпізнаний шифр",
                 fix_suggestion="Перевірити відповідність назви ВЧ та шифру в таблиці Excel / recipient_mapping.",
+                severity="помилка",
             )
         )
         return
@@ -549,7 +601,9 @@ def _build_summary_text(discrepancies: list[DiffDiscrepancy]) -> str:
     for d in discrepancies:
         counts[d.issue_type] = counts.get(d.issue_type, 0) + 1
     details = ", ".join(f"{k}: {v}" for k, v in counts.items())
-    return f"⚠️ Знайдено розбіжностей: {len(discrepancies)} ({details})"
+    errors = sum(d.severity == "помилка" for d in discrepancies)
+    prefix = f"❌ Помилок (інша частина / шифр): {errors}. " if errors else ""
+    return f"{prefix}⚠️ Знайдено розбіжностей: {len(discrepancies)} ({details})"
 
 
 def generate_ai_chat_report(

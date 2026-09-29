@@ -15,7 +15,7 @@ _PKG_REL = "http://schemas.openxmlformats.org/package/2006/relationships"
 
 # Друкується Tkinter-генератором у журнал, щоб одразу було видно, що після
 # перезапуску завантажено актуальний вихідний модуль, а не старий процес/EXE.
-ROUTING_VERSION = "2026-09-23-v14-internal-management-move"
+ROUTING_VERSION = "2026-09-29-v18-own-basis-continues-item"
 
 _ORDER_SIGNER_START_RE = re.compile(
     r"^\s*(?:т\.?\s*в\.?\s*о\.?|тимчасово\s+виконуюч(?:ий|а)?|"
@@ -483,6 +483,28 @@ def _starts_a_new_heading(line: str) -> bool:
         second = words[1]
         return len(second) >= 2 and second.isupper()
     return False
+
+
+def _is_heading_inside_item(line: str) -> bool:
+    """Чи є рядок посеред пункту справжньою шапкою, а не рядком біографії.
+
+    Запасне ТЕКСТОВЕ правило — коли відступів Word немає (див. `bio_lines`
+    у `map_military_units`). Шапка починається сама (§, «Відповідно до …»,
+    «Згідно з …», ВЕЛИКІ літери — `_starts_a_new_heading`) або закінчується
+    двокрапкою («По … та …:»). «Призначається згідно з планом…» — продовження
+    пункту. Рядок біографії з двокрапкою в кінці тексту не відрізнити — його
+    ловить лише відступ.
+    """
+    return _starts_a_new_heading(line) or line.rstrip().endswith(":")
+
+
+def _continues_unfinished_line(previous_line: str) -> bool:
+    """Чи обірвався попередній рядок посеред речення (без крапки, двокрапки…).
+
+    Порожній рядок — не обрив: після нього може починатися нова шапка.
+    """
+    text = str(previous_line or "").strip()
+    return bool(text) and text[-1] not in ".:;!?"
 
 
 def _build_unit_fuzzy_pattern(open_name: str) -> re.Pattern:
@@ -1411,22 +1433,50 @@ _COMMAND_POST_RE = re.compile(
     r"(?:командн\w*\s+пункт\w*|пункт\w*\s+управління|ЗКП|ГКП|ППУ|КП)\s+",
     re.IGNORECASE | re.UNICODE,
 )
-_MANAGEMENT_WORD_RE = re.compile(r"\bуправлінн\w*", re.IGNORECASE | re.UNICODE)
+#: Латинська «i» замість української «і» трапляється в наказах (набір з
+#: іншої розкладки) — слово все одно «управління».
+_MANAGEMENT_WORD_RE = re.compile(r"\bуправл[іi]нн\w*", re.IGNORECASE | re.UNICODE)
+
+
+#: Початок частини «КУДИ», набраної малими: тире з пробілами або посада в
+#: орудному відмінку («старшим офіцером», «начальником»). У частині «звідки»
+#: посада — в родовому («старшого офіцера»), тож з нею не сплутати.
+_DESTINATION_START_RE = re.compile(
+    r"\s[–—-]\s"
+    r"|(?<!\w)(?:(?:старш|головн|молодш|перш|друг)\w*им\s+)?"
+    r"(?:офіцером|начальником|заступником|командиром|помічником|інспектором|"
+    r"інструктором|спеціалістом|фахівцем|оператором|інженером|техніком|"
+    r"психологом|юрисконсультом|діловодом|секретарем|радником|перекладачем|"
+    r"старшиною|водієм|лікарем|механіком)(?!\w)",
+    re.IGNORECASE | re.UNICODE,
+)
 
 
 def is_internal_management_move(lines: list[str]) -> bool:
     """Чи є пункт переміщенням з посади в управлінні на посаду в управлінні.
 
-    У пункті «звідки» пишеться малими, «КУДИ» — ВЕЛИКИМИ (AGENT.md, 9.5.5).
-    Внутрішнє переміщення — коли «управління» стоїть в обох частинах. Просто
-    двох згадок замало: назва однієї посади сама буває з двома
-    («…розвідувального управління штабу управління»). Біографія й підстави
-    не враховуються: «освіта: … академія державного управління» — не посада.
+    Внутрішнє переміщення — коли «управління» стоїть і в частині «звідки», і в
+    частині «КУДИ». Просто двох згадок замало: назва однієї посади сама буває з
+    двома («…розвідувального управління штабу управління»). Біографія й
+    підстави не враховуються: «освіта: … академія державного управління» — не
+    посада.
+
+    Межа частин: «звідки» пишеться малими, «КУДИ» — ВЕЛИКИМИ (AGENT.md, 9.5.5).
+    Якщо «КУДИ» теж набрано малими, межею є тире з пробілами або перша посада в
+    орудному відмінку (`_DESTINATION_START_RE`).
     """
     main_text = _get_item_main_text(lines).replace("­", "")
     main_text = _COMMAND_POST_RE.sub("", main_text)
     words = [match.group(0) for match in _MANAGEMENT_WORD_RE.finditer(main_text)]
-    return any(word.isupper() for word in words) and any(not word.isupper() for word in words)
+    if any(word.isupper() for word in words) and any(not word.isupper() for word in words):
+        return True
+    boundary = _DESTINATION_START_RE.search(main_text)
+    if not boundary:
+        return False
+    return bool(
+        _MANAGEMENT_WORD_RE.search(main_text[: boundary.start()])
+        and _MANAGEMENT_WORD_RE.search(main_text[boundary.end():])
+    )
 
 
 #: Невидимі символи, які Word і системи документообігу лишають у тексті:
@@ -1483,7 +1533,14 @@ def map_military_units(
     mapping: dict | None = None,
     default_prefix: str = "військова частина ",
     fuzzy_match: bool = True,
+    bio_lines=None,
 ) -> dict:
+    """`bio_lines` — номери рядків `text`, чий абзац Word має лівий відступ від
+    4 см: це біографічний блок пункту (правило з перевірки наказу). Такий рядок
+    усередині пункту ніколи не стає шапкою чи новим пунктом. Без Word (текст,
+    тести) — порожньо, і діє лише текстове правило `_is_heading_inside_item`.
+    """
+    bio_lines = frozenset(bio_lines or ())
     if not text.strip():
         return {
             "processed_text": "",
@@ -1850,6 +1907,19 @@ def map_military_units(
                         heading_segments[-1][1] = abs_idx
             continue
 
+        # Абзац із відступом біографії (від 4 см) — завжди частина пункту,
+        # хай що в ньому написано: «згідно з», «військовослужбовців», двокрапка.
+        if (
+            abs_idx in bio_lines
+            and current_block is not None
+            and current_block["type"] == "item"
+            and not clean.startswith("§")
+        ):
+            current_block["lines"].append(line)
+            current_block["end_line"] = abs_idx
+            previous_line_was_heading = False
+            continue
+
         # Підшапка-підстава звільнення не завжди закінчується двокрапкою:
         # «У ВІДСТАВКУ ЗА ПІДПУНКТОМ “б” (… про непридатність до військової
         # служби).» закінчується КРАПКОЮ. Такий рядок не впізнавався як
@@ -1871,6 +1941,33 @@ def map_military_units(
             and not re.match(r"^\d+[\.\d]*", clean_search)
             and not clean_search.casefold().startswith("підстава")
         )
+        # Усередині пункту ці ознаки ловлять і рядки БІОГРАФІЇ: «Призначається
+        # згідно з планом…», «…з числа військовослужбовців…», «Вислуга років у
+        # ЗС:». Пункт обривався на такому рядку — у витяг ішла лише частина
+        # біографії, а її хвіст ставав шапкою НАСТУПНОГО пункту й потрапляв у
+        # чужий витяг. Тож тут шапкою є лише рядок, який сам її починає.
+        if (
+            is_section_marker
+            and current_block is not None
+            and current_block["type"] == "item"
+            and not _is_heading_inside_item(clean_search)
+        ):
+            is_section_marker = False
+        # Шапка не продовжує НЕЗАКІНЧЕНЕ речення. Якщо попередній рядок пункту
+        # обірвався без крапки («…Закарпатської області») і наступний іде впритул,
+        # без порожнього рядка, — це продовження пункту, навіть якщо воно
+        # ВЕЛИКИМИ: власна підстава «У ЗАПАС ЗА ПІДПУНКТОМ “г” …». Раніше пункт
+        # обривався, а його підстава ставала підшапкою наступних пунктів.
+        # Підстава наступної групи стоїть після завершеного пункту й порожнього
+        # рядка (правило 4.2.9) — її це не зачіпає.
+        if (
+            is_section_marker
+            and current_block is not None
+            and current_block["type"] == "item"
+            and not clean.startswith("§")
+            and _continues_unfinished_line(lines[abs_idx - 1] if abs_idx else "")
+        ):
+            is_section_marker = False
 
         is_new_item = (
             not is_section_marker
@@ -2290,7 +2387,10 @@ def map_military_units(
             # але слово «управління» може бути саме в такому рядку.
             and bool(re.search(r"\bуправлінн\w*\b", full_item_text, re.IGNORECASE))
         )
-        internal_management_move = is_management_change and is_internal_management_move(
+        # Адресат, успадкований із шапки §, не робить пункт «чужим»: переміщення
+        # все одно всередині управління. Лише частина, названа в самому пункті,
+        # означає, що «управління» — це управління цієї частини.
+        internal_management_move = not item_recipient_names and is_internal_management_move(
             block["lines"]
         )
         item_spans.append(

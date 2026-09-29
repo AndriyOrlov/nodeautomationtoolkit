@@ -176,3 +176,59 @@ def test_blank_paragraphs_can_still_be_compared_when_asked(tmp_path: Path):
     issue_types = {d.issue_type for d in res.discrepancies}
     assert "Відсутній ентер перед пунктом" in issue_types
     assert "Відступ перед підписантом" in issue_types
+
+
+# ── Порівняння повідомлень: підсвічуються лише неправильні слова ─────────────
+# Вимога користувача 29.09.2026: у перевірці повідомлень і супроводів виділяти
+# лише неправильні слова, а не весь абзац; якщо відрізняється частина (шифр) —
+# це червона помилка.
+
+
+def _marked(text: str, spans) -> list[tuple[str, str]]:
+    return [(text[start:end], kind) for start, end, kind in spans]
+
+
+def test_word_diff_marks_only_the_wrong_words():
+    from nodeautomationtoolkit.builtin_nodes.compare_documents import WORD_CHANGED, word_diff
+
+    ref = "Командиру військової частини А1111 надіслати копію наказу."
+    gen = "Командиру військової частини А1111 надіслати копію накзу."
+    ref_spans, gen_spans = word_diff(ref, gen)
+    assert _marked(ref, ref_spans) == [("наказу.", WORD_CHANGED)]
+    assert _marked(gen, gen_spans) == [("накзу.", WORD_CHANGED)]
+
+
+def test_word_diff_marks_another_unit_as_error():
+    from nodeautomationtoolkit.builtin_nodes.compare_documents import WORD_UNIT, word_diff
+
+    ref = "Командиру військової частини А1111"
+    gen = "Командиру військової частини А2222"
+    ref_spans, gen_spans = word_diff(ref, gen)
+    assert _marked(ref, ref_spans) == [("А1111", WORD_UNIT)]
+    assert _marked(gen, gen_spans) == [("А2222", WORD_UNIT)]
+
+    # Шифр, набраний із пропуском, — теж частина.
+    _ref_spans, gen_spans = word_diff("до військової частини А 1111.", "до військової частини А 2222.")
+    assert _marked("до військової частини А 2222.", gen_spans) == [("2222.", WORD_UNIT)]
+
+
+def test_word_diff_ignores_quote_and_dash_variants():
+    from nodeautomationtoolkit.builtin_nodes.compare_documents import word_diff
+
+    assert word_diff("зв’язку – «Схід»", "зв'язку - \"Схід\"") == ([], [])
+
+
+def test_modified_row_carries_word_spans_and_cipher_is_error(tmp_path: Path):
+    p_ref = ['<w:p><w:r><w:t>Командиру військової частини А1111</w:t></w:r></w:p>']
+    p_gen = ['<w:p><w:r><w:t>Командиру військової частини А2222</w:t></w:r></w:p>']
+    ref_path = tmp_path / "ref.docx"
+    gen_path = tmp_path / "gen.docx"
+    ref_path.write_bytes(_create_test_docx(p_ref))
+    gen_path.write_bytes(_create_test_docx(p_gen))
+
+    res = compare_docx_documents(ref_path, gen_path, mode="повідомлення_супровід")
+    (row,) = res.side_by_side_rows
+    assert row["status"] == "MODIFIED"
+    assert [kind for *_span, kind in row["gen_spans"]] == ["unit"]
+    assert res.discrepancies[0].severity == "помилка"
+    assert res.summary_text.startswith("❌ Помилок (інша частина / шифр): 1.")

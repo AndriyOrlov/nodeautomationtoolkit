@@ -137,6 +137,39 @@ def test_selection_api(qt_app):
     assert tree.selection() == (second,)
 
 
+def test_deleting_selected_row_keeps_selection_handler_safe(qt_app):
+    # Головне вікно слухає itemSelectionChanged і в обробнику питає
+    # selection(). Qt подає цей сигнал ПІД ЧАС видалення виділеного рядка,
+    # тож міст мусить бути узгодженим і в цей момент: раніше рядок уже
+    # зникав зі словника, а в таблиці ще стояв — KeyError 'order_0'.
+    widget = QTreeWidget()
+    tree = compat.TreeBridge(widget)
+    seen, errors = [], []
+
+    def on_selection_changed():
+        # PySide лише друкує виняток з обробника сигналу й не пускає його далі
+        # (тому програма й працювала), тож ловимо його тут.
+        try:
+            seen.append(tree.selection())
+        except Exception as error:  # noqa: BLE001
+            errors.append(error)
+
+    widget.itemSelectionChanged.connect(on_selection_changed)
+    tree.insert("", compat.END, iid="order_0", values=(compat.MARK_ON, "a"))
+    tree.insert("", compat.END, iid="order_1", values=(compat.MARK_ON, "b"))
+    # Клік робить рядок і виділеним, і ПОТОЧНИМ; при видаленні поточного Qt
+    # переводить його на сусідній, поки старий рядок ще стоїть у таблиці.
+    widget.setCurrentItem(widget.topLevelItem(0))
+    assert seen[-1] == ("order_0",)
+
+    for child in tree.get_children():
+        tree.delete(child)
+
+    assert errors == []
+    assert tree.get_children() == ()
+    assert tree.selection() == ()
+
+
 def test_columns_heading_and_width(qt_app):
     widget = QTreeWidget()
     tree = compat.TreeBridge(widget)

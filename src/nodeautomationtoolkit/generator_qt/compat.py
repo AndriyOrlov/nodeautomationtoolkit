@@ -510,13 +510,16 @@ class TreeBridge:
 
     def delete(self, *iids) -> None:
         for iid in _flatten(iids):
-            item = self._items.pop(iid, None)
+            item = self._items.get(iid)
+            # Спершу з таблиці, потім зі словника: видалення виділеного рядка
+            # подає itemSelectionChanged, поки рядок ще в таблиці, і обробник
+            # вікна питає selection() — рядок мусить бути ще відомий.
+            if item is not None:
+                row = self.widget.indexOfTopLevelItem(item)
+                if row >= 0:
+                    self.widget.takeTopLevelItem(row)
+            self._items.pop(iid, None)
             self._values.pop(iid, None)
-            if item is None:
-                continue
-            row = self.widget.indexOfTopLevelItem(item)
-            if row >= 0:
-                self.widget.takeTopLevelItem(row)
         self._notify(self.changed_callbacks)
 
     def item(self, iid, option=None, **options):
@@ -541,7 +544,11 @@ class TreeBridge:
         return tuple(values)
 
     def selection(self) -> tuple[str, ...]:
-        return tuple(iid for iid in self.get_children() if self._items[iid].isSelected())
+        return tuple(
+            iid
+            for iid in self.get_children()
+            if iid in self._items and self._items[iid].isSelected()
+        )
 
     def selection_add(self, *iids) -> None:
         for iid in _flatten(iids):

@@ -118,8 +118,18 @@ def _detect_grammatical_case(matched_text: str) -> str:
             return case_label
 
     for endings, case_label in _CASE_AGREEMENT_RULES:
-        if sum(1 for word in words if word.endswith(endings)) >= 2:
-            return case_label
+        if sum(1 for word in words if word.endswith(endings)) < 2:
+            continue
+        # Знахідний на «-у/-ю» — лише коли головне слово ЖІНОЧОГО роду
+        # («окрему механізовану бригаду»). «батальйону резерву», «полку
+        # зв'язку» — родовий чоловічого роду: інакше виходило «командира роти
+        # військову частину».
+        if case_label == "З" and not any(
+            (match := _FEMININE_UNIT_KIND_RE.match(word)) and match.group("ending") in ("у", "ю")
+            for word in words
+        ):
+            continue
+        return case_label
 
     return _detect_case_by_unit_kind(words) or "Р"
 

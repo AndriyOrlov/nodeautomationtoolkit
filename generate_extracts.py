@@ -279,11 +279,65 @@ def load_saved_analysis_reports(order_path: str, output_folder: str) -> dict:
     }
 
 
-def read_document_text(doc, normalize: bool = True) -> str:
+#: Лівий відступ біографічного блоку — від 4 см (зазвичай 6, буває 5–7), як у
+#: перевірці наказу (`word_macro/NATCheckCore.bas`). 1 см = 72 / 2.54 pt.
+BIO_MIN_LEFT_INDENT_PT = 4 * 72 / 2.54
+
+
+def paragraph_line_count(paragraph_text: str) -> int:
+    """Скільки рядків дає абзац у тексті `"\\n".join(абзаци).splitlines()`.
+
+    ЄДИНЕ місце цього підрахунку — для тексту наказу й для карти «рядок →
+    абзац» витягів і повідомлень. `\\f` (розрив сторінки) і `\\v` (мʼякий
+    перенос) теж розривають рядок, і в КІНЦІ абзацу дають ще один рядок, якого
+    `paragraph_text.splitlines()` не бачить. Карта рахувала саме так, тож після
+    кожного такого абзацу межі пунктів зсувались на абзац: пункт втрачав
+    біографію, а сусідній пункт захоплював чужий абзац (дубль).
+    """
+    return len((paragraph_text.rstrip("\r\x07") + "\n").splitlines())
+
+
+def is_page_break_only_text(paragraph_text: str) -> bool:
+    """Абзац, у якому, крім розриву сторінки, нічого немає."""
+    text = paragraph_text or ""
+    return "\x0c" in text and not text.strip("\r\x07\v\f \t")
+
+
+def remove_page_breaks_in_range(doc, start: int, end: int) -> int:
+    """Прибирає розриви сторінки/розділу з вставленого діапазону `doc`.
+
+    Пагінацію витягу чи повідомлення будуємо заново, тож розрив наказу тут
+    зайвий — але текст абзацу, в якому він стояв, лишається. Раніше такий
+    абзац пропускали цілком, і зникав його текст (біографія на межі сторінок).
+    Повертає новий кінець діапазону.
+    """
+    for _ in range(100):
+        if "\x0c" not in (doc.Range(start, end).Text or ""):
+            break
+        found = False
+        for code in ("^m", "^b"):
+            search = doc.Range(start, end)
+            finder = search.Find
+            finder.ClearFormatting()
+            if finder.Execute(FindText=code, MatchWildcards=False, Forward=True, Wrap=0):
+                search.Delete()
+                end -= 1
+                found = True
+                break
+        if not found:
+            break
+    return end
+
+
+def read_document_text(doc, normalize: bool = True, bio_lines: set | None = None) -> str:
     """Текст документа, зібраний З АБЗАЦІВ, а не з `Content.Text`.
 
     `normalize=False` — без `normalize_item_numbering`: перевірці наказу треба
     бачити «1.Капітана» таким, як його набрали.
+
+    `bio_lines` (множина, заповнюється тут) — номери рядків тексту, чий абзац
+    має лівий відступ від `BIO_MIN_LEFT_INDENT_PT`: біографічний блок пункту.
+    Маршрутизація не обриває на них пункт (`map_military_units(bio_lines=)`).
 
     `Content.Text` склеює цілий рядок таблиці в один рядок тексту, тоді як
     `doc.Paragraphs` рахує кожну комірку окремим абзацом. Через це нумерація
@@ -301,6 +355,7 @@ def read_document_text(doc, normalize: bool = True) -> str:
     """
     list_numbers = _list_item_numbers_by_start(doc)
     lines = []
+    line_index = 0
     for paragraph in iter_paragraphs(doc):
         paragraph_range = paragraph.Range
         paragraph_text = (paragraph_range.Text or "").rstrip("\r\x07")
@@ -312,6 +367,16 @@ def read_document_text(doc, normalize: bool = True) -> str:
             if number and not re.match(r"^\s*\d", paragraph_text):
                 paragraph_text = f"{number} {paragraph_text}"
         lines.append(paragraph_text)
+        line_count = paragraph_line_count(paragraph_text)
+        if bio_lines is not None and paragraph_text.strip():
+            try:
+                indent = float(paragraph.LeftIndent)
+            except Exception:
+                indent = 0.0
+            # 9999999 — «невизначено» Word, не відступ.
+            if BIO_MIN_LEFT_INDENT_PT <= indent < 9999999:
+                bio_lines.update(range(line_index, line_index + line_count))
+        line_index += line_count
     text = "\n".join(lines)
     return normalize_item_numbering(text) if normalize else text
 
@@ -425,6 +490,17 @@ from nodeautomationtoolkit.builtin_nodes.typography import (  # noqa: E402
 )
 
 
+#: Пункт про смерть / загибель: лише йому дозволено шрифт менший за 14, якщо
+#: він не вміщується на сторінку (користувач, 29.09.2026). Розміри — по черзі.
+DEATH_ITEM_FONT_SIZES = (13, 12)
+_DEATH_ITEM_RE = re.compile(r"загинув|загинула|загибел|помер(?:ла)?\b|смерт", re.IGNORECASE)
+
+
+def is_death_item_text(text: str) -> bool:
+    """Чи йдеться в пункті про смерть або загибель військовослужбовця."""
+    return bool(_DEATH_ITEM_RE.search(text or ""))
+
+
 def is_biographical_paragraph(p_text: str) -> bool:
     """Визначає, чи є абзац біографічним блоком (дата народження, освіта, служба, РНОКПП/ІПН)."""
     t = (p_text or "").strip().casefold()
@@ -439,6 +515,9 @@ def is_biographical_paragraph(p_text: str) -> bool:
     # «р. н.» пишуть і злитно, і з пробілами — в офіційному зразку саме
     # з пробілом. Через вузьку перевірку рядок р.н. не вважався
     # біографічним, і обов'язковий порожній абзац з'їжджав на ІПН.
+    # У пунктах про смерть / загибель біографія починається з «Народився …».
+    if t.startswith(("народився", "народилася", "народилась")):
+        return True
     if re.search(r"\bр\s*\.\s*н\s*\.", t) or "року народження" in t:
         return True
     if "освіта:" in t or "освіта -" in t or "освіта –" in t or "закінчив у" in t:
@@ -939,8 +1018,16 @@ def build_message_recipient_groups(mapping: dict, routes: dict) -> dict[str, lis
         return "ОБЛАСН" in identity.upper() or bool(re.search(r"\bОТЦК\b", identity, re.IGNORECASE))
 
     def is_corps_entry(entry: dict) -> bool:
-        values = " ".join(str(entry.get(key, "")) for key in ("open_name", "abbreviation"))
-        return "КОРПУС" in values.upper() or bool(re.search(r"\b\d{1,3}\s*АК\b", values, re.IGNORECASE))
+        # Корпус — лише коли «корпус» стоїть у НАЗИВНОМУ («11 армійський
+        # корпус») або скорочення «N АК». Частина, у стовпці A якої записано
+        # підпорядкування («… бригада 11 армійського корпусу»), корпусом не є:
+        # раніше вона йшла в групу корпусів, і група частин лишалась без неї.
+        open_name = str(entry.get("open_name", ""))
+        abbreviation = str(entry.get("abbreviation", ""))
+        return bool(
+            re.search(r"\bкорпус\b", open_name, re.IGNORECASE)
+            or re.fullmatch(r"\s*\d{1,3}\s*АК\s*", abbreviation, re.IGNORECASE)
+        )
 
     matched_names = set()
     match_report = routes.get("match_report")
@@ -2771,14 +2858,18 @@ class App:
                     continue
                 source_paragraph = source_doc.Paragraphs(p_index)
                 source_range = source_paragraph.Range.Duplicate
-                if "\x0c" in (source_range.Text or ""):
-                    continue  # ручні розриви сторінок з наказу не переносимо
+                source_text = source_range.Text or ""
+                if is_page_break_only_text(source_text):
+                    continue  # абзац-розрив сторінки з наказу не переносимо
                 destination = doc.Range(insert_point, insert_point)
                 destination.FormattedText = source_range.FormattedText
                 paragraph_start, insert_point = destination.Start, destination.End
                 _carry_source_formatting(
                     doc, paragraph_start, insert_point, source_paragraph
                 )
+                if "\x0c" in source_text:
+                    # Сам розрив прибираємо, текст абзацу лишається.
+                    insert_point = remove_page_breaks_in_range(doc, paragraph_start, insert_point)
         except Exception as error:
             # Частина абзаців уже вставлена — повертатись до простого тексту
             # не можна, інакше зміст задвоївся б.
@@ -3344,14 +3435,18 @@ class App:
             word.DisplayAlerts = 0  # wdAlertsNone: не показувати блокуючі діалоги
             source_doc = word.Documents.Open(order_path, ReadOnly=True)
 
-            source_text = source_doc.Content.Text
+            # З абзаців, як у витягах: `Content.Text` не має номерів автонумерації
+            # Word — такий пункт зливався з шапкою, і внутрішнє переміщення в
+            # управлінні не розпізнавалось; ще й таблиці зсували рядки ↔ абзаци.
+            message_bio_lines: set[int] = set()
+            source_text = read_document_text(source_doc, bio_lines=message_bio_lines)
             order_text, order_signer = text_before_order_signer(source_text)
             order_num, order_date = extract_metadata_from_filename(os.path.basename(order_path))
             # У повідомленнях дата не розкривається словами (на відміну від витягів).
             order_date_formatted = format_message_date(order_date)
 
             table_gaps = self._report_table_gaps(order_text, mapping)
-            routes = map_military_units(text=order_text, mapping=mapping)
+            routes = map_military_units(text=order_text, mapping=mapping, bio_lines=message_bio_lines)
             recipient_groups = build_message_recipient_groups(mapping, routes)
             recipients = (
                 recipient_groups["corps"] + recipient_groups["units"] + recipient_groups["tck"]
@@ -3436,8 +3531,7 @@ class App:
                 source_line_to_para = []
                 for paragraph_index in range(1, source_doc.Paragraphs.Count + 1):
                     raw = source_doc.Paragraphs(paragraph_index).Range.Text
-                    logical_lines = raw.rstrip("\r\x07").splitlines() or [""]
-                    source_line_to_para.extend([paragraph_index] * len(logical_lines))
+                    source_line_to_para.extend([paragraph_index] * paragraph_line_count(raw))
 
                 order_lines = order_text.splitlines()
                 line_map = source_line_to_para[: len(order_lines)]
@@ -3567,6 +3661,24 @@ class App:
             self.p2_out_folder_manual.set(True)
             self.save_config()
 
+    @staticmethod
+    def _word_cache_key(doc_path: str, normalize: bool = True):
+        try:
+            stat = os.stat(doc_path)
+        except OSError:
+            return None
+        return (os.path.abspath(doc_path), stat.st_mtime_ns, stat.st_size, normalize)
+
+    def _word_bio_lines(self, doc_path: str, normalize: bool = True) -> frozenset:
+        """Рядки біографії (відступ від 4 см) з останнього `_read_word_text`.
+
+        Word тут не запускається: береться те, що зібрало саме читання тексту.
+        Немає (файл змінився, текст підмінено в тестах) — порожньо, і
+        маршрутизація спирається лише на текстове правило.
+        """
+        key = self._word_cache_key(doc_path, normalize)
+        return getattr(self, "_word_bio_cache", {}).get(key, frozenset())
+
     def _read_word_text(self, doc_path: str, normalize: bool = True) -> str:
         """Текст наказу через Word, з кешем за файлом і часом його зміни.
 
@@ -3578,11 +3690,10 @@ class App:
         cache = getattr(self, "_word_text_cache", None)
         if cache is None:
             cache = self._word_text_cache = {}
-        try:
-            stat = os.stat(doc_path)
-            cache_key = (os.path.abspath(doc_path), stat.st_mtime_ns, stat.st_size, normalize)
-        except OSError:
-            cache_key = None
+        bio_cache = getattr(self, "_word_bio_cache", None)
+        if bio_cache is None:
+            bio_cache = self._word_bio_cache = {}
+        cache_key = self._word_cache_key(doc_path, normalize)
         if cache_key is not None and cache_key in cache:
             return cache[cache_key]
 
@@ -3593,13 +3704,16 @@ class App:
             word.Visible = False
             word.DisplayAlerts = 0  # wdAlertsNone: не показувати блокуючі діалоги (напр. "Зберегти зміни?")
             doc = word.Documents.Open(os.path.abspath(doc_path), ReadOnly=True)
-            text = read_document_text(doc, normalize=normalize)
+            bio_lines: set[int] = set()
+            text = read_document_text(doc, normalize=normalize, bio_lines=bio_lines)
             if cache_key is not None:
                 # Кеш свідомо маленький: тексти наказів важкі, а користь дає
                 # лише останній оброблюваний файл (і сусідні в пакеті).
                 if len(cache) >= 4:
                     cache.clear()
+                    bio_cache.clear()
                 cache[cache_key] = text
+                bio_cache[cache_key] = frozenset(bio_lines)
             return text
         finally:
             try:
@@ -4338,7 +4452,9 @@ class App:
             self.log("Режим: З угрупованням по Корпусах (Варіант 1)")
 
         self.log("Аналізуємо текст наказу (структура, ТЦК, ВЧ)...")
-        map_res_extracts = map_military_units(text=text, mapping=mapping_extracts)
+        map_res_extracts = map_military_units(
+            text=text, mapping=mapping_extracts, bio_lines=self._word_bio_lines(self.doc_path.get())
+        )
         self.show_analysis_results(map_res_extracts)
 
         for invalid_link in map_res_extracts.get("invalid_corps_links", []):
@@ -4460,7 +4576,9 @@ class App:
                     v["corps"] = ""
 
         self.log("Аналізуємо структуру наказу (блоки, адресати)...")
-        map_res = map_military_units(text=text, mapping=mapping)
+        map_res = map_military_units(
+            text=text, mapping=mapping, bio_lines=self._word_bio_lines(self.doc_path.get())
+        )
         self.show_analysis_results(map_res)
         preamble_recipient = str(map_res.get("preamble_recipient") or "").strip()
         if preamble_recipient:
@@ -4691,8 +4809,7 @@ class App:
             source_line_to_para = []
             for pi, source_paragraph in enumerate(source_paragraphs, start=1):
                 raw = source_paragraph.Range.Text
-                logical_lines = raw.rstrip("\r\x07").splitlines() or [""]
-                source_line_to_para.extend([pi] * len(logical_lines))
+                source_line_to_para.extend([pi] * paragraph_line_count(raw))
 
             usable_line_count = len(text.splitlines())
             source_line_to_para = source_line_to_para[:usable_line_count]
@@ -4701,6 +4818,13 @@ class App:
             def has_manual_page_break(para_or_range):
                 r = getattr(para_or_range, "Range", para_or_range)
                 return "\x0c" in getattr(r, "Text", "")
+
+            def is_page_break_only(para_or_range):
+                r = getattr(para_or_range, "Range", para_or_range)
+                return is_page_break_only_text(getattr(r, "Text", "") or "")
+
+            def remove_page_break_chars(start, end):
+                return remove_page_breaks_in_range(doc, start, end)
 
             def is_blank_paragraph(para_or_range):
                 r = getattr(para_or_range, "Range", para_or_range)
@@ -5422,7 +5546,12 @@ class App:
 
                         runs, current = [], []
                         for paragraph_index in paragraph_indexes:
-                            if has_manual_page_break(source_paragraphs[paragraph_index - 1]):
+                            # Пропускаємо лише абзац, де НІЧОГО, крім розриву, немає.
+                            # Розрив у кінці абзацу з текстом (межа сторінки в наказі)
+                            # раніше забирав увесь абзац — зникала біографія. Такий
+                            # абзац копіюється, а сам розрив прибирає
+                            # `remove_page_break_chars`.
+                            if is_page_break_only(source_paragraphs[paragraph_index - 1]):
                                 self.log("Пропущено вихідний розрив сторінки; пагінація витягу буде побудована заново.")
                                 if current:
                                     runs.append(current)
@@ -5522,6 +5651,8 @@ class App:
                             destination_range.FormattedText = source_range.FormattedText
                             insert_point = destination_range.End
                             carry_geometry(source_range, run, start, insert_point)
+                            if has_manual_page_break(source_range):
+                                insert_point = remove_page_break_chars(start, insert_point)
                             # Порожні білі зображення наказу у витяг не переносимо.
                             pasted_range = doc.Range(start, insert_point)
                             removed_images = remove_blank_images(doc, pasted_range)
@@ -5901,6 +6032,35 @@ class App:
                             f"  ℹ️ {cipher}: точний інтервал {chosen_spacing} пт — "
                             f"сторінок: {pages_count}, пунктів на першій: {items_on_first}."
                         )
+
+                    # Виняток із правила «шрифт витягу — 14» (користувач, 29.09.2026):
+                    # ЛИШЕ пункт про смерть / загибель, який і після підбору
+                    # інтервалу не вміщується на одну сторінку, дозволено зменшити
+                    # до 12 пт — такі пункти великі. Решта витягу лишається 14.
+                    if pages_count > 1:
+                        shrunk = False
+                        for item_range, label in zip(inserted_item_ranges, inserted_item_labels):
+                            start_page, end_page = range_pages(item_range)
+                            if start_page is None or start_page == end_page:
+                                continue
+                            if not is_death_item_text(item_range.Text or ""):
+                                continue
+                            for size in DEATH_ITEM_FONT_SIZES:
+                                item_range.Font.Size = size
+                                item_format = item_range.ParagraphFormat
+                                item_format.LineSpacingRule = 4  # wdLineSpaceExactly
+                                item_format.LineSpacing = round(chosen_spacing * size / 14.0, 2)
+                                doc.Repaginate()
+                                start_page, end_page = range_pages(item_range)
+                                if start_page == end_page:
+                                    break
+                            shrunk = True
+                            self.log(
+                                f"  🔡 {cipher}: {label} (смерть / загибель) — шрифт зменшено до {size} пт"
+                                + ("." if start_page == end_page else ", але пункт усе одно довший за сторінку.")
+                            )
+                        if shrunk:
+                            pages_count = doc.ComputeStatistics(2)
 
                 # 2. Остаточна перевірка макета — ПІСЛЯ підбору міжрядкового
                 # інтервалу (16→14 пт), який часто сам усуває розбіжність
