@@ -85,7 +85,8 @@ class CompareWindow(QWidget):
         controls.addWidget(label("Легенда:", "MutedLabel"))
         controls.addWidget(Badge("Пропущено / видалено", "rose"))
         controls.addWidget(Badge("Зайве / додано", "emerald"))
-        controls.addWidget(Badge("Змінено / стиль", "amber"))
+        controls.addWidget(Badge("Змінене слово", "amber"))
+        controls.addWidget(Badge("Інша частина (шифр) — помилка", "rose"))
         files.body.addLayout(controls)
         layout.addWidget(files)
 
@@ -179,24 +180,48 @@ class CompareWindow(QWidget):
         self.copy_button.setEnabled(True)
 
     @staticmethod
-    def _fill(view: QTextEdit, rows: list[dict], side: str) -> None:
+    def _char_format(tone: tuple) -> QTextCharFormat:
+        background, foreground, bold = tone
+        characters = QTextCharFormat()
+        characters.setForeground(QColor(foreground))
+        if background:
+            characters.setBackground(QColor(background))
+        if bold:
+            characters.setFontWeight(QFont.Weight.Bold)
+        return characters
+
+    @classmethod
+    def _fill(cls, view: QTextEdit, rows: list[dict], side: str) -> None:
         view.clear()
         cursor = view.textCursor()
         cursor.beginEditBlock()
+        spans_key = side.replace("_line", "_spans")  # ref_line → ref_spans
         for position, row in enumerate(rows):
-            background, foreground, bold = theme.DIFF_TONES.get(row.get("status"), theme.DIFF_TONES["EQUAL"])
+            status = row.get("status")
+            text = row.get(side) or "[—]"
+            spans = row.get(spans_key)
+            background, foreground, bold = theme.DIFF_TONES.get(status, theme.DIFF_TONES["EQUAL"])
             block = QTextBlockFormat()
-            if background:
+            # Змінений рядок із розміткою слів — без фону всього рядка: підсвічуються
+            # лише неправильні слова (шифр частини — червоним).
+            if background and not spans:
                 block.setBackground(QColor(background))
-            characters = QTextCharFormat()
-            characters.setForeground(QColor(foreground))
-            if bold:
-                characters.setFontWeight(QFont.Weight.Bold)
             if position == 0:
                 cursor.setBlockFormat(block)
             else:
                 cursor.insertBlock(block)
-            cursor.insertText(row.get(side) or "[—]", characters)
+            if not spans:
+                cursor.insertText(text, cls._char_format((None, foreground, bold)))
+                continue
+            plain = cls._char_format(theme.DIFF_TONES["EQUAL"])
+            done = 0
+            for start, end, kind in spans:
+                if start > done:
+                    cursor.insertText(text[done:start], plain)
+                cursor.insertText(text[start:end], cls._char_format(theme.WORD_TONES[kind]))
+                done = end
+            if done < len(text):
+                cursor.insertText(text[done:], plain)
         cursor.endEditBlock()
         view.moveCursor(QTextCursor.MoveOperation.Start)
 
