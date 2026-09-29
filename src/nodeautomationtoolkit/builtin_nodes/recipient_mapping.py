@@ -15,7 +15,7 @@ _PKG_REL = "http://schemas.openxmlformats.org/package/2006/relationships"
 
 # Друкується Tkinter-генератором у журнал, щоб одразу було видно, що після
 # перезапуску завантажено актуальний вихідний модуль, а не старий процес/EXE.
-ROUTING_VERSION = "2026-09-28-v17-bio-indent-not-heading"
+ROUTING_VERSION = "2026-09-29-v18-own-basis-continues-item"
 
 _ORDER_SIGNER_START_RE = re.compile(
     r"^\s*(?:т\.?\s*в\.?\s*о\.?|тимчасово\s+виконуюч(?:ий|а)?|"
@@ -496,6 +496,15 @@ def _is_heading_inside_item(line: str) -> bool:
     ловить лише відступ.
     """
     return _starts_a_new_heading(line) or line.rstrip().endswith(":")
+
+
+def _continues_unfinished_line(previous_line: str) -> bool:
+    """Чи обірвався попередній рядок посеред речення (без крапки, двокрапки…).
+
+    Порожній рядок — не обрив: після нього може починатися нова шапка.
+    """
+    text = str(previous_line or "").strip()
+    return bool(text) and text[-1] not in ".:;!?"
 
 
 def _build_unit_fuzzy_pattern(open_name: str) -> re.Pattern:
@@ -1942,6 +1951,21 @@ def map_military_units(
             and current_block is not None
             and current_block["type"] == "item"
             and not _is_heading_inside_item(clean_search)
+        ):
+            is_section_marker = False
+        # Шапка не продовжує НЕЗАКІНЧЕНЕ речення. Якщо попередній рядок пункту
+        # обірвався без крапки («…Закарпатської області») і наступний іде впритул,
+        # без порожнього рядка, — це продовження пункту, навіть якщо воно
+        # ВЕЛИКИМИ: власна підстава «У ЗАПАС ЗА ПІДПУНКТОМ “г” …». Раніше пункт
+        # обривався, а його підстава ставала підшапкою наступних пунктів.
+        # Підстава наступної групи стоїть після завершеного пункту й порожнього
+        # рядка (правило 4.2.9) — її це не зачіпає.
+        if (
+            is_section_marker
+            and current_block is not None
+            and current_block["type"] == "item"
+            and not clean.startswith("§")
+            and _continues_unfinished_line(lines[abs_idx - 1] if abs_idx else "")
         ):
             is_section_marker = False
 

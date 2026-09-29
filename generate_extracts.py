@@ -490,6 +490,17 @@ from nodeautomationtoolkit.builtin_nodes.typography import (  # noqa: E402
 )
 
 
+#: Пункт про смерть / загибель: лише йому дозволено шрифт менший за 14, якщо
+#: він не вміщується на сторінку (користувач, 29.09.2026). Розміри — по черзі.
+DEATH_ITEM_FONT_SIZES = (13, 12)
+_DEATH_ITEM_RE = re.compile(r"загинув|загинула|загибел|помер(?:ла)?\b|смерт", re.IGNORECASE)
+
+
+def is_death_item_text(text: str) -> bool:
+    """Чи йдеться в пункті про смерть або загибель військовослужбовця."""
+    return bool(_DEATH_ITEM_RE.search(text or ""))
+
+
 def is_biographical_paragraph(p_text: str) -> bool:
     """Визначає, чи є абзац біографічним блоком (дата народження, освіта, служба, РНОКПП/ІПН)."""
     t = (p_text or "").strip().casefold()
@@ -504,6 +515,9 @@ def is_biographical_paragraph(p_text: str) -> bool:
     # «р. н.» пишуть і злитно, і з пробілами — в офіційному зразку саме
     # з пробілом. Через вузьку перевірку рядок р.н. не вважався
     # біографічним, і обов'язковий порожній абзац з'їжджав на ІПН.
+    # У пунктах про смерть / загибель біографія починається з «Народився …».
+    if t.startswith(("народився", "народилася", "народилась")):
+        return True
     if re.search(r"\bр\s*\.\s*н\s*\.", t) or "року народження" in t:
         return True
     if "освіта:" in t or "освіта -" in t or "освіта –" in t or "закінчив у" in t:
@@ -6018,6 +6032,35 @@ class App:
                             f"  ℹ️ {cipher}: точний інтервал {chosen_spacing} пт — "
                             f"сторінок: {pages_count}, пунктів на першій: {items_on_first}."
                         )
+
+                    # Виняток із правила «шрифт витягу — 14» (користувач, 29.09.2026):
+                    # ЛИШЕ пункт про смерть / загибель, який і після підбору
+                    # інтервалу не вміщується на одну сторінку, дозволено зменшити
+                    # до 12 пт — такі пункти великі. Решта витягу лишається 14.
+                    if pages_count > 1:
+                        shrunk = False
+                        for item_range, label in zip(inserted_item_ranges, inserted_item_labels):
+                            start_page, end_page = range_pages(item_range)
+                            if start_page is None or start_page == end_page:
+                                continue
+                            if not is_death_item_text(item_range.Text or ""):
+                                continue
+                            for size in DEATH_ITEM_FONT_SIZES:
+                                item_range.Font.Size = size
+                                item_format = item_range.ParagraphFormat
+                                item_format.LineSpacingRule = 4  # wdLineSpaceExactly
+                                item_format.LineSpacing = round(chosen_spacing * size / 14.0, 2)
+                                doc.Repaginate()
+                                start_page, end_page = range_pages(item_range)
+                                if start_page == end_page:
+                                    break
+                            shrunk = True
+                            self.log(
+                                f"  🔡 {cipher}: {label} (смерть / загибель) — шрифт зменшено до {size} пт"
+                                + ("." if start_page == end_page else ", але пункт усе одно довший за сторінку.")
+                            )
+                        if shrunk:
+                            pages_count = doc.ComputeStatistics(2)
 
                 # 2. Остаточна перевірка макета — ПІСЛЯ підбору міжрядкового
                 # інтервалу (16→14 пт), який часто сам усуває розбіжність

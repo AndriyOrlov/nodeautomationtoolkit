@@ -236,3 +236,46 @@ def test_next_group_basis_does_not_leak_into_the_previous_item():
     assert "ПІДПУНКТОМ “г”" not in thirteenth, thirteenth
     assert "ПІДПУНКТОМ “б”" in items["Пункт 13."]["parent_heading"]
     assert "ПІДПУНКТОМ “г”" in items["Пункт 14."]["parent_heading"]
+
+
+# ── Власна підстава пункту, що йде ВПРИТУЛ за обірваним рядком ───────────────
+_OWN_BASIS = (
+    "У ЗАПАС ЗА ПІДПУНКТОМ “г” (через сімейні обставини або з інших поважних причин, "
+    "перелік яких визначається частиною дванадцятою цієї статті) – дружина, якщо "
+    "обоє із подружжя проходять військову службу і мають дитину віком до 18 років)."
+)
+
+
+def test_own_basis_right_after_an_unfinished_item_line_stays_in_the_item():
+    """Скарга 29.09.2026: пункт 5 обривався на власній підставі.
+
+    Перший рядок пункту закінчується без крапки («…Тестової області»), і одразу за
+    ним, без порожнього рядка, — «У ЗАПАС ЗА ПІДПУНКТОМ “г” …». Це продовження
+    пункту, а не підшапка: пункт має лишитися цілим, підстава — у ньому, а зовнішня
+    «У ВІДСТАВКУ …» до нього не приліплюється (власна підстава її заміняє).
+    """
+    order = (
+        "§ 2\n"
+        + HEAD_LINE_1 + "\n"
+        + HEAD_LINE_2 + "\n\n"
+        + "У ВІДСТАВКУ ЗА ПІДПУНКТОМ “а” (за віком – у разі досягнення граничного віку):\n\n"
+        + "5. Капітана ТЕСТЕНКА Тараса Тарасовича, офіцера 1 окремого тестового загону\n"
+        + _OWN_BASIS + "\n"
+        + "Народився 19 червня 1991 року.\n\n"
+        + "6. Майора ІНШЕНКА Івана Івановича, офіцера 1 окремого тестового загону.\n"
+        + SIGNER
+    )
+    routes = map_military_units(text=order, mapping=MAPPING)
+    items = {
+        str(item["label"]).strip(): item
+        for entry in routes["unit_paragraphs"].values()
+        for item in entry["items"]
+    }
+
+    lines = order.splitlines()
+    fifth = items["Пункт 5."]
+    birth = next(i for i, line in enumerate(lines) if line.startswith("Народився"))
+    assert fifth["source_end_line"] >= birth
+    assert "ПІДПУНКТОМ “г”" not in fifth["parent_heading"]
+    assert "ПІДПУНКТОМ “г”" not in items["Пункт 6."]["parent_heading"]
+    assert "ПІДПУНКТОМ “а”" in items["Пункт 6."]["parent_heading"]

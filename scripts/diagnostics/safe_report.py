@@ -31,6 +31,7 @@ sys.stdout.reconfigure(encoding="utf-8")
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.join(PROJECT_ROOT, "src"))
 
+from nodeautomationtoolkit.builtin_nodes.typography import ORDER_SIGNER_START_RE  # noqa: E402
 from nodeautomationtoolkit.builtin_nodes.recipient_mapping import (  # noqa: E402
     map_military_units,
     read_recipient_mapping,
@@ -41,6 +42,8 @@ BIO_RE = re.compile(
     r"(народил|р\.\s*н\.|року народження|у\s+ЗС|ІПН|РНОКПП|ВОС|освіта|підстава)",
     re.IGNORECASE,
 )
+#: Той самий шаблон, яким генератор шукає підписанта.
+SIGNER_RE = ORDER_SIGNER_START_RE
 SELF_REF_RE = re.compile(r"\b(?:цього|цієї|того)\s+(?:самого|самої|ж)\b", re.IGNORECASE)
 
 
@@ -55,29 +58,36 @@ def load_generator():
     return module
 
 
-def read_order_text(path: str) -> str:
+def read_order_text(path: str, generator=None) -> tuple[str, set[int]]:
+    """(текст, рядки біографії з відступом від 4 см) — так само, як читає генератор."""
     import win32com.client
 
-    generator = load_generator()
+    generator = generator or load_generator()
     word = win32com.client.DispatchEx("Word.Application")
     word.Visible = False
     word.DisplayAlerts = 0
     try:
         document = word.Documents.Open(os.path.abspath(path), ReadOnly=True)
         try:
-            return generator.read_document_text(document)
+            bio_lines: set[int] = set()
+            text = generator.read_document_text(document, bio_lines=bio_lines)
+            return text, bio_lines
         finally:
             document.Close(False)
     finally:
         word.Quit()
 
 
-def line_traits(line: str) -> str:
+def line_traits(line: str, indented_bio: bool = False) -> str:
     """Формальні ознаки рядка — без жодного його слова."""
     stripped = line.strip()
     if not stripped:
         return "порожній"
     traits = []
+    if indented_bio:
+        traits.append("ВІДСТУП БІО (≥4 см)")
+    if SIGNER_RE.match(stripped):
+        traits.append("СХОЖЕ НА ПІДПИСАНТА")
     number = ITEM_NUMBER_RE.match(stripped)
     if number:
         traits.append(f"починається з «{number.group(1)}.»")
@@ -107,10 +117,14 @@ def main() -> int:
         return 2
     order_path, mapping_path = sys.argv[1], sys.argv[2]
 
-    text = read_order_text(order_path)
-    lines = text.splitlines()
+    generator = load_generator()
+    full_text, bio_lines = read_order_text(order_path, generator)
+    lines = full_text.splitlines()
+    # Так само, як генератор: усе від підписанта відкидається ДО маршрутизації.
+    text, _signer = generator.text_before_order_signer(full_text)
+    cut_line = len(text.splitlines())
     mapping = read_recipient_mapping(path=mapping_path).get("mapping", {})
-    routes = map_military_units(text=text, mapping=mapping)
+    routes = map_military_units(text=text, mapping=mapping, bio_lines=bio_lines)
 
     # Знеособлення адресатів: стабільна мітка на кожен ключ витягу.
     labels: dict[str, str] = {}
@@ -123,6 +137,11 @@ def main() -> int:
     report: list[str] = []
     digest = hashlib.sha256(os.path.basename(order_path).encode("utf-8")).hexdigest()[:8]
     report.append(f"НАКАЗ: {digest} (хеш назви файлу), рядків: {len(lines)}")
+    report.append(
+        f"МЕЖА ПІДПИСАНТА: рядок {cut_line} — усе з нього й далі у витяги не йде"
+        if cut_line < len(lines) else "МЕЖА ПІДПИСАНТА: не знайдено, текст не обрізано"
+    )
+    report.append(f"РЯДКІВ БІОГРАФІЇ З ВІДСТУПОМ ≥4 см: {len(bio_lines)}")
     report.append(f"СЛОВНИК: записів {len({id(value) for value in mapping.values()})}")
     report.append("")
 
@@ -199,22 +218,13 @@ def main() -> int:
         report.append("")
 
     report.append("== РЯДКИ (лише ознаки, без тексту) ==")
-    interesting = set()
-    for item in (
-        item
-        for data in routes.get("unit_paragraphs", {}).values()
-        for item in data.get("items", [])
-    ):
-        for bound in (item.get("source_start_line"), item.get("source_end_line")):
-            if isinstance(bound, int):
-                interesting.update(range(max(0, bound - 1), bound + 2))
-        for heading in item.get("heading_ranges") or []:
-            if isinstance(heading, (list, tuple)) and len(heading) == 2:
-                if all(isinstance(bound, int) for bound in heading):
-                    interesting.update(range(heading[0], heading[1] + 1))
+    # Усі рядки тіла: пропажа біографії видна саме на рядках МІЖ межами пунктів.
     for index, line in enumerate(lines):
-        if index in interesting or ITEM_NUMBER_RE.match(line.strip()) or line.strip().startswith("§"):
-            report.append(f"  {index:4d} | довж. {len(line):4d} | {line_traits(line)}")
+        if index == cut_line:
+            report.append("  ---- тут програма обрізала текст (межа підписанта) ----")
+        report.append(
+            f"  {index:4d} | довж. {len(line):4d} | {line_traits(line, index in bio_lines)}"
+        )
 
     body = "\n".join(report)
     print(body)
