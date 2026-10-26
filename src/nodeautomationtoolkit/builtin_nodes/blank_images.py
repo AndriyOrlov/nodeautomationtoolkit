@@ -1,4 +1,4 @@
-"""Порожні білі зображення в змісті, перенесеному з наказу.
+"""Порожні білі зображення й фігури-заглушки в змісті, перенесеному з наказу.
 
 У наказах із систем електронного документообігу трапляються зображення, які
 нічого не показують: білий прямокутник на місці печатки чи QR-коду, прозора
@@ -8,8 +8,13 @@
 Порожнім вважається зображення, в якому КОЖЕН піксель майже білий або майже
 прозорий. Зображення, яке неможливо розібрати (EMF/WMF, пошкоджене) або
 зіставити з фігурою, порожнім НЕ вважається: краще лишити зайве, ніж загубити
-справжнє. Автофігури й написи не чіпаються — це не зображення, і біла фігура
-в наказі може щось закривати.
+справжнє.
+
+Графічні фігури (автофігура, вільна фігура, напис) прибираються з 26.10.2026
+(вимога користувача: «бувають прямокутники білі як заглушки»), але лише
+порожні: без тексту, заливка біла або відсутня, контур білий або відсутній
+(`is_blank_shape`). Кольорова фігура чи фігура з текстом лишається. Група —
+лише якщо порожні ВСІ її частини.
 """
 
 from __future__ import annotations
@@ -44,7 +49,66 @@ _DOCUMENT_RELS = "/word/_rels/document.xml.rels"
 
 _WD_INLINE_PICTURE_TYPES = {3, 4}  # wdInlineShapePicture, wdInlineShapeLinkedPicture
 _MSO_PICTURE_TYPES = {11, 13}  # msoLinkedPicture, msoPicture
+_MSO_GRAPHIC_TYPES = {1, 5, 17}  # msoAutoShape, msoFreeform, msoTextBox
+_MSO_GROUP = 6
 _WD_WITHIN_TABLE = 12
+#: Колір Word (BGR як ціле): канал світліший за WHITE_LEVEL — «білий».
+_MSO_TRUE = -1
+
+
+def _is_white_rgb(value) -> bool:
+    try:
+        number = int(value)
+    except Exception:
+        return False
+    if number < 0:
+        return False  # автоматичний/тематичний колір — не знаємо, який він
+    channels = (number & 0xFF, (number >> 8) & 0xFF, (number >> 16) & 0xFF)
+    return all(channel >= WHITE_LEVEL for channel in channels)
+
+
+def _visible(format_object) -> bool:
+    return int(format_object.Visible) == _MSO_TRUE
+
+
+def is_blank_shape(shape) -> bool:
+    """Чи фігура Word — порожня біла заглушка (див. опис модуля).
+
+    Будь-яка помилка COM — «не порожня»: краще лишити зайве, ніж загубити справжнє.
+    """
+    try:
+        kind = int(shape.Type)
+        if kind == _MSO_GROUP:
+            items = shape.GroupItems
+            count = int(items.Count)
+            return count > 0 and all(is_blank_shape(items.Item(index)) for index in range(1, count + 1))
+        if kind not in _MSO_GRAPHIC_TYPES:
+            return False
+        try:
+            frame = shape.TextFrame
+            has_text = int(frame.HasText) == _MSO_TRUE
+        except Exception:
+            has_text = False  # у фігури немає текстової рамки — значить і тексту немає
+        if has_text:
+            # Порожній напис Word теж «має текст» — знак абзацу. Дивимось сам текст;
+            # не вдалося прочитати — вважаємо, що текст є.
+            try:
+                text = str(frame.TextRange.Text or "")
+            except Exception:
+                return False
+            if text.strip("\r\n\x07\x0b\x0c \t\u00a0"):
+                return False
+        fill = shape.Fill
+        if _visible(fill) and not (
+            _is_white_rgb(fill.ForeColor.RGB) or float(fill.Transparency) >= 0.95
+        ):
+            return False
+        line = shape.Line
+        if _visible(line) and not _is_white_rgb(line.ForeColor.RGB):
+            return False
+        return True
+    except Exception:
+        return False
 
 
 def is_blank_image_bytes(data: bytes) -> bool | None:
@@ -166,7 +230,7 @@ def _drop_emptied_paragraph(doc, paragraph) -> None:
 
 
 def remove_blank_images(doc, content_range) -> int:
-    """Прибирає порожні білі зображення з діапазону. Повертає їх кількість.
+    """Прибирає порожні білі зображення й фігури-заглушки з діапазону. Повертає їх кількість.
 
     `content_range` — саме Range Word, а не числа: після видалення межі
     змісту зсуваються, а Range відстежує їх сам. Межі після виклику треба
@@ -200,10 +264,12 @@ def remove_blank_images(doc, content_range) -> int:
         shapes = []
     for shape in shapes:
         try:
-            if int(shape.Type) not in _MSO_PICTURE_TYPES:
-                continue
+            kind = int(shape.Type)
             anchor = shape.Anchor.Paragraphs(1)
-            if not floating_picture_is_blank(anchor.Range.WordOpenXML, str(shape.Name)):
+            if kind in _MSO_PICTURE_TYPES:
+                if not floating_picture_is_blank(anchor.Range.WordOpenXML, str(shape.Name)):
+                    continue
+            elif not is_blank_shape(shape):
                 continue
             shape.Delete()
             removed += 1

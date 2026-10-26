@@ -466,7 +466,7 @@ class MessagesMixin:
         removed_images = remove_blank_images(doc, pasted_range)
         if removed_images:
             insert_point = pasted_range.End
-            self.log(f"Прибрано порожніх білих зображень: {removed_images}.")
+            self.log(f"Прибрано порожніх білих зображень і фігур: {removed_images}.")
 
         bookmark_name = "nat_message_content"
         try:

@@ -166,3 +166,81 @@ def test_escaped_names_and_absolute_targets_are_matched():
         {"rId8": "/word/media/image8.png"},
     )
     assert floating_picture_is_blank(package, 'Рисунок "печатка"') is True
+
+
+# ── Фігури-заглушки (26.10.2026): білі прямокутники без тексту ──────────────
+from types import SimpleNamespace  # noqa: E402
+
+from nodeautomationtoolkit.builtin_nodes.blank_images import is_blank_shape  # noqa: E402
+
+BGR_WHITE, BGR_BLACK, BGR_YELLOW = 0xFFFFFF, 0x000000, 0x00FFFF  # BGR, як у Word
+MSO_TRUE, MSO_FALSE = -1, 0
+
+
+def _shape(kind=1, fill_visible=MSO_TRUE, fill=BGR_WHITE, transparency=0.0,
+           line_visible=MSO_FALSE, line=BGR_BLACK, has_text=MSO_FALSE):
+    return SimpleNamespace(
+        Type=kind,
+        TextFrame=SimpleNamespace(HasText=has_text),
+        Fill=SimpleNamespace(Visible=fill_visible, ForeColor=SimpleNamespace(RGB=fill), Transparency=transparency),
+        Line=SimpleNamespace(Visible=line_visible, ForeColor=SimpleNamespace(RGB=line)),
+    )
+
+
+@pytest.mark.parametrize(
+    "shape",
+    [
+        _shape(),  # білий прямокутник без контуру
+        _shape(line_visible=MSO_TRUE, line=BGR_WHITE),  # з білим контуром
+        _shape(fill_visible=MSO_FALSE),  # без заливки й контуру
+        _shape(fill=BGR_YELLOW, transparency=1.0),  # повністю прозора заливка
+        _shape(kind=17),  # порожній напис
+    ],
+)
+def test_white_placeholder_shapes_are_blank(shape):
+    assert is_blank_shape(shape)
+
+
+@pytest.mark.parametrize(
+    "shape",
+    [
+        _shape(has_text=MSO_TRUE),  # фігура з текстом
+        _shape(fill=BGR_YELLOW),  # кольорова заливка
+        _shape(line_visible=MSO_TRUE, line=BGR_BLACK),  # видимий чорний контур — рамка
+        _shape(kind=3),  # діаграма та інше — не чіпаємо
+        _shape(fill=-16777216),  # автоматичний/тематичний колір — невідомо, який
+    ],
+)
+def test_visible_or_unknown_shapes_are_kept(shape):
+    assert not is_blank_shape(shape)
+
+
+def test_group_needs_every_part_blank():
+    def group(*items):
+        return SimpleNamespace(
+            Type=6, GroupItems=SimpleNamespace(Count=len(items), Item=lambda i: items[i - 1])
+        )
+
+    assert is_blank_shape(group(_shape(), _shape(fill_visible=MSO_FALSE)))
+    assert not is_blank_shape(group(_shape(), _shape(has_text=MSO_TRUE)))
+
+
+def test_com_error_keeps_the_shape():
+    class Broken:
+        Type = 1
+
+        @property
+        def Fill(self):  # noqa: N802 - назва з COM
+            raise RuntimeError("COM")
+
+    assert not is_blank_shape(Broken())
+
+
+def test_empty_text_box_with_only_paragraph_mark_is_blank():
+    # Word каже HasText = так і для порожнього напису: у ньому лише знак абзацу.
+    empty = _shape(kind=17, has_text=MSO_TRUE)
+    empty.TextFrame.TextRange = SimpleNamespace(Text="\r")
+    assert is_blank_shape(empty)
+    stamp = _shape(kind=17, has_text=MSO_TRUE)
+    stamp.TextFrame.TextRange = SimpleNamespace(Text="М.П.\r")
+    assert not is_blank_shape(stamp)

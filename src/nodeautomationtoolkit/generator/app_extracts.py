@@ -1614,7 +1614,7 @@ class ExtractsMixin:
                             removed_images = remove_blank_images(doc, pasted_range)
                             if removed_images:
                                 insert_point = pasted_range.End
-                                self.log(f"  Прибрано порожніх білих зображень: {removed_images}.")
+                                self.log(f"  Прибрано порожніх білих зображень і фігур: {removed_images}.")
                             first_start = start if first_start is None else first_start
                             last_end = insert_point
 

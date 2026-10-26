@@ -1139,7 +1139,7 @@ def build_copy_document(
             removed_images = remove_blank_images(doc, pasted)
             if removed_images:
                 content_start, content_end = pasted.Start, pasted.End
-                note(f"  Прибрано порожніх білих зображень: {removed_images}.")
+                note(f"  Прибрано порожніх білих зображень і фігур: {removed_images}.")
             apply_keep_together_rules(
                 doc, content_start, content_end, signer_inside=signer_inside
             )
