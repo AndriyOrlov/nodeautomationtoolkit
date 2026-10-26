@@ -2148,3 +2148,35 @@ python scripts/e2e_messages/check_message_output.py <тека>/Messages_Output
   `NBSP = " "` (перевірено, що буквальних нерозривних пробілів у .py немає).
 
 — **Claude**
+
+## 2026-10-26 — окрема програма повідомлень, один підписаний EXE (Claude)
+
+Користувач: «окрема копія, яка робить повідомлення про прийняття кадрових рішень, без
+генератора витягів; 1 EXE; підпиши, щоб файл був безпечний; це як лого».
+
+- **Програма:** `generate_messages_qt.py` → `generator_qt/messages_window.py`
+  (`MessagesShellMixin` поверх `QtShellMixin` + `generate_extracts.App`). Сторінка —
+  та сама `_build_messages_tab`, логіка — та сама `run_generate_messages`. Перетягування
+  йде через `App.handle_drag_and_drop` із замінником вкладок (`_MessagesOnlyNotebook`,
+  завжди індекс 2 = повідомлення). Вікно «Зразки» — `SamplesDialog(messages_only=True)`:
+  словник Excel + два зразки повідомлень.
+- **Конфіг:** `App._config_path()` (новий хук; у генераторі шлях не змінився). Програма
+  повідомлень пише `config_messages.json` поруч з EXE (`sys.executable`): однофайловий
+  EXE розпаковується в тимчасову теку, і конфіг там би зникав. У git не йде.
+- **Лого:** `generator_qt/icons/messages_logo.svg` (перемальовано з картинки користувача:
+  щит, булава й меч навхрест, хрест), з нього `messages_logo.png` (вікно) і
+  `messages_logo.ico` (EXE, 16–256). Оригінал-файл користувач не надсилав — якщо надішле,
+  замінити PNG/ICO.
+- **Збірка:** `build_messages_qt.bat` — PyInstaller `--onefile --noupx`, іконка, ресурс версії
+  (`scripts/messages_exe/make_version_info.py`), далі підпис `scripts/signing/sign_exe.ps1`
+  (Authenticode SHA-256; сертифікат з .pfx / відбитка / першого code-signing у CurrentUser\My;
+  мітка часу, якщо є мережа). Код 2 — сертифіката немає, EXE не підписано. У CI (`CI=true`)
+  `pause` пропускається. Версію ця збірка НЕ підвищує.
+- **Сертифікат:** `scripts/signing/new_signing_cert.ps1` (самопідписаний, .cer у `signing\`),
+  `install_signing_cert.ps1` — на робочих ПК. .ps1 — UTF-8 з BOM (PowerShell 5.1).
+- **CI:** `.github/workflows/build-messages-exe.yml` — Windows, артефакт `PovidomlenniaKadrovi`,
+  підпис із секретів `NAT_SIGN_PFX_BASE64` / `NAT_SIGN_PFX_PASSWORD`, запуск-перевірка 20 с.
+- **Не перевірено:** сама збірка EXE і підпис — у контейнері Linux, PyInstaller не збирає
+  Windows-EXE з Linux. Тести: `tests/test_messages_app.py` (8 passed). Версія: 0.6.11.
+
+— **Claude**

@@ -2023,10 +2023,14 @@ class App:
         self._progress_title = ""
         self._progress_started_at = None
 
-        self.config_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
+        self.config_file = self._config_path()
 
         self.load_config()
         self.create_widgets()
+
+    def _config_path(self) -> str:
+        """Де лежить config.json. Окрема програма повідомлень має свій файл."""
+        return os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
 
     def create_widgets(self):
         """Інтерфейс будує Qt-оболонка (`QtShellMixin.create_widgets`)."""

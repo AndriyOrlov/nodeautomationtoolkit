@@ -14,7 +14,10 @@ from .widgets import button, label, line_edit
 
 
 class SamplesDialog(QDialog):
-    def __init__(self, shell, parent: QWidget | None = None):
+    """`messages_only=True` — для окремої програми повідомлень: лише словник
+    і два зразки повідомлень, без витягів і примірників."""
+
+    def __init__(self, shell, parent: QWidget | None = None, messages_only: bool = False):
         super().__init__(parent)
         self._shell = shell
         self.setObjectName("SamplesDialog")
@@ -36,10 +39,43 @@ class SamplesDialog(QDialog):
 
         tabs = QTabWidget()
         tabs.setObjectName("ResultTabs")
+        excel_row = ("Словник (Excel):", shell.excel_path, shell.select_excel, None)
+        if not messages_only:
+            self._add_generator_pages(tabs, shell, excel_row)
+        message_rows = [
+            (
+                "Зразок супроводу:",
+                shell.message_cover_template_path,
+                shell.select_message_cover_template,
+                None,
+            ),
+            (
+                "Зразок зі змістом:",
+                shell.message_content_template_path,
+                shell.select_message_content_template,
+                None,
+            ),
+        ]
+        tabs.addTab(
+            self._page(
+                [excel_row, *message_rows] if messages_only else message_rows,
+                "Два зразки: титульне повідомлення й повідомлення зі змістом наказу.",
+                [("ⓘ Теги повідомлень", shell.show_message_tags)],
+            ),
+            "  💬 Повідомлення  ",
+        )
+        layout.addWidget(tabs, 1)
+
+        bottom = QHBoxLayout()
+        bottom.addStretch(1)
+        bottom.addWidget(button("💾 Зберегти та закрити", "run", self.accept))
+        layout.addLayout(bottom)
+
+    def _add_generator_pages(self, tabs: QTabWidget, shell, excel_row: tuple) -> None:
         tabs.addTab(
             self._page(
                 [
-                    ("Словник (Excel):", shell.excel_path, shell.select_excel, None),
+                    excel_row,
                     ("Зразок витягу:", shell.template_path, shell.select_template, shell.edit_template),
                 ],
                 "Зразок витягу — DOCX із тегами {{кому}}, {{куди}}, {{зміст}}, {{пункти}} "
@@ -64,33 +100,6 @@ class SamplesDialog(QDialog):
             ),
             "  📑 Примірники 2/3  ",
         )
-        tabs.addTab(
-            self._page(
-                [
-                    (
-                        "Зразок супроводу:",
-                        shell.message_cover_template_path,
-                        shell.select_message_cover_template,
-                        None,
-                    ),
-                    (
-                        "Зразок зі змістом:",
-                        shell.message_content_template_path,
-                        shell.select_message_content_template,
-                        None,
-                    ),
-                ],
-                "Два зразки: титульне повідомлення й повідомлення зі змістом наказу.",
-                [("ⓘ Теги повідомлень", shell.show_message_tags)],
-            ),
-            "  💬 Повідомлення  ",
-        )
-        layout.addWidget(tabs, 1)
-
-        bottom = QHBoxLayout()
-        bottom.addStretch(1)
-        bottom.addWidget(button("💾 Зберегти та закрити", "run", self.accept))
-        layout.addLayout(bottom)
 
     @staticmethod
     def _page(
