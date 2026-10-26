@@ -60,6 +60,7 @@ rem resolves relative ones against the spec folder, not the project root.
   --specpath "%ROOT%build\pyinstaller" ^
   --paths "%ROOT%src" ^
   --collect-submodules nodeautomationtoolkit.builtin_nodes ^
+  --collect-submodules nodeautomationtoolkit.generator ^
   --collect-submodules nodeautomationtoolkit.generator_qt ^
   --collect-submodules nodeautomationtoolkit.order_generator ^
   --collect-submodules nodeautomationtoolkit.order_index ^

@@ -2588,3 +2588,51 @@ python scripts/e2e_messages/check_message_output.py <тека>/Messages_Output
 
 — **Claude**
 
+---
+
+## 2026-10-26 — `generate_extracts.py` розбито на пакет `nodeautomationtoolkit.generator`
+
+Вимога користувача: «розбивай той пайтон модуль на підмодулі… знов роби бекап… роби оболонку
+окремо». Бекап: `..\NAT_backups\nodeautomationtoolkit_2026-10-26_1729_before_split.zip` і git-мітка
+`before-split-2026-10-26` (повернення: `git checkout before-split-2026-10-26 -- .`).
+
+**Як розбито.** Скриптом за ast: кожна функція/метод перенесені **рядок у рядок**, змінено лише
+шапки модулів (імпорти) і два посилання `App.` у статичних методах (→ `MessagesMixin.` /
+`OrderDocumentMixin.`). Модулі (`src/nodeautomationtoolkit/generator/`):
+
+| Модуль | Що |
+|---|---|
+| `naming` | дати, реквізити з назви файлу, назви вихідних файлів |
+| `reports` | Excel-звіти, контрольні файли в %TEMP% |
+| `word_doc` | текст/абзаци Word, формат, запуск і закриття Word |
+| `order_text` | підписант, службовий хвіст, компонування «2 на 1» |
+| `units` | відкриті назви частин поза таблицею, заготовки рядків |
+| `messages` | адресати повідомлень, пропущені пункти |
+| `errors` | `UserError`, `explain_error`, знеособлення журналу |
+| `review_cli` | перевірка без вікна (макрос Word) |
+| `app_core`, `app_documents`, `app_orders`, `app_extracts`, `app_review`, `app_messages`, `app_copies` | міксини класу `App` |
+| `_paths` | `APP_DIR` — тека `config.json` |
+
+**`generate_extracts.py` — фасад (≈300 рядків):** шапка з `sys.path`, реекспорт УСІХ старих імен
+(тести й скрипти звертаються як раніше), `class App(CoreMixin, …, CopiesMixin)`, `__main__`.
+- `_paths.APP_DIR` фасад ставить на свою теку → `config.json` там само, де був (і в EXE).
+- **Передача підмін:** модуль фасаду отримує клас `_FacadeModule`, чий `__setattr__` дублює
+  присвоєння в кожен модуль пакета, де є таке ім'я. Так працюють і `install_qt_bridge`
+  (`legacy.messagebox = …`, `tk`, `filedialog`, `DISABLED`, `NORMAL`), і `monkeypatch` у тестах
+  (`force_quit_word`, `_append_rows_with_excel`, `default_index_folder`), і `gen.messagebox = _Silent`
+  у e2e-скриптах. Тести вантажать фасад без `sys.modules` — модуль шукається через
+  `gc.get_referrers(globals())`. Свіже завантаження фасаду повертає в пакет tkinter-значення.
+- **Не додавати нову логіку у фасад** — лише в модулі пакета.
+
+**Оболонка** вже окрема: `nodeautomationtoolkit.generator_qt` (вікна, `theme.py` — стиль «Obsidian»).
+Логіка вікон не знає; стиль міняється в `theme.py` без змін логіки.
+
+**Перевірки:** 1206 passed (тест невизначених імен тепер іде й по нових файлах); `test_app_version`
+читає `generator/app_core.py`. Еквівалентність на справжньому Word: e2e витягів і повідомлень
+(з `--calc`) прогнано на коді ДО розбиття (git worktree на мітці) і ПІСЛЯ — `word/*.xml` усіх
+результатів однакові, крім випадкових ідентифікаторів Word (rsid, durableId, docId). Перевірки
+примірників у Word: 39/39, 27/27, 26/26. У `build_*_qt.bat` додано
+`--collect-submodules nodeautomationtoolkit.generator`. Версія 0.8.3.
+
+— **Claude**
+

@@ -34,6 +34,9 @@ def test_pyproject_and_package_agree():
 
 
 def test_window_title_shows_the_version():
-    source = (PROJECT_ROOT / "generate_extracts.py").read_text(encoding="utf-8")
+    # Заголовок вікна будує `App.__init__` — після розбиття 26.10.2026 він у пакеті.
+    source = (
+        PROJECT_ROOT / "src" / "nodeautomationtoolkit" / "generator" / "app_core.py"
+    ).read_text(encoding="utf-8")
     assert "from nodeautomationtoolkit import __version__ as APP_VERSION" in source
     assert "{APP_VERSION}" in source
