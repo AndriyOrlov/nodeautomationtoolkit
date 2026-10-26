@@ -127,7 +127,7 @@ class CopiesMixin:
             paths = self._p2_manual_paths()
         self._fill_orders_tree(
             tree, paths,
-            "Накази не обрано — натисніть «📂 Обрати накази» або перетягніть файли сюди.",
+            "Накази не обрано — натисніть «Обрати накази» або перетягніть файли сюди.",
         )
         self._refresh_p2_source_summary()
 

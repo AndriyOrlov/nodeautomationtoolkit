@@ -216,7 +216,7 @@ class OrdersMixin:
             return
         self._fill_orders_tree(
             tree, self.manual_order_paths,
-            "Накази не обрано — натисніть «📂 Обрати накази» або перетягніть файли сюди.",
+            "Накази не обрано — натисніть «Обрати накази» або перетягніть файли сюди.",
         )
         self._select_order_path(tree, self.doc_path.get())
         self._refresh_source_summary()

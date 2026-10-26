@@ -46,7 +46,7 @@ class SamplesDialog(QDialog):
                 "та реквізитами підписанта й засвідчувача.",
                 [("ⓘ Теги шаблону", shell.show_template_tags)],
             ),
-            "  📄 Витяги  ",
+            "Витяги",
         )
         tabs.addTab(
             self._page(
@@ -62,7 +62,7 @@ class SamplesDialog(QDialog):
                 "у який переноситься текст наказу.",
                 [("ⓘ Правила примірника 2", shell.show_p2_info)],
             ),
-            "  📑 Примірники 2/3  ",
+            "Примірники 2/3",
         )
         tabs.addTab(
             self._page(
@@ -91,7 +91,7 @@ class SamplesDialog(QDialog):
                 "пишеться «Згідно з розрахунком розсилки».",
                 [("ⓘ Теги повідомлень", shell.show_message_tags)],
             ),
-            "  💬 Повідомлення  ",
+            "Повідомлення",
         )
         layout.addWidget(tabs, 1)
 

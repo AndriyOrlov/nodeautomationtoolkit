@@ -1,4 +1,7 @@
-"""Будівельні блоки інтерфейсу «Obsidian»: картки, бейджі, таблиці, журнал, рядок стану."""
+"""Будівельні блоки інтерфейсу (Fluent): картки, бейджі, таблиці, журнал, рядок стану.
+
+Усі вікна збираються з цих функцій, тож вигляд змінюється тут, а не в кожній вкладці.
+"""
 
 from __future__ import annotations
 
@@ -21,7 +24,6 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QPlainTextEdit,
-    QProgressBar,
     QStyle,
     QStyledItemDelegate,
     QStyleOptionViewItem,
@@ -32,7 +34,30 @@ from PySide6.QtWidgets import (
 )
 
 from . import theme
-from .compat import LogEntry, LogModel, TkButton, TreeBridge, is_placeholder_row
+from .compat import (
+    LogEntry,
+    LogModel,
+    TkButton,
+    TkButtonMixin,
+    TkPrimaryButton,
+    TkToggleButton,
+    TkToolButton,
+    TkTransparentButton,
+    TreeBridge,
+    is_placeholder_row,
+)
+from .fluent import (
+    BodyLabel,
+    CaptionLabel,
+    CheckBox,
+    FlowLayout,
+    FluentIcon,
+    LineEdit,
+    ProgressBar,
+    SimpleCardWidget,
+    StrongBodyLabel,
+    SubtitleLabel,
+)
 
 PILL_ROLE = Qt.ItemDataRole.UserRole + 1
 
@@ -78,29 +103,101 @@ def bind_label(label: QLabel, variable, formatter: Callable[[object], str] = str
 
 
 def line_edit(variable, placeholder: str = "") -> QLineEdit:
-    edit = QLineEdit()
+    edit = LineEdit()
+    edit.setClearButtonEnabled(False)
     if placeholder:
         edit.setPlaceholderText(placeholder)
     return bind_line_edit(edit, variable)
 
 
 def check_box(text: str, variable) -> QCheckBox:
-    return bind_check_box(QCheckBox(text), variable)
+    return bind_check_box(CheckBox(text), variable)
 
 
-def button(text: str, variant: str = "secondary", slot: Callable | None = None, tooltip: str = "") -> TkButton:
-    widget = TkButton(text, variant)
+#: Емодзі на початку підпису кнопки → значок Fluent. Сам символ із тексту прибирається.
+_BUTTON_ICONS = (
+    ("📂", FluentIcon.FOLDER),
+    ("📁", FluentIcon.FOLDER),
+    ("＋", FluentIcon.ADD),
+    ("⚙", FluentIcon.SETTING),
+    ("ⓘ", FluentIcon.INFO),
+    ("🔍", FluentIcon.SEARCH),
+    ("💾", FluentIcon.SAVE),
+    ("🗑", FluentIcon.DELETE),
+    ("📄", FluentIcon.DOCUMENT),
+    ("✉", FluentIcon.MAIL),
+    ("⚡", FluentIcon.PLAY),
+    ("📖", FluentIcon.LIBRARY),
+    ("📋", FluentIcon.COPY),
+    ("📊", FluentIcon.PIE_SINGLE),
+    ("👁", FluentIcon.VIEW),
+    ("🏛", FluentIcon.PEOPLE),
+    ("🎓", FluentIcon.CERTIFICATE),
+    ("✖", FluentIcon.CLOSE),
+    ("✎", FluentIcon.EDIT),
+    ("☑", FluentIcon.CHECKBOX),
+    ("◻", FluentIcon.CANCEL),
+    ("⇊", FluentIcon.DOWN),
+    ("⇄", FluentIcon.SYNC),
+    ("→", FluentIcon.RIGHT_ARROW),
+    ("W  ", FluentIcon.DOCUMENT),
+)
+
+#: Різновид кнопки → клас Fluent. «run» — головна дія сторінки (акцентна заливка);
+#: решта кольорових різновидів Obsidian тепер звичайні кнопки — один акцент на екран.
+_BUTTON_CLASSES = {
+    "run": TkPrimaryButton,
+    "segment": TkToggleButton,
+    "ghost": TkTransparentButton,
+}
+
+
+def split_button_icon(text: str):
+    """`"📂 Обрати"` → (значок теки, `"Обрати"`); без відомого префікса — (None, текст)."""
+    for prefix, icon in _BUTTON_ICONS:
+        if text.startswith(prefix):
+            return icon, text[len(prefix):].lstrip(" \ufe0f")
+    return None, text
+
+
+def button(text: str, variant: str = "secondary", slot: Callable | None = None, tooltip: str = "") -> TkButtonMixin:
+    icon, caption = split_button_icon(str(text))
+    kind = TkToolButton if (icon is not None and not caption) else _BUTTON_CLASSES.get(variant, TkButton)
+    widget = kind(caption, variant)
+    if icon is not None:
+        widget.setIcon(icon)
     if slot is not None:
         widget.clicked.connect(lambda _checked=False: slot())
     if tooltip:
         widget.setToolTip(tooltip)
+    elif not caption:
+        widget.setToolTip(str(text))
     return widget
 
 
+#: Назви підписів, які в Obsidian задавали стиль, → клас підпису Fluent.
+_LABEL_CLASSES = {
+    "AppName": SubtitleLabel,
+    "PersonTitle": StrongBodyLabel,
+    "SectionTitle": StrongBodyLabel,
+    "MutedLabel": CaptionLabel,
+    "SummaryLabel": CaptionLabel,
+    "HintText": CaptionLabel,
+    "DropZoneText": BodyLabel,
+    "StatusTech": CaptionLabel,
+    "Divider": CaptionLabel,
+    "FieldLabel": BodyLabel,
+}
+_MUTED_LABELS = {"MutedLabel", "HintText", "StatusTech", "Divider", "DropZoneText"}
+
+
 def label(text: str = "", name: str = "") -> QLabel:
-    widget = QLabel(text)
+    widget = _LABEL_CLASSES.get(name, BodyLabel)(text)
     if name:
         widget.setObjectName(name)
+    if name in _MUTED_LABELS:
+        widget.setTextColor(QColor(theme.PALETTES[theme.LIGHT]["text_muted"]),
+                            QColor(theme.PALETTES[theme.DARK]["text_muted"]))
     return widget
 
 
@@ -122,26 +219,22 @@ class Badge(QLabel):
             theme.repolish(self)
 
 
-class SectionCard(QFrame):
-    """Картка розділу: крапка, заголовок великими, бейджі, дії праворуч, тіло."""
+class SectionCard(SimpleCardWidget):
+    """Картка розділу Fluent: заголовок, бейджі, дії праворуч, тіло."""
 
     def __init__(self, title: str, accent: str = "indigo", variant: str = "default", parent: QWidget | None = None):
         super().__init__(parent)
         self.setObjectName("SectionCard")
         self.setProperty("variant", variant)
+        self.setProperty("accent", accent)
 
         outer = QVBoxLayout(self)
-        outer.setContentsMargins(10, 8, 10, 10)
-        outer.setSpacing(6)
+        outer.setContentsMargins(16, 12, 16, 14)
+        outer.setSpacing(10)
 
         header = QHBoxLayout()
         header.setSpacing(8)
-        dot = label("", "SectionDot")
-        dot.setFixedSize(7, 7)
-        dot.setProperty("accent", accent)
-        self.title = label(title.upper(), "SectionTitle")
-        self.title.setProperty("accent", accent)
-        header.addWidget(dot, 0, Qt.AlignmentFlag.AlignVCenter)
+        self.title = label(title, "SectionTitle")
         header.addWidget(self.title)
         self.badges = QHBoxLayout()
         self.badges.setSpacing(6)
@@ -152,13 +245,8 @@ class SectionCard(QFrame):
         header.addLayout(self.actions)
         outer.addLayout(header)
 
-        rule = QFrame()
-        rule.setObjectName("SectionRule")
-        rule.setFixedHeight(1)
-        outer.addWidget(rule)
-
         self.body = QVBoxLayout()
-        self.body.setSpacing(6)
+        self.body.setSpacing(8)
         outer.addLayout(self.body, 1)
 
     def add_badge(self, badge: QWidget) -> QWidget:
@@ -174,14 +262,26 @@ class SectionCard(QFrame):
 
 
 class ActionStrip(QFrame):
-    """Смуга головних дій вкладки зі стислим станом пакета праворуч."""
+    """Смуга головних дій сторінки; під нею — стислий стан пакета.
+
+    Кнопки переносяться на новий рядок (FlowLayout), коли не вміщуються:
+    раніше довгий ряд дій розширював сторінку й з'являлась горизонтальна прокрутка.
+    """
 
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
         self.setObjectName("ActionStrip")
-        self._layout = QHBoxLayout(self)
-        self._layout.setContentsMargins(8, 6, 10, 6)
-        self._layout.setSpacing(6)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 2, 0, 2)
+        outer.setSpacing(6)
+        buttons = QWidget()
+        buttons.setObjectName("TabPage")
+        self._layout = FlowLayout(buttons)
+        self._layout.setContentsMargins(0, 0, 0, 0)
+        self._layout.setHorizontalSpacing(8)
+        self._layout.setVerticalSpacing(8)
+        outer.addWidget(buttons)
+        self._outer = outer
         self.status = label("", "StripStatus")
         self.status.setTextFormat(Qt.TextFormat.RichText)
         self._finished = False
@@ -192,8 +292,7 @@ class ActionStrip(QFrame):
 
     def finish(self) -> "ActionStrip":
         if not self._finished:
-            self._layout.addStretch(1)
-            self._layout.addWidget(self.status)
+            self._outer.addWidget(self.status)
             self._finished = True
         return self
 
@@ -204,7 +303,7 @@ def hint_bar(note: str = "") -> QFrame:
     layout = QHBoxLayout(bar)
     layout.setContentsMargins(8, 3, 6, 3)
     layout.setSpacing(6)
-    layout.addWidget(label("⇪  Сюди можна перетягнути накази або папку (Drag & Drop)", "HintText"))
+    layout.addWidget(label("Сюди можна перетягнути накази або папку", "HintText"))
     layout.addStretch(1)
     if note:
         layout.addWidget(Badge(note, "amber"))
@@ -543,7 +642,7 @@ def render_analysis_row(_bridge: TreeBridge, item: QTreeWidgetItem, values: tupl
         _mute_item(item, len(values))
     elif values and str(values[0]).startswith("Управління ·"):
         for column in range(len(values)):
-            item.setBackground(column, QColor("#052e2b"))
+            item.setBackground(column, QColor(theme.C["emerald_bg"]))
             item.setForeground(column, QColor(theme.C["emerald_text"]))
             font = QFont(item.font(column))
             font.setBold(True)
@@ -565,6 +664,8 @@ class LogConsole(QPlainTextEdit):
         self.setMinimumHeight(96)
         self.setFont(_mono_font(8.5))
         model.attach(self)
+        # Кольори міток у HTML — з теми; після її зміни журнал малюється заново.
+        theme.on_change(lambda: self.show_entries(model.entries))
 
     def show_entries(self, entries: Iterable[LogEntry]) -> None:
         self.clear()
@@ -579,7 +680,7 @@ class LogConsole(QPlainTextEdit):
             r"(^|<br/>)( +)", lambda match: match.group(1) + "&nbsp;" * len(match.group(2)), message
         )
         self.appendHtml(
-            f'<span style="color:{theme.C["text_dim"]}">[{entry.stamp}]</span> '
+            f'<span style="color:{theme.C["text_faint"]}">[{entry.stamp}]</span> '
             f'<span style="color:{tag_color}; font-weight:600">[{tag}]</span> '
             f'<span style="color:{text_color}">{message}</span>'
         )
@@ -594,14 +695,16 @@ class StatusStrip(QFrame):
         super().__init__(parent)
         self.setObjectName("StatusStrip")
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(10, 3, 10, 3)
+        layout.setContentsMargins(14, 4, 14, 6)
         layout.setSpacing(8)
 
-        self.dot = label("", "StatusDot")
+        self.dot = QLabel("")
+        self.dot.setObjectName("StatusDot")
         self.dot.setFixedSize(7, 7)
-        self.state = label("Готово", "StatusState")
-        self.selected = label("")
-        self.template = label("")
+        self.state = QLabel("Готово")
+        self.state.setObjectName("StatusState")
+        self.selected = label("", "MutedLabel")
+        self.template = label("", "MutedLabel")
         self.template.setTextFormat(Qt.TextFormat.RichText)
         layout.addWidget(self.dot, 0, Qt.AlignmentFlag.AlignVCenter)
         layout.addWidget(self.state)
@@ -612,16 +715,18 @@ class StatusStrip(QFrame):
         layout.addStretch(1)
 
         self.caption = label("")
-        self.progress = QProgressBar()
+        self.progress = ProgressBar()
         self.progress.setObjectName("SlimProgress")
         self.progress.setRange(0, 1000)
-        self.progress.setTextVisible(False)
+        self.progress.setValue(0)
         self.progress.setFixedWidth(180)
-        self.progress.setFixedHeight(6)
         layout.addWidget(self.caption)
         layout.addWidget(self.progress, 0, Qt.AlignmentFlag.AlignVCenter)
+        self.info = label("", "MutedLabel")
+        self.info.setTextFormat(Qt.TextFormat.RichText)
+        layout.addWidget(self.info)
         layout.addWidget(divider())
-        layout.addWidget(label(f"PySide6 {PySide6.__version__} · Qt {qVersion()}  |  UTF-8", "StatusTech"))
+        layout.addWidget(label(f"PySide6 {PySide6.__version__} · Qt {qVersion()}", "StatusTech"))
 
     def set_busy(self, busy: bool) -> None:
         state = "busy" if busy else "ready"

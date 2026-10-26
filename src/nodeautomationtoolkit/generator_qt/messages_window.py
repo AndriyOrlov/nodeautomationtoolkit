@@ -14,12 +14,12 @@ import os
 import sys
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QCloseEvent, QDragEnterEvent, QDragMoveEvent, QDropEvent
-from PySide6.QtWidgets import QApplication, QDialog, QGridLayout, QHBoxLayout, QMainWindow, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QApplication, QDialog, QFrame, QGridLayout, QHBoxLayout, QScrollArea, QVBoxLayout, QWidget
 
 from . import compat, theme
-from .main_window import _package_version, install_qt_bridge
-from .widgets import ActionStrip, Badge, LogConsole, SectionCard, bind_label, button, label, line_edit
+from .fluent import FluentIcon, NavigationItemPosition, TitleLabel
+from .main_window import DropFluentWindow, _package_version, install_qt_bridge
+from .widgets import ActionStrip, LogConsole, SectionCard, bind_label, button, label, line_edit
 
 CONFIG_NAME = "messages_config.json"
 
@@ -31,37 +31,21 @@ def config_folder() -> str:
     return os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
 
 
-class MessagesWindow(QMainWindow):
+class MessagesWindow(DropFluentWindow):
+    """Вікно Fluent з однією сторінкою; перетягування й закриття — як у генераторі."""
+
     def __init__(self, shell):
-        super().__init__()
-        self._shell = shell
-        self.setAcceptDrops(True)
-
-    def dragEnterEvent(self, event: QDragEnterEvent) -> None:
-        if event.mimeData().hasUrls():
-            event.acceptProposedAction()
-        else:
-            event.ignore()
-
-    def dragMoveEvent(self, event: QDragMoveEvent) -> None:
-        if event.mimeData().hasUrls():
-            event.acceptProposedAction()
-
-    def dropEvent(self, event: QDropEvent) -> None:
-        paths = [url.toLocalFile() for url in event.mimeData().urls() if url.isLocalFile()]
-        if paths:
-            event.acceptProposedAction()
-            self._shell.accept_dropped_paths(paths)
-
-    def closeEvent(self, event: QCloseEvent) -> None:
-        self._shell.save_config()
-        super().closeEvent(event)
+        super().__init__(shell)
+        self.navigationInterface.setExpandWidth(210)
 
 
 class MessagesShellMixin:
     legacy = None  # модуль generate_extracts; задається в create_messages_app_class
     # Як у повному генераторі: нові частини дописуються в таблицю заготовками.
     ADD_NEW_UNITS_TO_TABLE = True
+
+    def on_window_close(self) -> None:
+        self.save_config()
 
     def __init__(self):
         self.main_window = MessagesWindow(self)
@@ -71,8 +55,8 @@ class MessagesShellMixin:
         super().__init__(compat.RootBridge(self.main_window))
         version = _package_version()
         self.main_window.setWindowTitle(f"Повідомлення за наказом{f' v{version}' if version else ''}")
-        self.main_window.resize(760, 520)
-        self.main_window.setMinimumSize(600, 420)
+        self.main_window.resize(900, 640)
+        self.main_window.setMinimumSize(720, 520)
         self._refresh_summary()
 
     def load_config(self):
@@ -84,21 +68,15 @@ class MessagesShellMixin:
         self.log_text = compat.TextBridge(self.log_model)
 
         central = QWidget()
-        central.setObjectName("AppRoot")
+        central.setObjectName("TabPage")
         root = QVBoxLayout(central)
-        root.setContentsMargins(12, 10, 12, 12)
-        root.setSpacing(8)
+        root.setContentsMargins(28, 8, 28, 16)
+        root.setSpacing(12)
 
-        header = QHBoxLayout()
-        header.addWidget(label("Повідомлення за наказом", "AppName"))
-        version = _package_version()
-        if version:
-            header.addWidget(Badge(f"v{version}", "teal"))
-        header.addStretch(1)
-        root.addLayout(header)
+        root.addWidget(TitleLabel("Повідомлення за наказом"))
 
         order = SectionCard("Наказ", accent="indigo")
-        order.add_action(button("⚙ Налаштування", "amber", self.open_settings))
+        order.add_action(button("⚙ Налаштування", "secondary", self.open_settings))
         row = QHBoxLayout()
         row.setSpacing(8)
         row.addWidget(line_edit(self.doc_path, "Оберіть наказ або перетягніть його у вікно"), 1)
@@ -108,20 +86,44 @@ class MessagesShellMixin:
         root.addWidget(order)
 
         strip = ActionStrip()
-        self.btn_generate_messages = button("✉ Створити 2 повідомлення", "run", self.run_generate_messages)
+        self.btn_generate_messages = button("✉ Створити повідомлення", "run", self.run_generate_messages)
         strip.add(self.btn_generate_messages)
         strip.add(button("📂 Відкрити папку результату", "secondary", self.open_message_output_folder))
         strip.finish()
         root.addWidget(strip)
 
         log_card = SectionCard("Журнал", accent="slate", variant="log")
-        log_card.add_action(button("Очистити", "rose", self.log_model.clear))
+        log_card.add_action(button("🗑 Очистити", "ghost", self.log_model.clear))
         log_card.body.addWidget(LogConsole(self.log_model))
         root.addWidget(log_card, 1)
 
-        self.main_window.setCentralWidget(central)
+        page = QScrollArea()
+        page.setObjectName("TabScroll")
+        page.setWidgetResizable(True)
+        page.setFrameShape(QFrame.Shape.NoFrame)
+        page.setWidget(central)
+        page.setObjectName("messagesPage")
+        self.main_window.addSubInterface(page, FluentIcon.MAIL, "Повідомлення")
+        nav = self.main_window.navigationInterface
+        bottom = NavigationItemPosition.BOTTOM
+        self._nav_items = {
+            "settings": nav.addItem(
+                "settings", FluentIcon.SETTING, "Налаштування",
+                onClick=self.open_settings, selectable=False, position=bottom,
+            ),
+            "theme": nav.addItem(
+                "theme", FluentIcon.CONSTRACT, "Світла / темна тема",
+                onClick=self.toggle_theme, selectable=False, position=bottom,
+            ),
+        }
         self.doc_path.subscribe(lambda *_args: self._refresh_summary())
-        self.log("Оберіть наказ і натисніть «Створити 2 повідомлення». Таблиця й зразки — у «⚙ Налаштування».")
+        self.log("Оберіть наказ і натисніть «Створити повідомлення». Таблиця й зразки — у «Налаштування».")
+
+    def toggle_theme(self) -> None:
+        mode = theme.LIGHT if theme.is_dark() else theme.DARK
+        self.ui_theme.set(mode)
+        theme.apply_theme(QApplication.instance(), mode)
+        self.save_config()
 
     def _refresh_summary(self) -> None:
         path = self.doc_path.get()
@@ -209,7 +211,9 @@ class MessagesShellMixin:
         self.save_config()
 
     def open_settings(self):
-        SettingsDialog(self, self.main_window).exec()
+        dialog = SettingsDialog(self, self.main_window)
+        theme.use_dark_title_bar(dialog)
+        dialog.exec()
 
     def _settings_missing(self) -> list[str]:
         return [
@@ -328,7 +332,7 @@ class SettingsDialog(QDialog):
         layout.addStretch(1)
 
         bottom = QHBoxLayout()
-        bottom.addWidget(button("ⓘ Теги", "sky", shell.show_message_tags))
+        bottom.addWidget(button("ⓘ Теги", "ghost", shell.show_message_tags))
         bottom.addStretch(1)
         bottom.addWidget(button("💾 Зберегти та закрити", "run", self.accept))
         layout.addLayout(bottom)
@@ -349,6 +353,6 @@ def launch(legacy, argv: list[str] | None = None) -> int:
     theme.apply_theme(qt_app)
     install_qt_bridge(legacy)
     shell = create_messages_app_class(legacy)()
+    theme.apply_theme(qt_app, shell.ui_theme.get())
     shell.main_window.show()
-    theme.use_dark_title_bar(shell.main_window)
     return qt_app.exec()

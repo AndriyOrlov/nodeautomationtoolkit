@@ -1,8 +1,11 @@
-"""Головне вікно Qt-оболонки генератора (PySide6, тема «Obsidian»).
+"""Головне вікно Qt-оболонки генератора (PySide6-Fluent-Widgets, світла й темна теми).
 
 Оболонка — це міксин поверх `generate_extracts.App`: `App.__init__`,
 конфіг, маршрутизація, робота з Word і пакети лишаються тими самими.
 Міксин підміняє лише те, що в Tk-версії малює інтерфейс.
+
+Каркас — `FluentWindow`: зліва навігація (Примірники, Витяги, Повідомлення;
+внизу — Інструкція, Зразки, Накази, тема), праворуч сторінка й рядок стану.
 """
 
 from __future__ import annotations
@@ -11,15 +14,13 @@ import os
 import sys
 from typing import Callable
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QObject, Qt, Signal
 from PySide6.QtGui import QCloseEvent, QDragEnterEvent, QDragMoveEvent, QDropEvent, QGuiApplication
 from PySide6.QtWidgets import (
     QApplication,
     QFrame,
     QHBoxLayout,
-    QMainWindow,
     QScrollArea,
-    QTabBar,
     QTabWidget,
     QVBoxLayout,
     QWidget,
@@ -27,6 +28,7 @@ from PySide6.QtWidgets import (
 
 from . import compat, theme
 from .compare_window import CompareWindow
+from .fluent import FluentIcon, FluentWindow, NavigationItemPosition, TitleLabel
 from .instruction_dialog import InstructionDialog
 from .orders_window import OrdersWindowMixin
 from .samples_dialog import SamplesDialog
@@ -59,18 +61,26 @@ from .widgets import (
 RESULT_TABS = (
     (
         "calculation",
-        "📊 Розсилка",
+        "Розсилка",
         ["Військова частина / Відправник", "Пункти витягу", "Кількість"],
         "— Очікується розрахунок розсилки —",
     ),
-    ("unmatched", "⚠ Пропущені", ["Пункт", "Текст пункту", "Причина"], "— Пропущені пункти відсутні —"),
+    ("unmatched", "Пропущені", ["Пункт", "Текст пункту", "Причина"], "— Пропущені пункти відсутні —"),
     (
         "routing",
-        "🔍 Контроль маршрутизації",
+        "Контроль маршрутизації",
         ["Пункт", "Збіги з таблиці", "Застосовані правила", "Підсумкові адресати"],
         "— Очікується аналіз маршрутизації —",
     ),
-    ("layout", "📐 Макет витягів", ["Стан макета"], "— Очікується формування витягів —"),
+    ("layout", "Макет витягів", ["Стан макета"], "— Очікується формування витягів —"),
+)
+
+#: Сторінки навігації в порядку, на який спирається логіка (`handle_drag_and_drop`):
+#: 0 — примірники, 1 — витяги, 2 — повідомлення.
+PAGES = (
+    ("copiesPage", FluentIcon.COPY, "Примірники 2/3", "Примірники наказів № 2 і № 3"),
+    ("extractsPage", FluentIcon.DOCUMENT, "Розрахунок і витяги", "Розрахунок розсилки та витяги"),
+    ("messagesPage", FluentIcon.MAIL, "Повідомлення", "Шифровані повідомлення за наказом"),
 )
 
 
@@ -102,13 +112,34 @@ def _short_folder(path: str) -> str:
     return os.sep.join(parts[-2:]) if len(parts) > 2 else os.path.normpath(path)
 
 
-class GeneratorWindow(QMainWindow):
-    """Вікно, що приймає перетягнуті файли й зберігає конфіг під час закриття."""
+class DropFluentWindow(FluentWindow):
+    """Вікно Fluent, що приймає перетягнуті файли й зберігає конфіг під час закриття.
+
+    Під сторінками — рядок стану (у FluentWindow його немає, тож вставляємо
+    в його ж розкладку), анімацію перемикання сторінок вимкнено: логіка
+    читає поточну сторінку одразу після перемикання.
+    """
 
     def __init__(self, shell):
         super().__init__()
         self._shell = shell
         self.setAcceptDrops(True)
+        # Без Mica: вікно малює власний фон теми однаково на Windows 10 і 11
+        # (з Mica в темній темі рамка й навігація лишались світлими там, де ефекту немає).
+        self.setMicaEffectEnabled(False)
+        self.stackedWidget.setAnimationEnabled(False)
+        self.navigationInterface.setExpandWidth(230)
+        # Стрілка «назад» потрібна лише для вкладених розділів — у нас їх немає.
+        self.navigationInterface.setReturnButtonVisible(False)
+
+    def attach_status_bar(self, widget: QWidget) -> None:
+        self.widgetLayout.removeWidget(self.stackedWidget)
+        column = QVBoxLayout()
+        column.setContentsMargins(0, 0, 0, 0)
+        column.setSpacing(0)
+        column.addWidget(self.stackedWidget, 1)
+        column.addWidget(widget)
+        self.widgetLayout.addLayout(column)
 
     def dragEnterEvent(self, event: QDragEnterEvent) -> None:
         if event.mimeData().hasUrls():
@@ -131,8 +162,55 @@ class GeneratorWindow(QMainWindow):
         super().closeEvent(event)
 
 
+#: Стара назва — для коду, що імпортує її напряму.
+GeneratorWindow = DropFluentWindow
+
+
+class PageSwitcher(QObject):
+    """Підмножина API QTabWidget поверх навігації Fluent.
+
+    `NotebookBridge` (логіка: `notebook.select()/index()`) і `_refresh_badges`
+    працюють із вкладками; тут ті самі виклики перемикають сторінки вікна.
+    """
+
+    currentChanged = Signal(int)
+
+    def __init__(self, window: DropFluentWindow, pages: list[QWidget]):
+        super().__init__(window)
+        self._window = window
+        self._pages = pages
+        window.stackedWidget.currentChanged.connect(self.currentChanged)
+
+    def count(self) -> int:
+        return len(self._pages)
+
+    def widget(self, index: int) -> QWidget | None:
+        return self._pages[index] if 0 <= index < len(self._pages) else None
+
+    def indexOf(self, widget) -> int:  # noqa: N802 - API Qt
+        return self._pages.index(widget) if widget in self._pages else -1
+
+    def currentWidget(self) -> QWidget:  # noqa: N802
+        return self._window.stackedWidget.currentWidget()
+
+    def currentIndex(self) -> int:  # noqa: N802
+        return self.indexOf(self.currentWidget())
+
+    def setCurrentWidget(self, widget: QWidget) -> None:  # noqa: N802
+        if widget in self._pages:
+            self._window.switchTo(widget)
+
+    def setCurrentIndex(self, index: int) -> None:  # noqa: N802
+        page = self.widget(index)
+        if page is not None:
+            self._window.switchTo(page)
+
+    def tabText(self, index: int) -> str:  # noqa: N802
+        return PAGES[index][2] if 0 <= index < len(PAGES) else ""
+
+
 class QtShellMixin(OrdersWindowMixin):
-    """Qt-інтерфейс для `generate_extracts.App`. Порядок вкладок незмінний
+    """Qt-інтерфейс для `generate_extracts.App`. Порядок сторінок незмінний
     (0 — примірники, 1 — витяги, 2 — повідомлення): на нього
     спирається `handle_drag_and_drop`."""
 
@@ -141,19 +219,19 @@ class QtShellMixin(OrdersWindowMixin):
     ADD_NEW_UNITS_TO_TABLE = True
 
     def __init__(self):
-        self.main_window = GeneratorWindow(self)
+        self.main_window = DropFluentWindow(self)
         compat.set_dialog_parent(self.main_window)
         self.log_model = compat.LogModel()
         self.p2_log_model = compat.LogModel()
         self._busy_depth = 0
-        self._lockable_buttons: list[compat.TkButton] = []
+        self._lockable_buttons: list[compat.TkButtonMixin] = []
         self._samples_dialog: SamplesDialog | None = None
         self._instruction_dialog: InstructionDialog | None = None
         self._compare_windows: list[CompareWindow] = []
         self._ui_ready = False
         super().__init__(compat.RootBridge(self.main_window))
-        self.main_window.resize(1360, 940)
-        self.main_window.setMinimumSize(1080, 720)
+        self.main_window.resize(1400, 940)
+        self.main_window.setMinimumSize(1100, 720)
         self._ui_ready = True
         self._refresh_badges()
 
@@ -163,47 +241,27 @@ class QtShellMixin(OrdersWindowMixin):
     def create_widgets(self):
         self.log_text = compat.TextBridge(self.log_model)
         self.p2_log_text = compat.TextBridge(self.p2_log_model)
+        self._tab_badges: dict[int, Badge] = {}
 
-        central = QWidget()
-        central.setObjectName("AppRoot")
-        root = QVBoxLayout(central)
-        root.setContentsMargins(0, 0, 0, 0)
-        root.setSpacing(0)
-        root.addWidget(self._build_header())
-
-        self._tabs = QTabWidget()
-        self._tabs.setObjectName("MainTabs")
-        self._tabs.setDocumentMode(True)
-        self.notebook = compat.NotebookBridge(self._tabs)
-
-        self.tab_copies_page = self._scroll_page(self._build_copies_tab())
-        self.tab_extracts_page = self._scroll_page(self._build_extracts_tab())
-        self.tab_messages_page = self._scroll_page(self._build_messages_tab())
+        builders = (self._build_copies_tab, self._build_extracts_tab, self._build_messages_tab)
+        pages = []
+        for index, ((name, icon, nav_text, title), build) in enumerate(zip(PAGES, builders)):
+            page = self._scroll_page(self._page_with_header(index, title, build()))
+            page.setObjectName(name)
+            self.main_window.addSubInterface(page, icon, nav_text)
+            pages.append(page)
+        self.tab_copies_page, self.tab_extracts_page, self.tab_messages_page = pages
         self.tab_copies = self.tab_copies_page
         self.tab_extracts = self.tab_extracts_page
         self.tab_messages = self.tab_messages_page
 
-        self._tabs.addTab(self.tab_copies_page, "📑  1. Примірники 2/3")
-        self._tabs.addTab(self.tab_extracts_page, "📊  2. Розрахунок та витяги")
-        self._tabs.addTab(self.tab_messages_page, "💬  3. Повідомлення")
-        self._tab_badges: dict[int, Badge] = {}
-        for index in range(self._tabs.count()):
-            badge = Badge("", "emerald")
-            badge.hide()
-            self._tabs.tabBar().setTabButton(index, QTabBar.ButtonPosition.RightSide, badge)
-            self._tab_badges[index] = badge
-        self._ribbon_info = label("", "RibbonInfo")
-        self._ribbon_info.setTextFormat(Qt.TextFormat.RichText)
-        self._ribbon_info.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        self._ribbon_info.setMinimumHeight(self._tabs.tabBar().sizeHint().height())
-        self._tabs.setCornerWidget(self._ribbon_info, Qt.Corner.TopRightCorner)
-        # Світла лінія-основа під вкладками в темній темі виглядала як шов.
-        self._tabs.tabBar().setDrawBase(False)
-        root.addWidget(self._tabs, 1)
+        self._tabs = PageSwitcher(self.main_window, pages)
+        self.notebook = compat.NotebookBridge(self._tabs)
+        self._build_navigation_footer()
 
         self.status_strip = StatusStrip()
-        root.addWidget(self.status_strip)
-        self.main_window.setCentralWidget(central)
+        self.main_window.attach_status_bar(self.status_strip)
+        self._ribbon_info = self.status_strip.info
 
         refresh = lambda *_args: self._refresh_badges()  # noqa: E731
         for variable in (
@@ -219,12 +277,37 @@ class QtShellMixin(OrdersWindowMixin):
         self._tabs.currentChanged.connect(refresh)
         self.progress_text.subscribe(lambda value: self.status_strip.set_progress(caption=value))
         self.progress_value.subscribe(lambda value: self.status_strip.set_progress(percent=value))
+        theme.on_change(self._on_theme_changed)
 
         self._refresh_orders_view()
         self._refresh_p2_orders_view()
         self.log("Готовий до роботи. Оберіть наказ (або кілька) і натисніть потрібну дію.")
 
-    def _lock(self, widget: compat.TkButton) -> compat.TkButton:
+    def _build_navigation_footer(self) -> None:
+        """Нижня частина навігації: довідка, зразки, генератор наказів, тема."""
+        nav = self.main_window.navigationInterface
+        bottom = NavigationItemPosition.BOTTOM
+        self._nav_items = {
+            "instruction": nav.addItem(
+                "instruction", FluentIcon.HELP, "Інструкція",
+                onClick=self.open_instruction_window, selectable=False, position=bottom,
+            ),
+            "samples": nav.addItem(
+                "samples", FluentIcon.SETTING, "Зразки та шаблони",
+                onClick=self.open_samples_window, selectable=False, position=bottom,
+            ),
+            "orders": nav.addItem(
+                "orders", FluentIcon.EDIT, "Накази (у роботі)",
+                onClick=self.open_orders_window, selectable=False, position=bottom,
+                tooltip="Генератор наказів (у роботі)",
+            ),
+            "theme": nav.addItem(
+                "theme", FluentIcon.CONSTRACT, "Світла / темна тема",
+                onClick=self.toggle_theme, selectable=False, position=bottom,
+            ),
+        }
+
+    def _lock(self, widget: compat.TkButtonMixin) -> compat.TkButtonMixin:
         self._lockable_buttons.append(widget)
         return widget
 
@@ -242,31 +325,28 @@ class QtShellMixin(OrdersWindowMixin):
         page = QWidget()
         page.setObjectName("TabPage")
         layout = QVBoxLayout(page)
-        layout.setContentsMargins(10, 10, 10, 10)
-        layout.setSpacing(8)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(12)
         return page, layout
 
-    def _build_header(self) -> QFrame:
-        bar = QFrame()
-        bar.setObjectName("TitleBar")
-        layout = QHBoxLayout(bar)
-        layout.setContentsMargins(12, 6, 12, 6)
-        layout.setSpacing(8)
-        logo = label("⚡", "AppLogo")
-        logo.setFixedSize(20, 20)
-        logo.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        layout.addWidget(logo)
-        layout.addWidget(label("Node Automation Toolkit", "AppName"))
-        layout.addWidget(label("|", "Divider"))
-        layout.addWidget(label("Генератор витягів, примірників і повідомлень за наказами", "AppSubtitle"))
-        version = _package_version()
-        if version:
-            layout.addWidget(Badge(f"v{version}", "teal"))
-        layout.addStretch(1)
-        layout.addWidget(button("📖  Інструкція", "sky", self.open_instruction_window))
-        layout.addWidget(self._lock(button("⚙  Зразки та шаблони", "amber", self.open_samples_window)))
-        layout.addWidget(button("🔒  Накази", "ghost", self.open_orders_window, "Генератор наказів (у роботі)"))
-        return bar
+    def _page_with_header(self, index: int, title: str, body: QWidget) -> QWidget:
+        """Заголовок сторінки з лічильником черги над її вмістом."""
+        page = QWidget()
+        page.setObjectName("TabPage")
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(28, 8, 28, 16)
+        layout.setSpacing(12)
+        header = QHBoxLayout()
+        header.setSpacing(10)
+        header.addWidget(TitleLabel(title))
+        badge = Badge("", "teal")
+        badge.hide()
+        self._tab_badges[index] = badge
+        header.addWidget(badge, 0, Qt.AlignmentFlag.AlignVCenter)
+        header.addStretch(1)
+        layout.addLayout(header)
+        layout.addWidget(body, 1)
+        return page
 
     def _orders_table(
         self,
@@ -292,16 +372,16 @@ class QtShellMixin(OrdersWindowMixin):
     def _log_card(self, title: str, model: compat.LogModel, text_bridge_name: str, clear: Callable[[], None]):
         card = SectionCard(title, accent="slate", variant="log")
         card.add_action(
-            button("Скопіювати журнал", "ghost", lambda: self.copy_log(getattr(self, text_bridge_name)))
+            button("📋 Скопіювати", "ghost", lambda: self.copy_log(getattr(self, text_bridge_name)))
         )
         card.add_action(
-            button("Знеособлено", "amber", lambda: self.copy_log(getattr(self, text_bridge_name), redacted=True))
+            button("Знеособлено", "ghost", lambda: self.copy_log(getattr(self, text_bridge_name), redacted=True))
         )
-        card.add_action(button("Очистити", "rose", clear))
+        card.add_action(button("🗑 Очистити", "ghost", clear))
         card.body.addWidget(LogConsole(model))
         return card
 
-    # ── Вкладка 1: примірники ────────────────────────────────────────────
+    # ── Сторінка 1: примірники ───────────────────────────────────────────
     def _build_copies_tab(self) -> QWidget:
         page, layout = self._page()
 
@@ -351,9 +431,7 @@ class QtShellMixin(OrdersWindowMixin):
         self._p2_queue_badge = orders.add_badge(Badge("", "emerald"))
         orders.add_action(self._lock(button("＋ Обрати накази", "primary", self.select_p2_file)))
         orders.add_action(self._lock(button("📁 Обрати папку", "secondary", self.select_p2_folder)))
-        orders.add_action(self._lock(button("🗑 Очистити", "rose", self.clear_p2_orders)))
-        orders.add_divider()
-        orders.add_action(self._lock(button("⚙ Зразки", "amber", self.open_samples_window)))
+        orders.add_action(self._lock(button("🗑 Очистити", "ghost", self.clear_p2_orders)))
         table, self.p2_orders_tree = self._orders_table(lambda: self._refresh_p2_source_summary())
         orders.body.addWidget(table)
         orders.body.addWidget(hint_bar("Формується: Примірник № 2 · правила для № 3 ще не погоджені"))
@@ -364,7 +442,7 @@ class QtShellMixin(OrdersWindowMixin):
             row.addWidget(check_box("Режим превʼю (повільно, з видимим Word)", self.p2_preview))
             row.addWidget(label("пауза, сек:", "FieldLabel"))
             delay = line_edit(self.p2_preview_delay)
-            delay.setFixedWidth(56)
+            delay.setFixedWidth(64)
             row.addWidget(delay)
             row.addSpacing(12)
             row.addWidget(button("⇊ Засвідчувач як у витягах", "secondary", self.copy_certifier_from_extracts))
@@ -394,8 +472,8 @@ class QtShellMixin(OrdersWindowMixin):
             button("⚡ Сформувати примірники (заміна останнього аркуша)", "run", self.run_generate_copies)
         )
         strip.add(self.btn_run_p2)
-        strip.add(button("ⓘ Правила примірника 2", "sky", self.show_p2_info))
-        strip.add(button("🔍 Порівняти з еталоном", "amber", self.open_compare_copies))
+        strip.add(button("ⓘ Правила примірника 2", "secondary", self.show_p2_info))
+        strip.add(button("🔍 Порівняти з еталоном", "secondary", self.open_compare_copies))
         self._strip_status = {0: strip.finish().status}
         layout.addWidget(strip)
 
@@ -421,21 +499,20 @@ class QtShellMixin(OrdersWindowMixin):
         results.body.addWidget(table, 1)
         footer = QHBoxLayout()
         footer.addWidget(
-            self._lock(button("→ Передати вибрані у витяги", "teal", self.transfer_selected_copy_to_extracts))
+            self._lock(button("→ Передати вибрані у витяги", "secondary", self.transfer_selected_copy_to_extracts))
         )
         footer.addStretch(1)
-        footer.addWidget(button("☑ Вибрати всі", "secondary", self.select_all_copies))
-        footer.addWidget(button("◻ Зняти вибір", "secondary", self.deselect_all_copies))
-        footer.addWidget(label("|", "Divider"))
+        footer.addWidget(button("☑ Вибрати всі", "ghost", self.select_all_copies))
+        footer.addWidget(button("◻ Зняти вибір", "ghost", self.deselect_all_copies))
         footer.addWidget(button("📂 Папка результату", "secondary", self.open_p2_output_folder))
-        footer.addWidget(button("W  Відкрити у Word", "blue", self.open_selected_copy_in_word))
+        footer.addWidget(button("W  Відкрити у Word", "secondary", self.open_selected_copy_in_word))
         results.body.addLayout(footer)
         layout.addWidget(results, 1)
 
         layout.addWidget(self._log_card("Журнал примірників", self.p2_log_model, "p2_log_text", self.p2_log_model.clear))
         return page
 
-    # ── Вкладка 2: розрахунок і витяги ───────────────────────────────────
+    # ── Сторінка 2: розрахунок і витяги ──────────────────────────────────
     def _build_extracts_tab(self) -> QWidget:
         page, layout = self._page()
 
@@ -443,9 +520,7 @@ class QtShellMixin(OrdersWindowMixin):
         self._orders_queue_badge = orders.add_badge(Badge("", "emerald"))
         orders.add_action(self._lock(button("＋ Обрати накази", "primary", self.select_orders)))
         orders.add_action(self._lock(button("📁 Обрати папку", "secondary", self.select_orders_folder)))
-        orders.add_action(self._lock(button("🗑 Очистити", "rose", self.clear_orders)))
-        orders.add_divider()
-        orders.add_action(self._lock(button("⚙ Зразки", "amber", self.open_samples_window)))
+        orders.add_action(self._lock(button("🗑 Очистити", "ghost", self.clear_orders)))
         table, self.orders_tree = self._orders_table(
             lambda: self._refresh_source_summary(), selectable=True
         )
@@ -471,7 +546,7 @@ class QtShellMixin(OrdersWindowMixin):
             lambda: self._activate_order_from_tree(self.copy_two_tree, alongside=True)
         )
         self.copy_two_tree.insert(
-            "", compat.END, values=("—", "Спершу сформуйте примірники № 2 у вкладці «Примірники 2/3».")
+            "", compat.END, values=("—", "Спершу сформуйте примірники № 2 на сторінці «Примірники 2/3».")
         )
         copies.body.addWidget(table)
         layout.addWidget(copies)
@@ -507,36 +582,37 @@ class QtShellMixin(OrdersWindowMixin):
         )
 
         strip = ActionStrip()
-        self.btn_calc = self._lock(button("📊 1. Розрахувати розсилку", "primary", self.run_rozrahunok_action))
+        self.btn_calc = self._lock(button("📊 1. Розрахувати розсилку", "secondary", self.run_rozrahunok_action))
         self.btn_extracts = self._lock(button("⚡ 2. Створити всі витяги", "run", self.run_extracts_action))
         self.btn_management_extracts = self._lock(
-            button("🏛 3. Витяги до управління", "amber", self.run_management_extracts_action)
+            button("🏛 3. Витяги до управління", "secondary", self.run_management_extracts_action)
         )
         self.btn_management_extracts.setToolTip(
             "Створити окремий файл витягів до управління без адресатів і компонування 2 на 1"
         )
-        self.btn_full_cycle = self._lock(button("⚙ 4. Повний цикл", "violet", self.run_full_cycle))
+        self.btn_full_cycle = self._lock(button("⇄ 4. Повний цикл", "secondary", self.run_full_cycle))
         self.btn_full_cycle.setToolTip(
             "Примірники № 2 → розрахунок розсилки → адресні витяги + витяги до управління"
         )
         for widget in (self.btn_calc, self.btn_extracts, self.btn_management_extracts, self.btn_full_cycle):
             strip.add(widget)
-        strip.add(button("📂 Папка результату", "secondary", self.open_extracts_output_folder))
-        strip.add(button("ⓘ Теги шаблону", "sky", self.show_template_tags))
-        strip.add(button("🔍 Порівняти з еталоном", "amber", self.open_compare_extracts))
-        self.btn_order_review = self._lock(button("🎓 Перевірити наказ", "sky", self.run_order_review_action))
+        self.btn_order_review = self._lock(button("🎓 Перевірити наказ", "secondary", self.run_order_review_action))
         self.btn_order_review.setToolTip(
             "Перевірити обрані накази без еталона: нумерація, адресати, РНОКПП, підписант, "
             "історія осіб і написання посад за попередніми наказами. Звіт і позначена копія — "
             "у теці «Перевірка» поруч із наказом; оригінал не змінюється."
         )
         strip.add(self.btn_order_review)
+        strip.add(button("📂 Папка результату", "ghost", self.open_extracts_output_folder))
+        strip.add(button("ⓘ Теги шаблону", "ghost", self.show_template_tags))
+        strip.add(button("🔍 Порівняти з еталоном", "ghost", self.open_compare_extracts))
         self._strip_status[1] = strip.finish().status
         layout.addWidget(strip)
 
         results = SectionCard("Результати аналізу", accent="teal", variant="results")
         self._results_tabs = QTabWidget()
         self._results_tabs.setObjectName("ResultTabs")
+        self._results_tabs.setDocumentMode(True)
         self.results_notebook = compat.NotebookBridge(self._results_tabs)
         self.result_views = {}
         self.result_tabs = {}
@@ -554,21 +630,19 @@ class QtShellMixin(OrdersWindowMixin):
         layout.addWidget(self._log_card("Журнал виконання", self.log_model, "log_text", self.clear_log))
         return page
 
-    # ── Вкладка 3: повідомлення ──────────────────────────────────────────
+    # ── Сторінка 3: повідомлення ─────────────────────────────────────────
     def _build_messages_tab(self) -> QWidget:
         page, layout = self._page()
 
         source = SectionCard("Наказ для повідомлень", accent="indigo")
         source.add_action(self._lock(button("＋ Обрати один наказ", "primary", self.select_message_order)))
-        source.add_divider()
-        source.add_action(self._lock(button("⚙ Зразки", "amber", self.open_samples_window)))
         source.body.addWidget(
             label("Повідомлення формуються по одному наказу за запуск.", "MutedLabel")
         )
         source.body.addWidget(bind_label(label("", "SummaryLabel"), self.message_source_summary))
         source.body.addWidget(
             OrderDropZone(
-                "⇪  Перетягніть наказ сюди — одразу створяться обидва шифровані повідомлення",
+                "Перетягніть наказ сюди — одразу створяться повідомлення",
                 self.generate_messages_for_dropped_order,
             )
         )
@@ -607,12 +681,12 @@ class QtShellMixin(OrdersWindowMixin):
 
         strip = ActionStrip()
         self.btn_generate_messages = self._lock(
-            button("✉ Створити 2 повідомлення", "run", self.run_generate_messages)
+            button("✉ Створити повідомлення", "run", self.run_generate_messages)
         )
         strip.add(self.btn_generate_messages)
-        strip.add(button("📂 Папка результату", "secondary", self.open_message_output_folder))
-        strip.add(button("🔍 Порівняти з еталоном", "amber", self.open_compare_messages))
-        strip.add(button("ⓘ Теги повідомлень", "sky", self.show_message_tags))
+        strip.add(button("📂 Папка результату", "ghost", self.open_message_output_folder))
+        strip.add(button("🔍 Порівняти з еталоном", "ghost", self.open_compare_messages))
+        strip.add(button("ⓘ Теги повідомлень", "ghost", self.show_message_tags))
         self._strip_status[2] = strip.finish().status
         layout.addWidget(strip)
 
@@ -620,6 +694,20 @@ class QtShellMixin(OrdersWindowMixin):
         # відображення тієї самої моделі.
         layout.addWidget(self._log_card("Журнал повідомлень", self.log_model, "log_text", self.clear_log), 1)
         return page
+
+    # ═════════════════════════════════════════════════════════════════════
+    # Тема
+    # ═════════════════════════════════════════════════════════════════════
+    def toggle_theme(self) -> None:
+        mode = theme.LIGHT if theme.is_dark() else theme.DARK
+        if hasattr(self, "ui_theme"):
+            self.ui_theme.set(mode)
+        theme.apply_theme(QApplication.instance(), mode)
+        self.save_config()
+
+    def _on_theme_changed(self) -> None:
+        compat.TreeBridge.rerender_all()
+        self._refresh_badges()
 
     # ═════════════════════════════════════════════════════════════════════
     # Бейджі, підсумки, рядок стану
@@ -673,10 +761,10 @@ class QtShellMixin(OrdersWindowMixin):
         self.status_strip.selected.setText(f"Вибрано: {marked}/{total}")
         template_name = os.path.basename(template) if template else "не обрано"
         self.status_strip.template.setText(
-            f'Зразок: <b style="color:{c["text_soft"]}; font-family:{theme.MONO}">{template_name}</b>'
+            f'Зразок: <b style="color:{c["text_soft"]}">{template_name}</b>'
         )
         self._ribbon_info.setText(
-            f'Вхідна тека: <span style="color:{c["text_soft"]}">{_short_folder(folder) if folder else "—"}</span>'
+            f'Тека: <span style="color:{c["text_soft"]}">{_short_folder(folder) if folder else "—"}</span>'
             f'  <span style="color:{c["text_dim"]}">•</span>  '
             f'Друк: <b style="color:{c["teal_text"]}">{mode}</b>'
         )
@@ -685,14 +773,15 @@ class QtShellMixin(OrdersWindowMixin):
     def _strip_text(count: int, busy: bool) -> str:
         c = theme.C
         if busy:
-            state = f'<span style="color:{c["amber_text"]}">Статус: виконується…</span>'
+            state = f'<span style="color:{c["amber_text"]}">виконується…</span>'
         elif count:
-            state = f'<span style="color:{c["teal_soft"]}">Статус: готово до пуску</span>'
+            state = f'<span style="color:{c["teal_text"]}">готово до пуску</span>'
         else:
-            state = f'<span style="color:{c["text_faint"]}">Статус: оберіть накази</span>'
+            state = f'<span style="color:{c["text_faint"]}">оберіть накази</span>'
         return (
-            f'Пакет: <b style="color:{c["text"]}">{plural_files(count)}</b> '
-            f'<span style="color:{c["text_dim"]}">|</span> {state}'
+            f'<span style="color:{c["text_muted"]}">Пакет:</span> '
+            f'<b style="color:{c["text"]}">{plural_files(count)}</b> '
+            f'<span style="color:{c["text_dim"]}">·</span> {state}'
         )
 
     # ═════════════════════════════════════════════════════════════════════
@@ -745,7 +834,7 @@ class QtShellMixin(OrdersWindowMixin):
         return self._guarded(super().run_order_review_action)
 
     def generate_messages_for_dropped_order(self, path: str) -> None:
-        """Наказ, перетягнутий у рамку вкладки повідомлень: обрати й одразу створити."""
+        """Наказ, перетягнутий у рамку сторінки повідомлень: обрати й одразу створити."""
         if self._busy_depth:
             self.log("Перетягування проігноровано: зачекайте завершення поточного пакета.")
             return
@@ -794,11 +883,17 @@ class QtShellMixin(OrdersWindowMixin):
         compat.sleep_responsive(seconds)
 
     def open_samples_window(self):
+        # Раніше кнопка «Зразки» блокувалась на час пакета; пункт навігації — ні,
+        # тож перевіряємо тут: зразки не міняють посеред генерації.
+        if self._busy_depth:
+            self.log("Зразки можна змінити після завершення поточного пакета.")
+            return
         if self._samples_dialog is None:
             dialog = SamplesDialog(self, self.main_window)
             dialog.finished.connect(lambda *_args: setattr(self, "_samples_dialog", None))
             self._samples_dialog = dialog
         self._samples_dialog.show()
+        theme.use_dark_title_bar(self._samples_dialog)
         self._samples_dialog.raise_()
         self._samples_dialog.activateWindow()
 
@@ -808,6 +903,7 @@ class QtShellMixin(OrdersWindowMixin):
             dialog.finished.connect(lambda *_args: setattr(self, "_instruction_dialog", None))
             self._instruction_dialog = dialog
         self._instruction_dialog.show()
+        theme.use_dark_title_bar(self._instruction_dialog)
         self._instruction_dialog.raise_()
         self._instruction_dialog.activateWindow()
 
@@ -836,6 +932,7 @@ class QtShellMixin(OrdersWindowMixin):
             lambda *_args, gone=window: self._compare_windows.remove(gone) if gone in self._compare_windows else None
         )
         window.show()
+        theme.use_dark_title_bar(window)
         return window
 
     def open_compare_extracts(self):
@@ -869,6 +966,7 @@ def launch(legacy, argv: list[str] | None = None) -> int:
     theme.apply_theme(qt_app)
     install_qt_bridge(legacy)
     shell = create_qt_app_class(legacy)()
+    # Тема з конфігу (`ui_theme`) відома лише після `load_config` у `App.__init__`.
+    theme.apply_theme(qt_app, getattr(shell, "ui_theme", None) and shell.ui_theme.get())
     shell.main_window.show()
-    theme.use_dark_title_bar(shell.main_window)
     return qt_app.exec()

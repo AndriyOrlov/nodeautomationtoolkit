@@ -2636,3 +2636,56 @@ python scripts/e2e_messages/check_message_output.py <тека>/Messages_Output
 
 — **Claude**
 
+---
+
+## 2026-10-26 — оболонка на PySide6-Fluent-Widgets, світла й темна теми
+
+Вимога: «PySide6-Fluent-Widgets топ, перероблюй на нього, дві теми світла/темна, і перезбери
+генератор повідомлень». Бекап: git-мітка `before-fluent-2026-10-26`.
+
+**Бібліотека:** `PySide6-Fluent-Widgets==1.11.3` (GPLv3; +`PySideSix-Frameless-Window`,
+`darkdetect`). PySide6 лишився 6.11.1 у `.venv`; у портативний `python\` поставлено з
+`--no-deps` (там PySide6 6.10.2 — береться з `%APPDATA%\Python\Python314\site-packages`, тобто
+портативний Python НЕ самодостатній — так було й до цього). Імпорт — лише через
+`generator_qt/fluent.py`: він глушить рекламний рядок, який бібліотека друкує в stdout.
+
+**Що змінено (логіка генератора не чіпалась):**
+- `main_window.py`: `DropFluentWindow(FluentWindow)` — навігація ліворуч (3 сторінки в старому
+  порядку 0/1/2), унизу — Інструкція, Зразки та шаблони, Накази (у роботі), Світла/темна тема
+  (`shell._nav_items`). `PageSwitcher` — підмножина API QTabWidget для `NotebookBridge` і
+  `_refresh_badges`. Анімацію сторінок вимкнено (логіка читає поточну сторінку одразу), Mica
+  вимкнено (у темній темі рамка лишалась світлою там, де Mica немає), кнопку «назад» сховано.
+  Рядок стану вставлено під сторінками (`attach_status_bar`); `_ribbon_info` — у ньому.
+  Зразки на час пакета: пункт навігації не блокується, тож `open_samples_window` сам відмовляє.
+- `compat.py`: `TkButtonMixin` (логіка `config(state)` + блокування пакета) + класи
+  `TkButton/TkPrimaryButton/TkToggleButton/TkTransparentButton/TkToolButton` — кожен успадковує
+  домішку й РІВНО ОДНУ кнопку Fluent. **Не успадковувати від двох Python-підкласів Qt**
+  (наш клас + PrimaryPushButton): PySide на такій кнопці падав access violation при малюванні.
+  Конструктор Fluent `(text, parent)` сам викликає `self.__init__(parent=…)` → у домішці лише
+  `super().__init__(parent)` + `setText`. Пошук кнопок — `compat.tk_buttons(widget)`.
+  `MessageBoxBridge` — діалоги Fluent над ВИДИМИМ вікном, інакше QMessageBox.
+  `TreeBridge.rerender_all()` — перемалювати рядки таблиць після зміни теми.
+- `widgets.py`: `button()` — емодзі-префікс → `FluentIcon` (таблиця `_BUTTON_ICONS`), «run» →
+  акцентна кнопка (одна на сторінку), «segment» → перемикач, «ghost» → без рамки, лише значок →
+  `ToolButton`. `label()` → підписи Fluent за старими назвами. Картки — `SimpleCardWidget`,
+  поля — `LineEdit`, галочки — `CheckBox`, прогрес — `ProgressBar`. `ActionStrip` переносить
+  кнопки (FlowLayout) — довгий ряд розширював сторінку й давав горизонтальну прокрутку.
+- `theme.py`: дві палітри (`PALETTES[LIGHT/DARK]`), `C`/`PILL_TONES`/`LOG_TONES`/`DIFF_TONES`/
+  `WORD_TONES` оновлюються НА МІСЦІ; `apply_theme(app, mode)` + `on_change(callback)`.
+  `app.setStyle("Fusion")` — лише поки немає жодного віджета: заміна стилю видаляє старий об'єкт,
+  а кнопки Fluent тримають на нього вказівник (`setStyle(QApplication.style())`) → падіння.
+  QSS — лише наші об'єкти (не загальний `QDialog`: діалоги Fluent теж QDialog і напівпрозорі).
+- Тема зберігається в конфігу: `App.ui_theme` (`app_core`, ключ `ui_theme`), обидві програми.
+- `messages_window.py`: те саме вікно Fluent з однією сторінкою; «Налаштування» й тема — у навігації;
+  кнопка «Створити повідомлення» (файлів може бути 3).
+- Інструкція оновлена (навігація, тема, розрахунок розсилки); емодзі з назв вкладок «Зразків»
+  прибрано (шрифт вкладок їх не малює).
+- Збирання: `--collect-all qfluentwidgets --collect-submodules qframelesswindow`.
+
+**Перевірки:** 1208 passed (тести оновлено: колір рядка «Управління» з теми, Інструкція/Накази —
+пункти навігації, новий `test_theme_toggle_switches_palette_and_is_remembered`). Знімки обох
+програм в обох темах (offscreen `grab()`) переглянуто; `Povidomlennya.exe` 0.8.4 і повна програма
+запускаються. Версія 0.8.4.
+
+— **Claude**
+

@@ -39,6 +39,10 @@
 > абзаци й автонумерацію; режим «окремі накази / тека» зберігається. Деталі — у `AGENT.md`,
 > розділ «2026-09-15 — порожні білі зображення, шрифт і нерозривність примірників».
 >
+> **26.10.2026: оболонка — PySide6-Fluent-Widgets (світла й темна теми).** Імпорт лише через
+> `generator_qt/fluent.py`; кнопки — `TkButtonMixin` + РІВНО ОДНА кнопка Fluent (подвійне
+> Qt-наслідування падало); стиль застосунку міняти лише до створення віджетів. Деталі — `AGENT.md`.
+>
 > **26.10.2026: `generate_extracts.py` розбито на пакет `src/nodeautomationtoolkit/generator/`**
 > (naming, reports, word_doc, order_text, units, messages, errors, review_cli і міксини `app_*`).
 > Сам `generate_extracts.py` — лише фасад: реекспорт старих імен, `class App` з міксинів і передача

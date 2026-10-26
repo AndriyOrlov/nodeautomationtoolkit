@@ -14,6 +14,7 @@ import os
 import re
 import time
 import types
+import weakref
 from typing import Any, Callable, Iterable, NamedTuple
 
 from PySide6.QtCore import Qt
@@ -22,12 +23,13 @@ from PySide6.QtWidgets import (
     QApplication,
     QFileDialog,
     QMessageBox,
-    QPushButton,
     QTabWidget,
     QTreeWidget,
     QTreeWidgetItem,
     QWidget,
 )
+
+from .fluent import MessageBox, PrimaryPushButton, PushButton, TogglePushButton, ToolButton, TransparentPushButton
 
 END = "end"
 INSERT = "insert"
@@ -171,38 +173,62 @@ def filter_from_filetypes(filetypes: Iterable | None) -> str:
     return ";;".join(parts)
 
 
+def _fluent_box(title: str, message: str, yes_text: str, cancel_text: str | None) -> bool | None:
+    """Діалог Fluent над активним вікном. Без вікна (старт, тести) — None:
+    викликач падає назад на QMessageBox."""
+    parent = _parent()
+    # Діалог Fluent — затемнення поверх вікна; над невидимим вікном (старт,
+    # тести) його не видно й закрити нічим, тож тоді — звичайний QMessageBox.
+    if parent is None or not parent.window().isVisible():
+        return None
+    box = MessageBox(str(title), str(message), parent.window())
+    box.yesButton.setText(yes_text)
+    if cancel_text is None:
+        box.cancelButton.hide()
+    else:
+        box.cancelButton.setText(cancel_text)
+    return bool(box.exec())
+
+
 class MessageBoxBridge:
-    """`tkinter.messagebox` поверх QMessageBox."""
+    """`tkinter.messagebox` поверх діалогів Fluent (запасний варіант — QMessageBox)."""
 
     @staticmethod
     def showinfo(title="", message="", **_options):
-        QMessageBox.information(_parent(), str(title), str(message))
+        if _fluent_box(title, message, "Гаразд", None) is None:
+            QMessageBox.information(_parent(), str(title), str(message))
         return "ok"
 
     @staticmethod
     def showwarning(title="", message="", **_options):
-        QMessageBox.warning(_parent(), str(title), str(message))
+        if _fluent_box(title, message, "Гаразд", None) is None:
+            QMessageBox.warning(_parent(), str(title), str(message))
         return "ok"
 
     @staticmethod
     def showerror(title="", message="", **_options):
-        QMessageBox.critical(_parent(), str(title), str(message))
+        if _fluent_box(title, message, "Гаразд", None) is None:
+            QMessageBox.critical(_parent(), str(title), str(message))
         return "ok"
 
     @staticmethod
     def askyesno(title="", message="", **_options) -> bool:
-        answer = QMessageBox.question(_parent(), str(title), str(message))
-        return answer == QMessageBox.StandardButton.Yes
+        answer = _fluent_box(title, message, "Так", "Ні")
+        if answer is None:
+            answer = QMessageBox.question(_parent(), str(title), str(message)) == QMessageBox.StandardButton.Yes
+        return answer
 
     @staticmethod
     def askokcancel(title="", message="", **_options) -> bool:
-        answer = QMessageBox.question(
-            _parent(),
-            str(title),
-            str(message),
-            QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
-        )
-        return answer == QMessageBox.StandardButton.Ok
+        answer = _fluent_box(title, message, "Гаразд", "Скасувати")
+        if answer is None:
+            answer = QMessageBox.question(
+                _parent(),
+                str(title),
+                str(message),
+                QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
+            ) == QMessageBox.StandardButton.Ok
+        return answer
 
 
 class FileDialogBridge:
@@ -307,16 +333,26 @@ class NotebookBridge:
         return [self.widget.widget(index) for index in range(self.widget.count())]
 
 
-class TkButton(QPushButton):
-    """Кнопка, яку логіка вмикає/вимикає через `config(state=...)`.
+class TkButtonMixin:
+    """Логіка кнопки, яку генератор вмикає/вимикає через `config(state=...)`.
 
     Стан від логіки й блокування на час пакета — два незалежні прапорці.
     Інакше внутрішній прогін повного циклу, завершуючись, «вмикав» би
     кнопки, поки зовнішній пакет ще працює.
+
+    Окрема домішка без Qt: кожна кнопка успадковує її й РІВНО ОДНУ кнопку
+    Fluent. Наслідування від двох Python-підкласів Qt (наша кнопка + основна
+    кнопка Fluent) PySide підтримує погано — малювання такої кнопки падало.
+    Шукати всі кнопки генератора: `findChildren(QPushButton)` +
+    `isinstance(кнопка, TkButtonMixin)` (`tk_buttons`).
     """
 
     def __init__(self, text: str = "", variant: str = "secondary", parent: QWidget | None = None):
-        super().__init__(text, parent)
+        # Перевантажений конструктор Fluent `(text, parent)` сам викликає
+        # `self.__init__(parent=…)` — через цей клас це було б нескінченне коло.
+        # Тому — лише `(parent)`, а текст окремо.
+        super().__init__(parent)
+        self.setText(text)
         self.setProperty("variant", variant)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self._logic_enabled = True
@@ -337,6 +373,33 @@ class TkButton(QPushButton):
 
     def _apply_enabled(self) -> None:
         super().setEnabled(self._logic_enabled and not self._busy_locked)
+
+
+class TkButton(TkButtonMixin, PushButton):
+    """Звичайна кнопка Fluent."""
+
+
+class TkPrimaryButton(TkButtonMixin, PrimaryPushButton):
+    """Головна дія сторінки — заливка акцентним кольором."""
+
+
+class TkToggleButton(TkButtonMixin, TogglePushButton):
+    """Перемикач (режим джерела наказів)."""
+
+
+class TkTransparentButton(TkButtonMixin, TransparentPushButton):
+    """Другорядна дія без рамки."""
+
+
+class TkToolButton(TkButtonMixin, ToolButton):
+    """Квадратна кнопка лише зі значком (наприклад, вибір теки)."""
+
+
+def tk_buttons(widget: QWidget) -> list:
+    """Усі кнопки генератора всередині `widget` (будь-якого різновиду)."""
+    from PySide6.QtWidgets import QAbstractButton
+
+    return [child for child in widget.findChildren(QAbstractButton) if isinstance(child, TkButtonMixin)]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -470,7 +533,11 @@ class TreeBridge:
     `App._marked_paths` і `_fill_orders_tree` працюють без змін.
     """
 
+    #: Усі живі таблиці — після зміни теми кольори рядків малюються заново.
+    _instances: "weakref.WeakSet[TreeBridge]" = weakref.WeakSet()
+
     def __init__(self, widget: QTreeWidget, renderer: Renderer | None = None):
+        TreeBridge._instances.add(self)
         self.widget = widget
         self._renderer = renderer or plain_renderer
         self._items: dict[str, QTreeWidgetItem] = {}
@@ -605,6 +672,20 @@ class TreeBridge:
     # ── для оболонки ──────────────────────────────────────────────────────
     def rows(self) -> list[tuple]:
         return [self.values(iid) for iid in self.get_children()]
+
+    def rerender(self) -> None:
+        """Перемалювати всі рядки (кольори нової теми); позначки зберігаються."""
+        for iid in tuple(self._items):
+            self._values[iid] = self.values(iid)
+            self._render(iid)
+
+    @classmethod
+    def rerender_all(cls) -> None:
+        for bridge in tuple(cls._instances):
+            try:
+                bridge.rerender()
+            except RuntimeError:
+                continue  # таблицю вже знищено разом із вікном
 
     def _column_index(self, column) -> int | None:
         if isinstance(column, int):

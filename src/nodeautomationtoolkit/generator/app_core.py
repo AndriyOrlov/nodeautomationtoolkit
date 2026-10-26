@@ -117,6 +117,8 @@ class CoreMixin:
         self.message_content_template_path = tk.StringVar()
         # Необов'язковий третій зразок — «Розрахунок розсилки» з {{кому_список}}.
         self.message_calc_template_path = tk.StringVar()
+        # Тема вікна («dark» / «light»); перемикач — у навігації оболонки.
+        self.ui_theme = tk.StringVar(value="dark")
         self.message_out_folder = tk.StringVar()
         self.message_executor = tk.StringVar()
 
@@ -314,6 +316,7 @@ class CoreMixin:
                     self.message_cover_template_path.set(data.get("message_cover_template_path", ""))
                     self.message_content_template_path.set(data.get("message_content_template_path", ""))
                     self.message_calc_template_path.set(data.get("message_calc_template_path", ""))
+                    self.ui_theme.set(data.get("ui_theme") or "dark")
                     self.message_out_folder.set(data.get("message_out_folder", ""))
                     self.message_executor.set(data.get("message_executor", ""))
 
@@ -362,6 +365,7 @@ class CoreMixin:
             "message_cover_template_path": self.message_cover_template_path.get(),
             "message_content_template_path": self.message_content_template_path.get(),
             "message_calc_template_path": self.message_calc_template_path.get(),
+            "ui_theme": self.ui_theme.get(),
             "message_out_folder": self.message_out_folder.get(),
             "message_executor": self.message_executor.get(),
         }

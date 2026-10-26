@@ -53,6 +53,8 @@ rem resolves relative ones against the spec folder, not the project root.
   --paths "%ROOT%src" ^
   --collect-submodules nodeautomationtoolkit.builtin_nodes ^
   --collect-submodules nodeautomationtoolkit.generator ^
+  --collect-all qfluentwidgets ^
+  --collect-submodules qframelesswindow ^
   --collect-submodules nodeautomationtoolkit.generator_qt ^
   --collect-submodules nodeautomationtoolkit.order_review ^
   --collect-all docx ^

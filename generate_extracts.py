@@ -3,6 +3,9 @@
 # перед запуском підміняє ці імена своєю реалізацією (`install_qt_bridge`).
 from __future__ import annotations
 
+# Фасад: імпорти тут — реекспорт старих імен для тестів і скриптів.
+# ruff: noqa: F401, F403
+
 import os
 import sys
 import hashlib

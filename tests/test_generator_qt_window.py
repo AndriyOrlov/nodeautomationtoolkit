@@ -276,7 +276,9 @@ def test_analysis_results_fill_result_tables(shell, legacy):
     assert calculation.widget.topLevelItem(0).text(0) == "55 АК А0055"
     management = calculation.widget.topLevelItem(1)
     assert management.text(0) == legacy.MANAGEMENT_RESULT_LABEL
-    assert management.background(0).color().name() == "#052e2b"
+    from nodeautomationtoolkit.generator_qt import theme
+
+    assert management.background(0).color().name() == theme.C["emerald_bg"]
     assert shell.result_views["unmatched"].widget.topLevelItem(0).text(2) == "немає адресата"
 
     shell.show_layout_warnings(["А0055: шапка відірвана від першого пункту."])
@@ -425,17 +427,19 @@ def test_old_config_with_single_file_opens_in_single_mode(shell, legacy, tmp_pat
 
 
 def _find_buttons(widget, text_part):
-    from nodeautomationtoolkit.generator_qt.compat import TkButton
+    from nodeautomationtoolkit.generator_qt.compat import tk_buttons
 
-    return [child for child in widget.findChildren(TkButton) if text_part in child.text()]
+    return [child for child in tk_buttons(widget) if text_part in child.text()]
 
 
 def test_instruction_button_opens_dialog_with_text(shell, qt_app):
     from nodeautomationtoolkit.generator_qt.instruction_dialog import INSTRUCTION_FILE
 
     assert INSTRUCTION_FILE.is_file()
-    [instruction_button] = _find_buttons(shell.main_window, "Інструкція")
-    instruction_button.click()
+    # «Інструкція» — пункт навігації Fluent унизу ліворуч.
+    item = shell._nav_items["instruction"]
+    assert "Інструкція" in item.text()
+    item.clicked.emit(True)
     qt_app.processEvents()
     dialog = shell._instruction_dialog
     assert dialog is not None and dialog.isVisible()
@@ -594,3 +598,20 @@ def test_order_review_button_writes_report_without_touching_the_order(
     assert marked == [str(tmp_path / "Перевірка" / "Наказ № 5 від 01.09.2026 — перевірка.docx")]
     assert order.read_bytes() == b"original"
     assert any(name == "showinfo" and "помилок 1" in args[1] for name, args in dialogs)
+
+
+def test_theme_toggle_switches_palette_and_is_remembered(shell, qt_app):
+    from nodeautomationtoolkit.generator_qt import theme
+
+    start = theme.current_mode()
+    shell.main_window.show()
+    qt_app.processEvents()
+    shell.toggle_theme()
+    qt_app.processEvents()  # перемальовування після зміни теми не падає
+    switched = theme.current_mode()
+    assert switched != start
+    assert shell.ui_theme.get() == switched
+    assert theme.C["bg_window"] == theme.PALETTES[switched]["bg_window"]
+    shell.toggle_theme()
+    qt_app.processEvents()
+    assert theme.current_mode() == start

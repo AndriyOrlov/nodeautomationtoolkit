@@ -101,16 +101,11 @@ def _plan_file(tmp_path) -> Path:
     return path
 
 
-def test_the_header_has_the_locked_orders_button(shell):
-    from PySide6.QtWidgets import QAbstractButton
-
-    buttons = [
-        widget
-        for widget in shell.main_window.findChildren(QAbstractButton)
-        if "накази" in widget.text().casefold()
-    ]
-    assert buttons, "у шапці немає кнопки «Накази»"
-    assert "🔒" in buttons[0].text()
+def test_the_navigation_has_the_locked_orders_item(shell):
+    # Fluent: «Накази (у роботі)» — пункт навігації внизу, а не кнопка шапки.
+    item = shell._nav_items["orders"]
+    assert "накази" in item.text().casefold()
+    assert "у роботі" in item.text()
 
 
 def test_orders_are_not_a_tab_and_need_a_password(shell, monkeypatch):
