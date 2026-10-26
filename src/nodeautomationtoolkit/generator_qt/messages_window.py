@@ -115,6 +115,21 @@ class MessagesShellMixin:
         grid.addWidget(line_edit(self.message_executor), len(rows), 1, 1, 2)
         grid.setColumnStretch(1, 1)
         files.body.addLayout(grid)
+
+        # Засвідчувач «Згідно з оригіналом» — теги {{засвідчувач_*}} у зразках.
+        files.body.addWidget(label("Засвідчувач («Згідно з оригіналом»)", "PersonTitle"))
+        certifier = QGridLayout()
+        certifier.setHorizontalSpacing(8)
+        certifier.addWidget(label("Посада:", "FieldLabel"), 0, 0)
+        certifier.addWidget(line_edit(self.certifier_position), 0, 1)
+        certifier.addWidget(label("Звання:", "FieldLabel"), 0, 2)
+        certifier.addWidget(line_edit(self.certifier_rank), 0, 3)
+        certifier.addWidget(label("ПІБ:", "FieldLabel"), 0, 4)
+        certifier.addWidget(line_edit(self.certifier_name), 0, 5)
+        certifier.setColumnStretch(1, 3)
+        certifier.setColumnStretch(3, 1)
+        certifier.setColumnStretch(5, 2)
+        files.body.addLayout(certifier)
         hint = label(
             "Порожня папка результату — «Messages_Output» поруч із наказом. "
             "Файли можна перетягнути у вікно: .xlsx — таблиця, тека — папка результату, .docx — наказ.",
