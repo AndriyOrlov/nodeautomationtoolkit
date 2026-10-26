@@ -524,6 +524,24 @@ def _prepare_cipher_patterns(mapping: dict | None, fuzzy_match: bool) -> tuple:
     return prepared
 
 
+def clear_table_caches() -> None:
+    """Звільняє памʼять від таблиці після генерації.
+
+    Таблиця читається з файла ОДИН раз на запуск; усе подальше — у памʼяті.
+    Після запуску кеші очищаються, тож наступний запуск знову бере свіжий
+    файл і нічого не лишається в памʼяті між запусками.
+    """
+    from nodeautomationtoolkit.builtin_nodes import recipient_mapping
+
+    _PREPARED_CIPHER_CACHE.clear()
+    for cached in (
+        recipient_mapping._build_unit_fuzzy_pattern,
+        recipient_mapping._norm_corps_token,
+        recipient_mapping._extract_corps_abbr,
+    ):
+        cached.cache_clear()
+
+
 def _build_cipher_patterns(mapping: dict | None, fuzzy_match: bool) -> tuple:
     mapping_dict = {}
     for key, value in (mapping or {}).items():

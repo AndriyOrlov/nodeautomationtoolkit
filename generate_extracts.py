@@ -43,6 +43,7 @@ from nodeautomationtoolkit.builtin_nodes.recipient_mapping import (
 from nodeautomationtoolkit.builtin_nodes.message_order import (
     generate_decision_order,
     cipher_unit_names,
+    clear_table_caches,
     find_content_start_line,
     reflow_soft_breaks,
 )
@@ -3564,6 +3565,8 @@ class App:
         word = None
         source_doc = None
         try:
+            # Таблиця читається з файла ОДИН раз; далі всі пошуки — у памʼяті.
+            clear_table_caches()
             mapping = read_recipient_mapping(path=self.excel_path.get()).get("mapping", {})
 
             # Наказ відкриваємо в тому самому екземплярі Word, з якого потім
@@ -3752,6 +3755,8 @@ class App:
                     pass
             if word:
                 force_quit_word(word)
+            # Таблиця жила в памʼяті лише на час цього запуску.
+            clear_table_caches()
             self.btn_generate_messages.config(state=NORMAL)
 
     def select_p2_folder(self):
