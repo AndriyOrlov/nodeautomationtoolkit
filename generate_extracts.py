@@ -6078,6 +6078,9 @@ class App:
                                 upper = doc.Content.End
                     return content_start_pos, upper
 
+                table_snapshot = None
+                table_spans: list[tuple[int, int]] = []
+
                 def apply_exact_line_spacing(points):
                     """Точний міжрядковий інтервал (wdLineSpaceExactly) на весь
                     вставлений зміст і підписанта — ОДНИМ діапазоном.
@@ -6092,6 +6095,7 @@ class App:
                     сторінки, а різна висота порожніх рядків давала різні
                     відступи між пунктами в сусідніх витягах одного наказу.
                     """
+                    nonlocal table_snapshot
                     lower, upper = spacing_bounds()
                     if lower is None or upper is None or upper <= lower:
                         return
@@ -6108,11 +6112,40 @@ class App:
                             )
                     except Exception:
                         protected = []
+                    # Таблиця зразка (підписант / «Згідно з оригіналом» /
+                    # засвідчувач) — оформлення зразка, а не текст наказу: її
+                    # інтервали та відступи лишаються як у зразку (користувач,
+                    # 26.10.2026). Знімок береться ДО першої зміни й
+                    # повертається після кожної.
+                    if table_snapshot is None:
+                        table_snapshot = []
+                        try:
+                            for table in target.Tables:
+                                for paragraph in table.Range.Paragraphs:
+                                    paragraph_format = paragraph.Range.ParagraphFormat
+                                    table_snapshot.append((
+                                        paragraph_format,
+                                        paragraph_format.LineSpacingRule,
+                                        paragraph_format.LineSpacing,
+                                        paragraph_format.SpaceBefore,
+                                        paragraph_format.SpaceAfter,
+                                    ))
+                                table_spans.append((table.Range.Start, table.Range.End))
+                        except Exception:
+                            table_snapshot = []
                     target_format = target.ParagraphFormat
                     target_format.LineSpacingRule = 4  # wdLineSpaceExactly
                     target_format.LineSpacing = points
                     target_format.SpaceBefore = 0
                     target_format.SpaceAfter = 0
+                    for paragraph_format, rule, spacing, before, after in table_snapshot:
+                        try:
+                            paragraph_format.LineSpacingRule = rule
+                            paragraph_format.LineSpacing = spacing
+                            paragraph_format.SpaceBefore = before
+                            paragraph_format.SpaceAfter = after
+                        except Exception:
+                            pass
                     for shape_format, shape_rule, shape_spacing in protected:
                         try:
                             shape_format.LineSpacingRule = shape_rule
@@ -6211,8 +6244,11 @@ class App:
                         blank_formats = []
                         if lower is not None and upper is not None and upper > lower:
                             for paragraph in doc.Range(lower, upper).Paragraphs:
+                                paragraph_range = paragraph.Range
+                                if any(start <= paragraph_range.Start < end for start, end in table_spans):
+                                    continue  # таблиця зразка — не чіпаємо
                                 if is_blank_paragraph(paragraph):
-                                    blank_formats.append(paragraph.Range.ParagraphFormat)
+                                    blank_formats.append(paragraph_range.ParagraphFormat)
 
                         def set_blank_spacing(points):
                             for blank_format in blank_formats:
