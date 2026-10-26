@@ -130,8 +130,54 @@ class MessagesShellMixin:
         )
 
     # ── Дії ──────────────────────────────────────────────────────────────
+    # Діалог вибору відкривається там, де лежить уже вибраний файл (або папка),
+    # а вибране одразу пишеться в налаштування.
+    @staticmethod
+    def _start_folder(*values: str) -> str:
+        for value in values:
+            if not value:
+                continue
+            folder = value if os.path.isdir(value) else os.path.dirname(value)
+            if os.path.isdir(folder):
+                return folder
+        return ""
+
+    def _pick_file(self, variable, filetypes, *fallbacks: str) -> str:
+        path = self.legacy.filedialog.askopenfilename(
+            filetypes=filetypes, initialdir=self._start_folder(variable.get(), *fallbacks)
+        )
+        if path:
+            variable.set(os.path.abspath(path))
+            self.save_config()
+        return path
+
+    def select_excel(self):
+        self._pick_file(self.excel_path, [("Excel files", "*.xlsx *.xls")])
+
+    def select_message_cover_template(self):
+        self._pick_file(
+            self.message_cover_template_path, [("Word files", "*.docx *.doc")],
+            self.message_content_template_path.get(),
+        )
+
+    def select_message_content_template(self):
+        self._pick_file(
+            self.message_content_template_path, [("Word files", "*.docx *.doc")],
+            self.message_cover_template_path.get(),
+        )
+
+    def select_message_output_folder(self):
+        path = self.legacy.filedialog.askdirectory(
+            initialdir=self._start_folder(self.message_out_folder.get(), self.doc_path.get())
+        )
+        if path:
+            self.message_out_folder.set(os.path.abspath(path))
+            self.save_config()
+
     def select_message_order(self):
-        path = self.legacy.filedialog.askopenfilename(filetypes=[("Word files", "*.docx *.doc")])
+        path = self.legacy.filedialog.askopenfilename(
+            filetypes=[("Word files", "*.docx *.doc")], initialdir=self._start_folder(self.doc_path.get())
+        )
         if path:
             self._set_order(path)
 
