@@ -2,7 +2,8 @@
 
 Логіка та сама, що й у вкладці повідомлень генератора
 (`generate_extracts.App.run_generate_messages`). Тут — мінімальне вікно:
-наказ, таблиця, два зразки, папка результату й виконавець. Налаштування
+у головному вікні лише наказ; таблиця, зразки, папка результату, виконавець
+і засвідчувач — у вікні «Налаштування». Налаштування
 лежать в окремому файлі поруч із програмою, щоб не змішуватися з конфігом
 повного генератора.
 """
@@ -14,7 +15,7 @@ import sys
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QCloseEvent, QDragEnterEvent, QDragMoveEvent, QDropEvent
-from PySide6.QtWidgets import QApplication, QFrame, QGridLayout, QHBoxLayout, QMainWindow, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QApplication, QDialog, QGridLayout, QHBoxLayout, QMainWindow, QVBoxLayout, QWidget
 
 from . import compat, theme
 from .main_window import _package_version, install_qt_bridge
@@ -70,8 +71,8 @@ class MessagesShellMixin:
         super().__init__(compat.RootBridge(self.main_window))
         version = _package_version()
         self.main_window.setWindowTitle(f"Повідомлення за наказом{f' v{version}' if version else ''}")
-        self.main_window.resize(900, 640)
-        self.main_window.setMinimumSize(720, 520)
+        self.main_window.resize(760, 520)
+        self.main_window.setMinimumSize(600, 420)
         self._refresh_summary()
 
     def load_config(self):
@@ -96,55 +97,20 @@ class MessagesShellMixin:
         header.addStretch(1)
         root.addLayout(header)
 
-        files = SectionCard("Файли", accent="indigo")
-        grid = QGridLayout()
-        grid.setHorizontalSpacing(8)
-        grid.setVerticalSpacing(6)
-        rows = (
-            ("Наказ:", self.doc_path, self.select_message_order),
-            ("Таблиця (Excel):", self.excel_path, self.select_excel),
-            ("Зразок супроводу:", self.message_cover_template_path, self.select_message_cover_template),
-            ("Зразок зі змістом:", self.message_content_template_path, self.select_message_content_template),
-            ("Папка результату:", self.message_out_folder, self.select_message_output_folder),
-        )
-        for row, (caption, variable, pick) in enumerate(rows):
-            grid.addWidget(label(caption, "FieldLabel"), row, 0)
-            grid.addWidget(line_edit(variable), row, 1)
-            grid.addWidget(button("📂 Обрати", "secondary", pick), row, 2)
-        grid.addWidget(label("Виконавець:", "FieldLabel"), len(rows), 0)
-        grid.addWidget(line_edit(self.message_executor), len(rows), 1, 1, 2)
-        grid.setColumnStretch(1, 1)
-        files.body.addLayout(grid)
-
-        # Засвідчувач «Згідно з оригіналом» — теги {{засвідчувач_*}} у зразках.
-        files.body.addWidget(label("Засвідчувач («Згідно з оригіналом»)", "PersonTitle"))
-        certifier = QGridLayout()
-        certifier.setHorizontalSpacing(8)
-        certifier.addWidget(label("Посада:", "FieldLabel"), 0, 0)
-        certifier.addWidget(line_edit(self.certifier_position), 0, 1)
-        certifier.addWidget(label("Звання:", "FieldLabel"), 0, 2)
-        certifier.addWidget(line_edit(self.certifier_rank), 0, 3)
-        certifier.addWidget(label("ПІБ:", "FieldLabel"), 0, 4)
-        certifier.addWidget(line_edit(self.certifier_name), 0, 5)
-        certifier.setColumnStretch(1, 3)
-        certifier.setColumnStretch(3, 1)
-        certifier.setColumnStretch(5, 2)
-        files.body.addLayout(certifier)
-        hint = label(
-            "Порожня папка результату — «Messages_Output» поруч із наказом. "
-            "Файли можна перетягнути у вікно: .xlsx — таблиця, тека — папка результату, .docx — наказ.",
-            "MutedLabel",
-        )
-        hint.setWordWrap(True)
-        files.body.addWidget(hint)
-        files.body.addWidget(bind_label(label("", "SummaryLabel"), self.message_source_summary))
-        root.addWidget(files)
+        order = SectionCard("Наказ", accent="indigo")
+        order.add_action(button("⚙ Налаштування", "amber", self.open_settings))
+        row = QHBoxLayout()
+        row.setSpacing(8)
+        row.addWidget(line_edit(self.doc_path, "Оберіть наказ або перетягніть його у вікно"), 1)
+        row.addWidget(button("📂 Обрати", "secondary", self.select_message_order))
+        order.body.addLayout(row)
+        order.body.addWidget(bind_label(label("", "SummaryLabel"), self.message_source_summary))
+        root.addWidget(order)
 
         strip = ActionStrip()
         self.btn_generate_messages = button("✉ Створити 2 повідомлення", "run", self.run_generate_messages)
         strip.add(self.btn_generate_messages)
         strip.add(button("📂 Відкрити папку результату", "secondary", self.open_message_output_folder))
-        strip.add(button("ⓘ Теги", "sky", self.show_message_tags))
         strip.finish()
         root.addWidget(strip)
 
@@ -155,7 +121,7 @@ class MessagesShellMixin:
 
         self.main_window.setCentralWidget(central)
         self.doc_path.subscribe(lambda *_args: self._refresh_summary())
-        self.log("Оберіть наказ, таблицю й два зразки, потім натисніть «Створити 2 повідомлення».")
+        self.log("Оберіть наказ і натисніть «Створити 2 повідомлення». Таблиця й зразки — у «⚙ Налаштування».")
 
     def _refresh_summary(self) -> None:
         path = self.doc_path.get()
@@ -190,9 +156,29 @@ class MessagesShellMixin:
                 self._set_order(path)
         self.save_config()
 
+    def open_settings(self):
+        SettingsDialog(self, self.main_window).exec()
+
+    def _settings_missing(self) -> list[str]:
+        return [
+            caption
+            for caption, variable in (
+                ("таблиця", self.excel_path),
+                ("зразок супроводу", self.message_cover_template_path),
+                ("зразок зі змістом", self.message_content_template_path),
+            )
+            if not variable.get()
+        ]
+
     def run_generate_messages(self):
         if self._busy:
             return None
+        missing = self._settings_missing()
+        if missing:
+            self.log(f"Не вибрано в налаштуваннях: {', '.join(missing)}.")
+            self.open_settings()
+            if self._settings_missing():
+                return None
         self._busy = True
         QApplication.setOverrideCursor(Qt.CursorShape.BusyCursor)
         try:
@@ -226,6 +212,74 @@ class MessagesShellMixin:
 
     def _refresh_order_signer(self, text=None):
         return "", {"position": "", "rank": "", "name": ""}
+
+
+class SettingsDialog(QDialog):
+    """Усе, що не змінюється від наказу до наказу: таблиця, зразки, папка, люди."""
+
+    def __init__(self, shell, parent: QWidget | None = None):
+        super().__init__(parent)
+        self._shell = shell
+        self.setObjectName("SamplesDialog")
+        self.setWindowTitle("Налаштування")
+        self.resize(860, 380)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(14, 12, 14, 12)
+        layout.setSpacing(8)
+
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(8)
+        grid.setVerticalSpacing(6)
+        rows = (
+            ("Таблиця (Excel):", shell.excel_path, shell.select_excel),
+            ("Зразок супроводу:", shell.message_cover_template_path, shell.select_message_cover_template),
+            ("Зразок зі змістом:", shell.message_content_template_path, shell.select_message_content_template),
+            ("Папка результату:", shell.message_out_folder, shell.select_message_output_folder),
+        )
+        for row, (caption, variable, pick) in enumerate(rows):
+            grid.addWidget(label(caption, "FieldLabel"), row, 0)
+            grid.addWidget(line_edit(variable), row, 1)
+            grid.addWidget(button("📂 Обрати", "secondary", pick), row, 2)
+        grid.addWidget(label("Виконавець:", "FieldLabel"), len(rows), 0)
+        grid.addWidget(line_edit(shell.message_executor), len(rows), 1, 1, 2)
+        grid.setColumnStretch(1, 1)
+        layout.addLayout(grid)
+
+        # Засвідчувач «Згідно з оригіналом» — теги {{засвідчувач_*}} у зразках.
+        layout.addWidget(label("Засвідчувач («Згідно з оригіналом»)", "PersonTitle"))
+        certifier = QGridLayout()
+        certifier.setHorizontalSpacing(8)
+        certifier.addWidget(label("Посада:", "FieldLabel"), 0, 0)
+        certifier.addWidget(line_edit(shell.certifier_position), 0, 1)
+        certifier.addWidget(label("Звання:", "FieldLabel"), 0, 2)
+        certifier.addWidget(line_edit(shell.certifier_rank), 0, 3)
+        certifier.addWidget(label("ПІБ:", "FieldLabel"), 0, 4)
+        certifier.addWidget(line_edit(shell.certifier_name), 0, 5)
+        certifier.setColumnStretch(1, 3)
+        certifier.setColumnStretch(3, 1)
+        certifier.setColumnStretch(5, 2)
+        layout.addLayout(certifier)
+
+        hint = label(
+            "Порожня папка результату — «Messages_Output» поруч із наказом. "
+            "Підписанта програма читає з наказу сама.",
+            "MutedLabel",
+        )
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+        layout.addStretch(1)
+
+        bottom = QHBoxLayout()
+        bottom.addWidget(button("ⓘ Теги", "sky", shell.show_message_tags))
+        bottom.addStretch(1)
+        bottom.addWidget(button("💾 Зберегти та закрити", "run", self.accept))
+        layout.addLayout(bottom)
+
+    def done(self, result: int) -> None:
+        # Esc, хрестик і кнопка ведуть сюди — налаштування зберігаються завжди.
+        self._shell.save_config()
+        super().done(result)
 
 
 def create_messages_app_class(legacy):
