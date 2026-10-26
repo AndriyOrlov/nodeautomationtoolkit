@@ -2858,6 +2858,18 @@ _UNIT_REFERENCE_PATTERN = re.compile(
 )
 
 
+def _is_tck_continuation(following: str) -> bool:
+    """Чи йде одразу за «цього самого центру» «…комплектування» (тобто це ТЦК).
+
+    Лукахед у `_UNIT_REFERENCE_PATTERN` бачить лише звичайні пробіли, а в
+    наказі між словами буває м'який перенос (Ctrl+-), тире або латинська
+    літера-двійник у «кoмплектування». ТЦК лишається відкритим (розд. 9.5.6),
+    тож перевіряємо продовження стійко до цього.
+    """
+    clean = str(following or "").replace("\xad", "").translate(_LATIN_LOOKALIKES).casefold()
+    return bool(re.match(r"[\s\-‐‑–—]*комплектуван", clean))
+
+
 def _replace_unit_reference_phrase(match: re.Match) -> str:
     """Перетворює зворот-посилання на «…військової частини» у тому ж відмінку."""
     determiner_raw = match.group(1).lower()
@@ -2868,6 +2880,8 @@ def _replace_unit_reference_phrase(match: re.Match) -> str:
     if not lookup:
         return match.group(0)
     lemma, case_label = lookup
+    if _is_tck_continuation(match.string[match.end():match.end() + 40]):
+        return match.group(0)
 
     # Неоднозначні короткі форми чіпаємо лише за наявності слова «сам…».
     if determiner_raw in _DETERMINER_REQUIRES_SAM and not sam_raw:

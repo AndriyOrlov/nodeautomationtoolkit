@@ -417,3 +417,27 @@ def test_looped_column_d_does_not_hang():
     }
     result, _, _ = cipher_unit_names("командира роти 11 окремого тестового батальйону", mapping)
     assert result == "командира роти військової частини А1111 військової частини А2222"
+
+
+# ── «цього самого центру комплектування» лишається як є ─────────────────────
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "офіцера цього самого центру комплектування та соціальної підтримки",
+        "офіцера цього самого центру\xadкомплектування та соціальної підтримки",  # м'який перенос
+        "офіцера цього самого центру - комплектування та соціальної підтримки",
+        "офіцера цього самого центру кoмплектування та соціальної підтримки",  # латинська o
+        "ОФІЦЕРА ЦЬОГО САМОГО ЦЕНТРУ\xadКОМПЛЕКТУВАННЯ ТА СОЦІАЛЬНОЇ ПІДТРИМКИ",
+    ],
+)
+def test_same_tck_reference_is_not_turned_into_military_unit(text):
+    result, _, _ = cipher_unit_names(text, _mapping("51 АК"))
+    assert "частин" not in result.casefold()
+    assert result == text
+
+
+def test_same_center_without_tck_still_becomes_military_unit():
+    result, _, _ = cipher_unit_names("офіцера цього самого центру", _mapping("51 АК"))
+    assert result == "офіцера цієї самої військової частини"
