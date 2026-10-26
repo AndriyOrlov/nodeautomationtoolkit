@@ -30,7 +30,10 @@ from . import compat, theme
 from .compare_window import CompareWindow
 from .fluent import FluentIcon, FluentWindow, NavigationItemPosition, TitleLabel
 from .instruction_dialog import InstructionDialog
+from nodeautomationtoolkit.generator.printing import default_printer
+
 from .orders_window import OrdersWindowMixin
+from .print_dialog import PrintPauseDialog
 from .samples_dialog import SamplesDialog
 from .widgets import (
     COPY_RESULT_COLUMNS,
@@ -81,6 +84,7 @@ PAGES = (
     ("copiesPage", FluentIcon.COPY, "Примірники 2/3", "Примірники наказів № 2 і № 3"),
     ("extractsPage", FluentIcon.DOCUMENT, "Розрахунок і витяги", "Розрахунок розсилки та витяги"),
     ("messagesPage", FluentIcon.MAIL, "Повідомлення", "Шифровані повідомлення за наказом"),
+    ("printPage", FluentIcon.PRINT, "Друк", "Друк пакета"),
 )
 
 
@@ -243,14 +247,19 @@ class QtShellMixin(OrdersWindowMixin):
         self.p2_log_text = compat.TextBridge(self.p2_log_model)
         self._tab_badges: dict[int, Badge] = {}
 
-        builders = (self._build_copies_tab, self._build_extracts_tab, self._build_messages_tab)
+        builders = (
+            self._build_copies_tab,
+            self._build_extracts_tab,
+            self._build_messages_tab,
+            self._build_print_tab,
+        )
         pages = []
         for index, ((name, icon, nav_text, title), build) in enumerate(zip(PAGES, builders)):
             page = self._scroll_page(self._page_with_header(index, title, build()))
             page.setObjectName(name)
             self.main_window.addSubInterface(page, icon, nav_text)
             pages.append(page)
-        self.tab_copies_page, self.tab_extracts_page, self.tab_messages_page = pages
+        self.tab_copies_page, self.tab_extracts_page, self.tab_messages_page, self.tab_print_page = pages
         self.tab_copies = self.tab_copies_page
         self.tab_extracts = self.tab_extracts_page
         self.tab_messages = self.tab_messages_page
@@ -695,6 +704,87 @@ class QtShellMixin(OrdersWindowMixin):
         layout.addWidget(self._log_card("Журнал повідомлень", self.log_model, "log_text", self.clear_log), 1)
         return page
 
+    # ── Сторінка 4: друк пакета ──────────────────────────────────────────
+    def _build_print_tab(self) -> QWidget:
+        page, layout = self._page()
+
+        source = SectionCard("Пакет для друку", accent="indigo")
+        source.add_action(self._lock(button("📁 Обрати теку", "secondary", self.select_print_folder)))
+        source.add_action(button("⇄ Оновити чергу", "ghost", self.refresh_print_queue))
+        row = QHBoxLayout()
+        row.setSpacing(8)
+        row.addWidget(label("Тека пакета:", "FieldLabel"))
+        row.addWidget(line_edit(self.print_folder, "порожньо — тека примірників № 2"), 1)
+        source.body.addLayout(row)
+        table = make_table(
+            ["НАКАЗ", "ЩО ДРУКУЄТЬСЯ", "ФАЙЛ"],
+            selection="none",
+            stretch_column=2,
+            widths={0: 220, 1: 320},
+            min_height=220,
+        )
+        self.print_queue_tree = compat.TreeBridge(table, render_analysis_row)
+        source.body.addWidget(table)
+        layout.addWidget(source)
+
+        settings = SectionCard("Як друкувати", accent="slate")
+        settings.body.addWidget(check_box("Друкувати витяги до управління", self.print_management))
+        hint_row = QHBoxLayout()
+        hint_row.setSpacing(8)
+        hint_row.addWidget(label("Як класти в ручну подачу:", "FieldLabel"))
+        hint_row.addWidget(line_edit(self.print_feed_hint, "наприклад: лицем догори, верхом до принтера"), 1)
+        settings.body.addLayout(hint_row)
+        printer = default_printer()
+        settings.body.addWidget(
+            label(f"Принтер: {printer or 'не визначено'} — принтер Windows за замовчуванням.", "MutedLabel")
+        )
+        rules = label(
+            "Для кожного наказу по черзі: витяги (2 сторінки на аркуш) → витяги до управління (якщо "
+            "увімкнено) → примірник № 2: лицьові сторінки, потім верхній аркуш у ручну подачу й задня "
+            "сторінка на звороті → те саме для примірника № 3 (у № 2 «Прим. № 2» міняється на № 3 лише "
+            "для друку). Після кожного кроку — пауза: Пробіл або Enter — далі, Esc — зупинити.",
+            "MutedLabel",
+        )
+        rules.setWordWrap(True)
+        settings.body.addWidget(rules)
+        layout.addWidget(settings)
+
+        strip = ActionStrip()
+        strip.add(self._lock(button("🖨 Друкувати пакет", "run", self.run_print_action)))
+        strip.add(self._lock(button("📄 Перевірити у PDF", "secondary", self.run_print_check_pdf)))
+        strip.add(self._lock(button("🖨 Пробний аркуш (ручна подача)", "secondary", self.run_print_test_sheet)))
+        self._strip_status[3] = strip.finish().status
+        layout.addWidget(strip)
+
+        layout.addWidget(self._log_card("Журнал друку", self.log_model, "log_text", self.clear_log), 1)
+        self.print_management.subscribe(lambda _value: self.refresh_print_queue())
+        self.refresh_print_queue()
+        return page
+
+    def refresh_print_queue(self) -> None:
+        bridge = getattr(self, "print_queue_tree", None)
+        if bridge is None:
+            return
+        bridge.delete(*bridge.get_children())
+        rows = self.print_queue_rows()
+        for row in rows:
+            bridge.insert("", compat.END, values=row)
+        if not rows:
+            bridge.insert("", compat.END, values=("—", "— Оберіть теку пакета: там, де примірники № 2 і витяги —", "—"))
+
+    def select_print_folder(self) -> None:
+        start = self.print_folder.get() or self.p2_out_folder.get()
+        path = self.legacy.filedialog.askdirectory(initialdir=start if start and os.path.isdir(start) else "")
+        if path:
+            self.print_folder.set(os.path.abspath(path))
+            self.save_config()
+            self.refresh_print_queue()
+
+    def _print_pause(self, done: str, after: str, upcoming: str) -> bool:
+        dialog = PrintPauseDialog(done, after, upcoming, self.main_window)
+        theme.use_dark_title_bar(dialog)
+        return dialog.exec() == PrintPauseDialog.DialogCode.Accepted
+
     # ═════════════════════════════════════════════════════════════════════
     # Тема
     # ═════════════════════════════════════════════════════════════════════
@@ -832,6 +922,13 @@ class QtShellMixin(OrdersWindowMixin):
 
     def run_order_review_action(self):
         return self._guarded(super().run_order_review_action)
+
+    def run_print_action(self, pdf_check: bool = False):
+        parent_action = super().run_print_action
+        return self._guarded(lambda: parent_action(pdf_check))
+
+    def run_print_test_sheet(self):
+        return self._guarded(super().run_print_test_sheet)
 
     def generate_messages_for_dropped_order(self, path: str) -> None:
         """Наказ, перетягнутий у рамку сторінки повідомлень: обрати й одразу створити."""

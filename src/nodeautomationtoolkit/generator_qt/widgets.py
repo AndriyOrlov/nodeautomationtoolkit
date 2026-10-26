@@ -129,6 +129,7 @@ _BUTTON_ICONS = (
     ("⚡", FluentIcon.PLAY),
     ("📖", FluentIcon.LIBRARY),
     ("📋", FluentIcon.COPY),
+    ("🖨", FluentIcon.PRINT),
     ("📊", FluentIcon.PIE_SINGLE),
     ("👁", FluentIcon.VIEW),
     ("🏛", FluentIcon.PEOPLE),

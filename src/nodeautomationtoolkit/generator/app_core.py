@@ -119,6 +119,10 @@ class CoreMixin:
         self.message_calc_template_path = tk.StringVar()
         # Тема вікна («dark» / «light»); перемикач — у навігації оболонки.
         self.ui_theme = tk.StringVar(value="dark")
+        # Друк пакета: тека, витяги до управління за бажанням, як класти в ручну подачу.
+        self.print_folder = tk.StringVar()
+        self.print_management = tk.BooleanVar(value=False)
+        self.print_feed_hint = tk.StringVar()
         self.message_out_folder = tk.StringVar()
         self.message_executor = tk.StringVar()
 
@@ -317,6 +321,9 @@ class CoreMixin:
                     self.message_content_template_path.set(data.get("message_content_template_path", ""))
                     self.message_calc_template_path.set(data.get("message_calc_template_path", ""))
                     self.ui_theme.set(data.get("ui_theme") or "dark")
+                    self.print_folder.set(data.get("print_folder", ""))
+                    self.print_management.set(bool(data.get("print_management", False)))
+                    self.print_feed_hint.set(data.get("print_feed_hint", ""))
                     self.message_out_folder.set(data.get("message_out_folder", ""))
                     self.message_executor.set(data.get("message_executor", ""))
 
@@ -366,6 +373,9 @@ class CoreMixin:
             "message_content_template_path": self.message_content_template_path.get(),
             "message_calc_template_path": self.message_calc_template_path.get(),
             "ui_theme": self.ui_theme.get(),
+            "print_folder": self.print_folder.get(),
+            "print_management": self.print_management.get(),
+            "print_feed_hint": self.print_feed_hint.get(),
             "message_out_folder": self.message_out_folder.get(),
             "message_executor": self.message_executor.get(),
         }

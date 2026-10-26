@@ -109,8 +109,9 @@ def test_the_navigation_has_the_locked_orders_item(shell):
 
 
 def test_orders_are_not_a_tab_and_need_a_password(shell, monkeypatch):
-    assert shell._tabs.count() == 3
-    assert all("наказ" not in shell._tabs.tabText(i).casefold() for i in range(3))
+    # Розділи: примірники, витяги, повідомлення, друк — генератора наказів серед них немає.
+    assert shell._tabs.count() == 4
+    assert all("наказ" not in shell._tabs.tabText(i).casefold() for i in range(4))
 
     monkeypatch.setattr(type(shell), "ask_orders_password", lambda self: "1234")
     assert shell.open_orders_window() is None

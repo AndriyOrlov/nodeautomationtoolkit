@@ -19,7 +19,17 @@ from PySide6.QtWidgets import QApplication, QDialog, QFrame, QGridLayout, QHBoxL
 from . import compat, theme
 from .fluent import FluentIcon, NavigationItemPosition, TitleLabel
 from .main_window import DropFluentWindow, _package_version, install_qt_bridge
-from .widgets import ActionStrip, LogConsole, SectionCard, bind_label, button, label, line_edit
+from .widgets import (
+    ActionStrip,
+    LogConsole,
+    SectionCard,
+    bind_label,
+    button,
+    check_box,
+    label,
+    line_edit,
+    run_params_card,
+)
 
 CONFIG_NAME = "messages_config.json"
 
@@ -55,7 +65,7 @@ class MessagesShellMixin:
         super().__init__(compat.RootBridge(self.main_window))
         version = _package_version()
         self.main_window.setWindowTitle(f"Повідомлення за наказом{f' v{version}' if version else ''}")
-        self.main_window.resize(900, 640)
+        self.main_window.resize(1040, 820)
         self.main_window.setMinimumSize(720, 520)
         self._refresh_summary()
 
@@ -84,6 +94,45 @@ class MessagesShellMixin:
         order.body.addLayout(row)
         order.body.addWidget(bind_label(label("", "SummaryLabel"), self.message_source_summary))
         root.addWidget(order)
+
+        # Ті самі поля, що на сторінці повідомлень великої програми (вимога 26.10.2026):
+        # виконавець, папка, підписант оригіналу наказу, засвідчувач, галочка управління.
+        def message_options(row: QHBoxLayout) -> None:
+            skip_box = check_box(
+                "Не додавати внутрішнє переміщення в управлінні",
+                self.message_skip_internal_management,
+            )
+            skip_box.setToolTip(
+                "Пункт, де «управління» є і в посаді «звідки», і в посаді «КУДИ», "
+                "не переноситься у шифрований зміст."
+            )
+            row.addWidget(skip_box)
+            row.addStretch(1)
+
+        root.addWidget(
+            run_params_card(
+                "Реквізити цього прогону",
+                executor_var=self.message_executor,
+                folder_var=self.message_out_folder,
+                on_pick_folder=self.select_message_output_folder,
+                executor_hint="",
+                people=(
+                    (
+                        "Підписант оригіналу наказу (зчитується з наказу, можна виправити)",
+                        self.order_signer_position,
+                        self.order_signer_rank,
+                        self.order_signer_name,
+                    ),
+                    (
+                        "Засвідчувач («Згідно з оригіналом»)",
+                        self.certifier_position,
+                        self.certifier_rank,
+                        self.certifier_name,
+                    ),
+                ),
+                options=message_options,
+            )
+        )
 
         strip = ActionStrip()
         self.btn_generate_messages = button("✉ Створити повідомлення", "run", self.run_generate_messages)
@@ -193,6 +242,22 @@ class MessagesShellMixin:
         self.doc_path.set(os.path.abspath(path))
         self.save_config()
         self.log(f"Наказ: {os.path.basename(path)}")
+        self._read_order_signer()
+
+    def _read_order_signer(self) -> None:
+        """Підписант із наказу в поля — як у великій програмі; поля можна виправити.
+
+        Наступний наказ читається заново, тож підписант попереднього не «прилипає».
+        """
+        for variable in (self.order_signer_position, self.order_signer_rank, self.order_signer_name):
+            variable.set("")
+        QApplication.setOverrideCursor(Qt.CursorShape.BusyCursor)
+        try:
+            super()._refresh_order_signer()
+        except Exception as error:
+            self.log(f"УВАГА: підписанта не зчитано ({error}) — впишіть його вручну або залиште порожнім.")
+        finally:
+            QApplication.restoreOverrideCursor()
 
     def accept_dropped_paths(self, paths: list[str]) -> None:
         if self._busy:
@@ -296,35 +361,17 @@ class SettingsDialog(QDialog):
                 shell.message_calc_template_path,
                 shell.select_message_calc_template,
             ),
-            ("Папка результату:", shell.message_out_folder, shell.select_message_output_folder),
         )
         for row, (caption, variable, pick) in enumerate(rows):
             grid.addWidget(label(caption, "FieldLabel"), row, 0)
             grid.addWidget(line_edit(variable), row, 1)
             grid.addWidget(button("📂 Обрати", "secondary", pick), row, 2)
-        grid.addWidget(label("Виконавець:", "FieldLabel"), len(rows), 0)
-        grid.addWidget(line_edit(shell.message_executor), len(rows), 1, 1, 2)
         grid.setColumnStretch(1, 1)
         layout.addLayout(grid)
 
-        # Засвідчувач «Згідно з оригіналом» — теги {{засвідчувач_*}} у зразках.
-        layout.addWidget(label("Засвідчувач («Згідно з оригіналом»)", "PersonTitle"))
-        certifier = QGridLayout()
-        certifier.setHorizontalSpacing(8)
-        certifier.addWidget(label("Посада:", "FieldLabel"), 0, 0)
-        certifier.addWidget(line_edit(shell.certifier_position), 0, 1)
-        certifier.addWidget(label("Звання:", "FieldLabel"), 0, 2)
-        certifier.addWidget(line_edit(shell.certifier_rank), 0, 3)
-        certifier.addWidget(label("ПІБ:", "FieldLabel"), 0, 4)
-        certifier.addWidget(line_edit(shell.certifier_name), 0, 5)
-        certifier.setColumnStretch(1, 3)
-        certifier.setColumnStretch(3, 1)
-        certifier.setColumnStretch(5, 2)
-        layout.addLayout(certifier)
-
         hint = label(
-            "Порожня папка результату — «Messages_Output» поруч із наказом. "
-            "Підписанта програма читає з наказу сама.",
+            "Тут — лише таблиця й зразки. Виконавець, папка результату, підписант і засвідчувач — "
+            "у головному вікні, у картці «Реквізити цього прогону».",
             "MutedLabel",
         )
         hint.setWordWrap(True)

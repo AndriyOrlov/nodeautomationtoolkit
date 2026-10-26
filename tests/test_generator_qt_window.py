@@ -615,3 +615,38 @@ def test_theme_toggle_switches_palette_and_is_remembered(shell, qt_app):
     shell.toggle_theme()
     qt_app.processEvents()
     assert theme.current_mode() == start
+
+
+def test_print_page_shows_the_queue_from_the_batch_folder(shell, tmp_path):
+    folder = tmp_path / "Примірники_2" / "Наказ 556"
+    folder.mkdir(parents=True)
+    (folder / "2,3_Наказ № 556 від 15.08.2026.docx").write_bytes(b"")
+    (folder / "Витяги наказу № 556 від 15.08.2026.docx").write_bytes(b"")
+    (folder / "Витяги до управління за наказом № 556 від 15.08.2026.docx").write_bytes(b"")
+    assert shell.notebook.index(shell.tab_print_page) == 3
+
+    shell.print_folder.set(str(tmp_path / "Примірники_2"))
+    shell.refresh_print_queue()
+    rows = shell.print_queue_tree.rows()
+    assert [row[1] for row in rows] == [
+        "Витяги — 2 сторінки на аркуш",
+        "Примірник № 2 + задня сторінка",
+        "Примірник № 3 + задня сторінка (лише друк)",
+    ]
+    shell.print_management.set(True)  # галочка одразу оновлює чергу
+    assert "Витяги до управління" in [row[1] for row in shell.print_queue_tree.rows()]
+
+
+@pytest.mark.parametrize(
+    "key, accepted",
+    [(Qt.Key.Key_Space, True), (Qt.Key.Key_Return, True), (Qt.Key.Key_Enter, True), (Qt.Key.Key_Escape, False)],
+)
+def test_print_pause_continues_on_space_or_enter(qt_app, key, accepted):
+    from PySide6.QtCore import QTimer
+    from PySide6.QtTest import QTest
+
+    from nodeautomationtoolkit.generator_qt.print_dialog import PrintPauseDialog
+
+    dialog = PrintPauseDialog("Наказ № 1 — Примірник № 2", "Верхній аркуш у ручну подачу.", "задня сторінка")
+    QTimer.singleShot(0, lambda: QTest.keyClick(dialog, key))
+    assert (dialog.exec() == PrintPauseDialog.DialogCode.Accepted) is accepted

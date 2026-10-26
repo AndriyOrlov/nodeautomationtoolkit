@@ -228,6 +228,7 @@ from nodeautomationtoolkit.generator.app_review import (  # noqa: F401
 from nodeautomationtoolkit.generator.app_messages import (  # noqa: F401
     MessagesMixin,
 )
+from nodeautomationtoolkit.generator.app_printing import PrintingMixin  # noqa: F401
 from nodeautomationtoolkit.generator.app_copies import (  # noqa: F401
     CopiesMixin,
 )
@@ -241,6 +242,7 @@ class App(
     ReviewMixin,
     MessagesMixin,
     CopiesMixin,
+    PrintingMixin,
 ):
     """Генератор витягів, примірників і повідомлень — збирається з міксинів пакета."""
 
@@ -269,9 +271,11 @@ from nodeautomationtoolkit.generator import (  # noqa: E402
     app_review,
     app_messages,
     app_copies,
+    app_printing,
+    printing,
 )
 
-_GENERATOR_PARTS = (naming, errors, word_doc, reports, units, messages, order_text, review_cli, app_core, app_documents, app_orders, app_extracts, app_review, app_messages, app_copies,)
+_GENERATOR_PARTS = (naming, errors, word_doc, reports, units, messages, order_text, review_cli, app_core, app_documents, app_orders, app_extracts, app_review, app_messages, app_copies, app_printing, printing,)
 
 
 class _FacadeModule(_types.ModuleType):
