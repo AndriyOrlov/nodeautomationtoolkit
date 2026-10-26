@@ -174,3 +174,43 @@ def test_extract_unbreakable_chain_logic():
     for idx in range(chain_start_idx, chain_end_idx):
         assert keep_with_next_flags[idx] is True, f"Абзац {paragraphs[idx]['text']} має бути нерозривним (KeepWithNext=True)!"
     assert keep_with_next_flags[chain_end_idx] is False
+
+
+def _sheets_2up(pages):
+    """Аркуші при друку «2 на 1» за правилами збирання витягів."""
+    current = 0
+    for index, count in enumerate(pages):
+        if count > 1 and current % 2:
+            current += 1  # багатосторінковий — з нового аркуша
+        current += count
+        next_single = index + 1 < len(pages) and pages[index + 1] <= 1
+        if count > 1 and current % 2 and not next_single:
+            current += 1
+    return (current + 1) // 2
+
+
+def test_order_extracts_for_2up_fills_free_halves_with_singles():
+    from generate_extracts import order_extracts_for_2up
+
+    extracts = [("a", 1), ("b", 3), ("c", 1), ("d", 2), ("e", 3), ("f", 1)]
+    ordered = order_extracts_for_2up(extracts)
+    assert sorted(ordered) == sorted(extracts)
+    assert [name for name, _ in ordered] == ["b", "a", "e", "c", "d", "f"]
+    assert _sheets_2up([pages for _, pages in ordered]) == 6
+
+
+def test_reordering_saves_a_sheet_when_two_odd_extracts_meet():
+    from generate_extracts import order_extracts_for_2up
+
+    extracts = [("a", 3), ("b", 3), ("c", 1), ("d", 1)]
+    ordered = order_extracts_for_2up(extracts)
+    assert [name for name, _ in ordered] == ["a", "c", "b", "d"]
+    assert _sheets_2up([3, 3, 1, 1]) == 5
+    assert _sheets_2up([pages for _, pages in ordered]) == 4
+
+
+def test_order_extracts_for_2up_keeps_order_without_multipage():
+    from generate_extracts import order_extracts_for_2up
+
+    extracts = [("a", 1), ("b", 1), ("c", 1)]
+    assert order_extracts_for_2up(extracts) == extracts
