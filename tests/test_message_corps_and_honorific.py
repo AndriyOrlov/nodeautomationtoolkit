@@ -360,3 +360,24 @@ def test_tck_row_does_not_hide_unit_ciphering():
 )
 def test_tck_entry_detection(entry_value, expected):
     assert is_tck_entry(entry_value) is expected
+
+
+# ── Латинські літери-двійники у ВЕЛИКИХ назвах ──────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "до 51 АРМIЙСЬКОГО КОРПУСУ",  # латинська I
+        "до 51 APMІЙСЬКОГО KOPПУСУ",  # латинські A, P, K, O
+        "до 51 армiйського корпусу",  # латинська i
+    ],
+)
+def test_corps_with_latin_lookalike_letters_is_ciphered(text):
+    result, _, _ = cipher_unit_names(text, _mapping("51 АК"))
+    assert result.casefold() == "до військової частини а0051"
+
+
+def test_latin_cipher_without_cyrillic_letters_is_not_touched():
+    result, _, _ = cipher_unit_names("шифр A0051 лишається", _mapping("51 АК"))
+    assert result == "шифр A0051 лишається"

@@ -362,7 +362,17 @@ def _normalize_unit_name(name: str) -> str:
     return re.sub(r"\s+", " ", name.strip().casefold())
 
 
+# Латинські літери, схожі на кириличні, у кириличному слові: «АРМIЙСЬКОГО» з
+# латинською I. У ВЕЛИКИХ літерах їх не видно, а назва з таблиці через них не
+# збігалася — корпус лишався відкритим. Довжина слова не змінюється; слова без
+# кирилиці (шифр «A0051») не чіпаються.
+_LATIN_LOOKALIKES = str.maketrans("ABCEHIKMOPTXYaceiopxy", "АВСЕНІКМОРТХУасеіорху")
+_MIXED_SCRIPT_WORD_RE = re.compile(
+    r"\b(?=[^\W\d_]*[а-яіїєґА-ЯІЇЄҐ])(?=[^\W\d_]*[A-Za-z])[^\W\d_]+\b"
+)
+
 _MILITARY_TYPO_DICTIONARY = [
+    (_MIXED_SCRIPT_WORD_RE, lambda match: match.group(0).translate(_LATIN_LOOKALIKES)),
     # Описи та оддруки у слові "бригада / бригади"
     (re.compile(r"\bбригд[иаоеемся]?\b", re.IGNORECASE), "бригади"),
     (re.compile(r"\bбригаи\b", re.IGNORECASE), "бригади"),
