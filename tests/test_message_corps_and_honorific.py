@@ -381,3 +381,39 @@ def test_corps_with_latin_lookalike_letters_is_ciphered(text):
 def test_latin_cipher_without_cyrillic_letters_is_not_touched():
     result, _, _ = cipher_unit_names("шифр A0051 лишається", _mapping("51 АК"))
     assert result == "шифр A0051 лишається"
+
+
+# ── Ланцюг по стовпцю D: батальйон → бригада → корпус ──────────────────────
+
+
+def _column_d_chain_mapping(brigade_name="22 окрема тестова бригада"):
+    return {
+        "11 окремий тестовий батальйон": _entry("11 окремий тестовий батальйон", "А1111", "11 отб", "22 отбр"),
+        brigade_name: _entry(brigade_name, "А2222", "22 отбр", "33 АК"),
+        "33 армійський корпус": _entry("33 армійський корпус", "А3333", "33 АК", "ОК Тест"),
+        "оперативне командування Тест": _entry("оперативне командування Тест", "А0777", "ОК Тест"),
+    }
+
+
+@pytest.mark.parametrize(
+    "brigade_name", ["22 окрема тестова бригада", "22 окрема тестова бригада 33 армійського корпусу"]
+)
+def test_battalion_alone_gets_whole_chain_from_column_d(brigade_name):
+    result, _, _ = cipher_unit_names("командира роти 11 окремого тестового батальйону", _column_d_chain_mapping(brigade_name))
+    assert result == (
+        "командира роти військової частини А1111 військової частини А2222 військової частини А3333"
+    )
+
+
+def test_chain_stops_at_corps_as_before():
+    result, _, _ = cipher_unit_names("офіцера 22 окремої тестової бригади", _column_d_chain_mapping())
+    assert result == "офіцера військової частини А2222 військової частини А3333"
+
+
+def test_looped_column_d_does_not_hang():
+    mapping = {
+        "11 окремий тестовий батальйон": _entry("11 окремий тестовий батальйон", "А1111", "11 отб", "22 отбр"),
+        "22 окрема тестова бригада": _entry("22 окрема тестова бригада", "А2222", "22 отбр", "11 отб"),
+    }
+    result, _, _ = cipher_unit_names("командира роти 11 окремого тестового батальйону", mapping)
+    assert result == "командира роти військової частини А1111 військової частини А2222"

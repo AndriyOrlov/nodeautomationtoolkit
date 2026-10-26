@@ -2931,6 +2931,11 @@ def is_tck_entry(mapped_val: dict | str) -> bool:
     return "тцк" in haystack or "комплектування" in haystack
 
 
+_SUBORDINATE_UNIT_KIND_RE = re.compile(
+    r"бригад|батальйон|полк|дивізіон|загін|загон|центр|баз[аиі]|вузол|вузл|госпітал|арсенал"
+)
+
+
 def _format_full_closed_unit_text(mapped_val: dict | str, mapping_dict: dict) -> str:
     """Форматує закриту назву ВЧ: 'військової частини АXXXX', а якщо вказано корпус — 'військової частини АXXXX військової частини АYYYY'. Для ТЦК зберігає назву без змін."""
     if isinstance(mapped_val, dict):
@@ -2971,15 +2976,35 @@ def _format_full_closed_unit_text(mapped_val: dict | str, mapping_dict: dict) ->
         # раз, через що виникали ланцюги «…22 АК військової частини А2222»
         # та дублі «військової частини військової частини».
         # Посилання розвʼязуємо тим самим `_find_corps_entry`, що й витяги.
-        corps_entry = _find_corps_entry(corps_name, _extract_corps_abbr(corps_name), mapping_dict)
-        corps_cipher = _table_cipher(corps_entry)
-        if corps_cipher:
-            return f"{unit_code} {_to_unit_phrase(corps_cipher)}"
-        # Рядка корпусу немає в таблиці (або в ньому порожній B). Раніше сюди
-        # йшов сам текст стовпця D — «військової частини 99 АК», тобто
-        # вигаданий шифр. Шифр береться лише з таблиці (розд. 9.5.7), тому
-        # ланка корпусу не додається; генератор повідомлень про це попереджає.
-        return unit_code
+        #
+        # Посилання йде ЛАНЦЮГОМ: у батальйону в D — бригада, у бригади — корпус.
+        # Раніше бралася лише перша ланка, і батальйон без названої в тексті
+        # бригади виходив без корпусу: «А1111 А2222» замість «А1111 А2222 А3333».
+        # Рядка ланки немає в таблиці (або в ньому порожній B) — ланцюг на ній
+        # обривається. Раніше сюди йшов сам текст стовпця D — «військової
+        # частини 99 АК», тобто вигаданий шифр; шифр береться лише з таблиці
+        # (розд. 9.5.7), генератор повідомлень про обрив попереджає.
+        links = [unit_code]
+        seen = {re.sub(r"\s+", "", cipher).upper()}
+        link_ref = corps_name
+        for _ in range(5):  # запобіжник від зациклених посилань у таблиці
+            link_entry = _find_corps_entry(link_ref, _extract_corps_abbr(link_ref), mapping_dict)
+            link_cipher = _table_cipher(link_entry)
+            link_key = re.sub(r"\s+", "", link_cipher).upper()
+            if not link_cipher or link_key in seen:
+                break
+            seen.add(link_key)
+            links.append(_to_unit_phrase(link_cipher))
+            # На корпусі (командуванні) ланцюг завершується, як і раніше: вища
+            # ланка в закритий текст частини не йшла й не має з'являтися зараз.
+            # «Бригада … армійського корпусу» у стовпці A — ще не корпус.
+            link_name = str(link_entry.get("open_name") or link_ref).casefold()
+            if re.search(r"корпус|командуван", link_name) and not _SUBORDINATE_UNIT_KIND_RE.search(link_name):
+                break
+            link_ref = str(link_entry.get("corps", "")).strip()
+            if not link_ref:
+                break
+        return " ".join(links)
 
     return unit_code
 
