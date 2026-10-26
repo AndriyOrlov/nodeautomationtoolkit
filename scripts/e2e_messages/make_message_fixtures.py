@@ -230,7 +230,27 @@ def message_template(path, with_content):
     tpl.save(path)
 
 
+def calculation_template(path):
+    """Зразок «Розрахунок розсилки»: № з/п, код СЕДО, найменування, примітки."""
+    tpl = docx.Document()
+    para(tpl, "ВІДКРИТА ІНФОРМАЦІЯ", align=C)
+    para(tpl)
+    para(tpl, "РОЗРАХУНОК РОЗСИЛКИ", align=C)
+    para(tpl)
+    table = tpl.add_table(rows=2, cols=4)
+    table.style = "Table Grid"
+    for column, caption in enumerate(
+        ("№ з/п", "Код СЕДО", "Найменування підрозділу або посади особи", "Примітки")
+    ):
+        table.cell(0, column).text = caption
+    table.cell(1, 0).text = "1."
+    table.cell(1, 2).text = "{{кому_список}}"
+    para(tpl)
+    tpl.save(path)
+
+
 message_template(os.path.join(OUT, "message_cover.docx"), with_content=False)
+calculation_template(os.path.join(OUT, "message_calculation.docx"))
 message_template(os.path.join(OUT, "message_content.docx"), with_content=True)
 
 print("готово:", order_path)

@@ -8,7 +8,6 @@
 from __future__ import annotations
 
 import difflib
-import os
 import re
 import zipfile
 from dataclasses import dataclass, field

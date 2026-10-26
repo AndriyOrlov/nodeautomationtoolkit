@@ -166,6 +166,12 @@ class MessagesShellMixin:
             self.message_cover_template_path.get(),
         )
 
+    def select_message_calc_template(self):
+        self._pick_file(
+            self.message_calc_template_path, [("Word files", "*.docx *.doc")],
+            self.message_cover_template_path.get(),
+        )
+
     def select_message_output_folder(self):
         path = self.legacy.filedialog.askdirectory(
             initialdir=self._start_folder(self.message_out_folder.get(), self.doc_path.get())
@@ -281,6 +287,11 @@ class SettingsDialog(QDialog):
             ("Таблиця (Excel):", shell.excel_path, shell.select_excel),
             ("Зразок супроводу:", shell.message_cover_template_path, shell.select_message_cover_template),
             ("Зразок зі змістом:", shell.message_content_template_path, shell.select_message_content_template),
+            (
+                "Розрахунок розсилки:",
+                shell.message_calc_template_path,
+                shell.select_message_calc_template,
+            ),
             ("Папка результату:", shell.message_out_folder, shell.select_message_output_folder),
         )
         for row, (caption, variable, pick) in enumerate(rows):

@@ -17,7 +17,6 @@ from PySide6.QtWidgets import (
     QApplication,
     QFrame,
     QHBoxLayout,
-    QLabel,
     QMainWindow,
     QScrollArea,
     QTabBar,

@@ -16,7 +16,7 @@ _PKG_REL = "http://schemas.openxmlformats.org/package/2006/relationships"
 
 # Друкується Tkinter-генератором у журнал, щоб одразу було видно, що після
 # перезапуску завантажено актуальний вихідний модуль, а не старий процес/EXE.
-ROUTING_VERSION = "2026-09-29-v18-own-basis-continues-item"
+ROUTING_VERSION = "2026-10-26-v19-tck-reference-open"
 
 _ORDER_SIGNER_START_RE = re.compile(
     r"^\s*(?:т\.?\s*в\.?\s*о\.?|тимчасово\s+виконуюч(?:ий|а)?|"
@@ -180,7 +180,6 @@ def read_recipient_mapping(
     header_index = -1
     col_a_idx, col_b_idx = 0, 1
     col_c_idx, col_d_idx, col_e_idx, col_f_idx = -1, -1, -1, -1
-    has_explicit_abbreviation = False
 
     for index, row in enumerate(rows[:10]):
         row_norm = {cell.strip().casefold(): i for i, cell in enumerate(row) if cell.strip()}
@@ -193,7 +192,6 @@ def read_recipient_mapping(
                     col_b_idx = i
                 elif "скороч" in k or "абрев" in k:
                     col_c_idx = i
-                    has_explicit_abbreviation = True
                 elif "корпус" in k or k == "ак":
                     col_d_idx = i
                 elif "кому" in k or "адресат" in k or "отримувач" in k:
@@ -2230,13 +2228,6 @@ def map_military_units(
         if block["type"] != "item":
             continue
 
-        raw_text_clean = re.sub(
-            r"\b(?:передов\w*|запасн\w*|головн\w*|)?\s*"
-            r"(?:командн\w*\s+пункт\w*|пункт\w*\s+управління|ЗКП|ГКП|ППУ|КП)\s+",
-            "",
-            "\n".join(block["lines"]),
-            flags=re.IGNORECASE | re.UNICODE,
-        )
         full_item_text = "\n".join(block["lines"]).strip()
         block_raw_text = _get_item_main_text(block["lines"])
         block_replaced_lines = list(block["lines"])
@@ -2625,7 +2616,6 @@ def analyze_senders(
     """Аналізує відкритий наказ і формує відповідність [Відправник / ВЧ] -> [Список пунктів]."""
     res = map_military_units(text=text, mapping=mapping, default_prefix=default_sender_prefix)
     units_map = res.get("unit_paragraphs", {})
-    abbr_map = res.get("unit_abbr_map", {})
     sender_paragraphs: dict[str, list[str]] = {}
     table_rows = []
 
@@ -2678,7 +2668,6 @@ def split_by_senders(
     """Розділяє відкритий наказ на окремі блоки / витяги за відправниками."""
     res = map_military_units(text=text, mapping=mapping)
     units_map = res.get("unit_paragraphs", {})
-    abbr_map = res.get("unit_abbr_map", {})
     blocks: dict[str, str] = {}
     table_rows = []
 
@@ -2880,7 +2869,35 @@ def _is_tck_continuation(following: str) -> bool:
     return bool(re.match(r"[\s\-‐‑–—]*комплектуван", clean))
 
 
-def _replace_unit_reference_phrase(match: re.Match) -> str:
+#: Початок пункту наказу: номер «1.», «2.1.», «3)» на початку рядка.
+_ITEM_START_RE = re.compile(r"(?:^|\n)[ \t ]*\d{1,3}(?:\.\d{1,3})*[\.\)][ \t ]")
+_TCK_MENTION_RE = re.compile(r"комплектуван|тцк", re.IGNORECASE | re.UNICODE)
+
+
+def tck_mentioned(text: str) -> bool:
+    """Чи згадано в тексті ТЦК (стійко до м'якого переносу й латинських двійників)."""
+    clean = str(text or "").replace("\xad", "").translate(_LATIN_LOOKALIKES)
+    return bool(_TCK_MENTION_RE.search(clean))
+
+
+def _refers_to_tck_centre(match: re.Match, context_before: str = "") -> bool:
+    """Чи «цього самого центру» посилається на ТЦК, згаданий раніше в пункті.
+
+    ТЦК не шифрується (розд. 9.5.6), тож і зворот на нього лишається
+    «цього самого центру», а не «цієї самої військової частини». Дивимось лише
+    в межах поточного пункту: від його номера до звороту. `context_before` —
+    попередні абзаци того самого пункту, коли текст шифрується поабзацно.
+    """
+    if not re.search(r"центр\w*$", match.group(0), re.IGNORECASE):
+        return False
+    before = f"{context_before}\n{match.string[:match.start()]}"
+    starts = list(_ITEM_START_RE.finditer(before))
+    if starts:
+        before = before[starts[-1].start():]
+    return tck_mentioned(before)
+
+
+def _replace_unit_reference_phrase(match: re.Match, context_before: str = "") -> str:
     """Перетворює зворот-посилання на «…військової частини» у тому ж відмінку."""
     determiner_raw = match.group(1).lower()
     particle = match.group(2)
@@ -2891,6 +2908,8 @@ def _replace_unit_reference_phrase(match: re.Match) -> str:
         return match.group(0)
     lemma, case_label = lookup
     if _is_tck_continuation(match.string[match.end():match.end() + 40]):
+        return match.group(0)
+    if _refers_to_tck_centre(match, context_before):
         return match.group(0)
 
     # Неоднозначні короткі форми чіпаємо лише за наявності слова «сам…».
@@ -3672,7 +3691,6 @@ def calculate_order_extracts(
 
     res = map_military_units(text=body_text, mapping=mapping)
     units_map = res.get("unit_paragraphs", {})
-    abbr_map = res.get("unit_abbr_map", {})
     extracts_dict: dict[str, str] = {}
     table_rows = []
     summary_lines = []

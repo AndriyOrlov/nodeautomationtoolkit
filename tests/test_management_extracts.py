@@ -223,3 +223,54 @@ def test_saved_reports_restore_management_as_ui_only_green_row(tmp_path):
     assert saved["unmatched"] == []
     assert saved["routing"][0][0] == "Пункт 1."
     assert all(saved["found"].values())
+
+
+def test_control_reports_live_in_temp_not_in_output_folder(tmp_path, monkeypatch):
+    # У теці результату — лише «Розрахунок розсилки»; контрольні файли
+    # програма кладе в %TEMP% і читає звідти ж (вимога 26.10.2026).
+    import tempfile
+
+    generator = _load_generator()
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path / "temp"))
+    order = tmp_path / "Наказ № 8 від 01.10.2026.docx"
+    order.write_bytes(b"")
+    output = tmp_path / "Extracts_Output"
+    output.mkdir()
+    base = generator.sanitize_filename(order.stem)
+
+    routing = generator.control_report_path(str(output), "Контроль_маршрутизації", base)
+    assert Path(routing).parent.is_relative_to(tmp_path / "temp")
+    generator._save_table_to_excel(
+        routing,
+        ["Пункт", "Збіги з таблиці", "Застосовані правила", "Адресати з пункту",
+         "Адресати з контексту", "Підсумкові адресати"],
+        [("Пункт 1.", "—", "адресат знайдено", "—", "—", "—")],
+    )
+    saved = generator.load_saved_analysis_reports(str(order), str(output))
+    assert saved["routing"][0][0] == "Пункт 1."
+    assert not any(path.name.startswith("Контроль_") for path in output.iterdir())
+
+    # Інша тека результату з тим самим наказом — інша тимчасова тека.
+    other = generator.control_report_path(str(tmp_path / "інша"), "Контроль_маршрутизації", base)
+    assert Path(other).parent != Path(routing).parent
+
+
+def test_old_control_reports_are_cleaned_up(tmp_path):
+    import os
+    import time
+
+    generator = _load_generator()
+    old_folder = tmp_path / "aaaa"
+    old_folder.mkdir()
+    old_file = old_folder / "Контроль_маршрутизації_старий.xlsx"
+    old_file.write_bytes(b"x")
+    stale = time.time() - 40 * 86400
+    os.utime(old_file, (stale, stale))
+    fresh_folder = tmp_path / "bbbb"
+    fresh_folder.mkdir()
+    fresh_file = fresh_folder / "Контроль_маршрутизації_новий.xlsx"
+    fresh_file.write_bytes(b"x")
+
+    assert generator.cleanup_control_reports(str(tmp_path)) == 1
+    assert not old_folder.exists()
+    assert fresh_file.exists()

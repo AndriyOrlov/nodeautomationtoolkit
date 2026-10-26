@@ -5,9 +5,11 @@ from __future__ import annotations
 
 import os
 import sys
+import hashlib
 import json
 import re
 import shutil
+import tempfile
 import time
 from datetime import datetime
 from pathlib import Path
@@ -231,13 +233,77 @@ def _saved_xlsx_rows(path: str) -> list[tuple]:
         workbook.close()
 
 
+#: Контрольні файли, старші за цей строк, видаляються з %TEMP% при першому
+#: зверненні за сеанс — щоб тимчасова тека не росла роками.
+CONTROL_REPORTS_MAX_AGE_DAYS = 30
+_control_reports_cleaned = False
+
+
+def cleanup_control_reports(root: str, max_age_days: int = CONTROL_REPORTS_MAX_AGE_DAYS) -> int:
+    """Видаляє старі контрольні файли й порожні підтеки; повертає кількість файлів."""
+    cutoff = time.time() - max_age_days * 86400
+    removed = 0
+    if not os.path.isdir(root):
+        return 0
+    for name in os.listdir(root):
+        folder = os.path.join(root, name)
+        if not os.path.isdir(folder):
+            continue
+        for file_name in os.listdir(folder):
+            path = os.path.join(folder, file_name)
+            try:
+                if os.path.isfile(path) and os.path.getmtime(path) < cutoff:
+                    os.remove(path)
+                    removed += 1
+            except OSError:
+                continue  # файл відкритий у Excel — спробуємо наступного разу
+        try:
+            os.rmdir(folder)  # лише якщо тека спорожніла
+        except OSError:
+            pass
+    return removed
+
+
+def control_reports_folder(output_folder: str) -> str:
+    """Тимчасова тека для службових контрольних файлів одного результату.
+
+    У теці результату користувачу потрібен лише «Розрахунок розсилки»
+    (вимога 26.10.2026). Контроль маршрутизації, пропущених пунктів і складу
+    витягів програма читає сама (вкладки вікна), тому вони лежать у %TEMP%.
+    Окрема підтека на кожну теку результату: однакові назви наказів із різних
+    тек не перезаписують одна одну.
+    """
+    global _control_reports_cleaned
+    root = os.path.join(tempfile.gettempdir(), "GeneratorVytyagiv_control")
+    if not _control_reports_cleaned:
+        _control_reports_cleaned = True
+        cleanup_control_reports(root)
+    key = os.path.normcase(os.path.abspath(output_folder or "."))
+    digest = hashlib.sha1(key.encode("utf-8")).hexdigest()[:12]
+    folder = os.path.join(root, digest)
+    os.makedirs(folder, exist_ok=True)
+    return folder
+
+
+def control_report_path(output_folder: str, prefix: str, order_base: str) -> str:
+    """Шлях контрольного файлу `<prefix>_<наказ>.xlsx` у тимчасовій теці."""
+    return os.path.join(control_reports_folder(output_folder), f"{prefix}_{order_base}.xlsx")
+
+
 def load_saved_analysis_reports(order_path: str, output_folder: str) -> dict:
     """Завантажує збережені розсилку, пропуски й маршрутизацію для наказу."""
     order_base = sanitize_filename(os.path.splitext(os.path.basename(order_path))[0])
+
+    def control(prefix: str) -> str:
+        # Нове місце — %TEMP%; файли старих запусків лишились у теці результату.
+        path = control_report_path(output_folder, prefix, order_base)
+        legacy = os.path.join(output_folder, f"{prefix}_{order_base}.xlsx")
+        return path if os.path.isfile(path) or not os.path.isfile(legacy) else legacy
+
     paths = {
         "calculation": os.path.join(output_folder, f"Розрахунок_розсилки_{order_base}.xlsx"),
-        "unmatched": os.path.join(output_folder, f"Контроль_пропущених_пунктів_{order_base}.xlsx"),
-        "routing": os.path.join(output_folder, f"Контроль_маршрутизації_{order_base}.xlsx"),
+        "unmatched": control("Контроль_пропущених_пунктів"),
+        "routing": control("Контроль_маршрутизації"),
     }
     errors = []
 
@@ -1168,6 +1234,10 @@ def build_message_recipient_list(mapping: dict, routes: dict) -> list[str]:
     return groups["corps"] + groups["units"] + groups["tck"]
 
 
+#: Текст у {{кому_список}} супроводу, коли адресати — в окремому «Розрахунку розсилки».
+MESSAGE_BY_CALCULATION_TEXT = "Згідно з розрахунком розсилки"
+
+
 def message_skipped_item_lines(routes: dict) -> tuple[set[int], list[str]]:
     """Рядки наказу, які НЕ переносяться у зміст повідомлення.
 
@@ -1197,6 +1267,29 @@ def message_skipped_item_lines(routes: dict) -> tuple[set[int], list[str]]:
             if int(start) not in kept_heading_starts:
                 lines.update(range(int(start), int(end) + 1))
     return lines, [str(item.get("label", "")).strip() for item in skipped]
+
+
+_MESSAGE_ITEM_BREAK_RE = re.compile(r"^\s*(?:\d{1,3}(?:\.\d{1,3})*[\.\)]\s|§|Відповідно\b)")
+
+
+def message_item_contexts(paragraphs: list[str]) -> list[str]:
+    """Для кожного абзацу — текст попередніх абзаців ТОГО САМОГО пункту.
+
+    Зміст повідомлення шифрується поабзацно, а ТЦК може бути названо в одному
+    абзаці пункту, а «цього самого центру» — в наступному. Пункт закінчується
+    на порожньому абзаці, а новий починається з номера, «§» чи «Відповідно до»
+    (номер автонумерації Word у тексті абзацу відсутній — тоді межею є
+    порожній абзац між пунктами).
+    """
+    contexts = []
+    current: list[str] = []
+    for text in paragraphs:
+        if not text.strip() or _MESSAGE_ITEM_BREAK_RE.match(text):
+            current = []
+        contexts.append("\n".join(current))
+        if text.strip():
+            current.append(text)
+    return contexts
 
 
 def build_addressee_kind_text(groups: dict[str, list[str]]) -> str:
@@ -2145,6 +2238,8 @@ class App:
         # Конфігурація вкладки «Повідомлення».
         self.message_cover_template_path = tk.StringVar()
         self.message_content_template_path = tk.StringVar()
+        # Необов'язковий третій зразок — «Розрахунок розсилки» з {{кому_список}}.
+        self.message_calc_template_path = tk.StringVar()
         self.message_out_folder = tk.StringVar()
         self.message_executor = tk.StringVar()
 
@@ -2341,6 +2436,7 @@ class App:
 
                     self.message_cover_template_path.set(data.get("message_cover_template_path", ""))
                     self.message_content_template_path.set(data.get("message_content_template_path", ""))
+                    self.message_calc_template_path.set(data.get("message_calc_template_path", ""))
                     self.message_out_folder.set(data.get("message_out_folder", ""))
                     self.message_executor.set(data.get("message_executor", ""))
 
@@ -2388,6 +2484,7 @@ class App:
             "new_order_document_paths": list(self.new_order_document_paths),
             "message_cover_template_path": self.message_cover_template_path.get(),
             "message_content_template_path": self.message_content_template_path.get(),
+            "message_calc_template_path": self.message_calc_template_path.get(),
             "message_out_folder": self.message_out_folder.get(),
             "message_executor": self.message_executor.get(),
         }
@@ -2587,7 +2684,12 @@ class App:
             self.log("Відкриваємо шаблон витягу у Word для редагування...")
             word = win32com.client.DispatchEx("Word.Application")
             word.Visible = True
-            doc = word.Documents.Open(os.path.abspath(path))
+            try:
+                doc = word.Documents.Open(os.path.abspath(path))
+            except Exception:
+                # Інакше лишалося порожнє вікно Word без документа.
+                force_quit_word(word)
+                raise
             doc.Activate()
         except Exception as e:
             self.log(f"Помилка відкриття шаблону: {str(e)}")
@@ -2608,6 +2710,12 @@ class App:
         path = filedialog.askopenfilename(filetypes=[("Word files", "*.docx *.doc")])
         if path:
             self.message_content_template_path.set(path)
+            self.save_config()
+
+    def select_message_calc_template(self):
+        path = filedialog.askopenfilename(filetypes=[("Word files", "*.docx *.doc")])
+        if path:
+            self.message_calc_template_path.set(path)
             self.save_config()
 
     def select_message_output_folder(self):
@@ -2633,6 +2741,10 @@ class App:
             "• лише військові частини → «командирам військових частин»;\n"
             "• лише ТЦК → «начальникам ОТЦК та СП»;\n"
             "• і те, і те → «командирам військових частин та начальникам ОТЦК та СП».\n\n"
+            "Розрахунок розсилки (необов'язковий третій зразок): таблиця з "
+            "{{кому_список}} у рядку, як у супроводі; рядки нумеруються 1., 2., … "
+            "Якщо його вибрано, у супроводі в {{кому_список}} пишеться "
+            "«Згідно з розрахунком розсилки», а зайві заготовлені рядки прибираються.\n\n"
             "У шаблоні зі змістом:\n"
             "{{зміст_шифр}} — пункти наказу із заміною відкритих назв частин "
             "на шифри з Excel. Назви, які лишилися без збігу, виділяються жовтим.\n\n"
@@ -2806,7 +2918,9 @@ class App:
         return None
 
     @staticmethod
-    def _fill_recipient_slots(document, recipients: list[str]) -> tuple[int, int]:
+    def _fill_recipient_slots(
+        document, recipients: list[str], drop_unused_rows: bool = False
+    ) -> tuple[int, int]:
         """Заповнює кожен {{кому_список}} одним наступним адресатом.
 
         Теги зазвичай лежать у рядках таблиці поруч зі штампом. Тому список
@@ -2817,18 +2931,34 @@ class App:
         """
         slot_count = 0
         last_row_context = None
+        unused_rows = []
         find_obj = document.Content.Find
         find_obj.Text = "{{кому_список}}"
         iterations = 0
         while find_obj.Execute() and iterations < 500:
             iterations += 1
             found_range = find_obj.Parent.Duplicate
-            last_row_context = App._find_recipient_table_cell(document, found_range.Start) or last_row_context
+            row_context = App._find_recipient_table_cell(document, found_range.Start)
+            last_row_context = row_context or last_row_context
             value = recipients[slot_count] if slot_count < len(recipients) else ""
             find_obj.Parent.Text = value
+            if drop_unused_rows and not value and row_context:
+                unused_rows.append(row_context)
             slot_count += 1
             find_obj = document.Content.Find
             find_obj.Text = "{{кому_список}}"
+
+        # Заготовлені рядки, яким не дісталось адресата, прибираються, якщо в
+        # них більше нічого немає (супровід «згідно з розрахунком розсилки»).
+        for table, row_index, _ in sorted(
+            unused_rows, key=lambda context: (context[0].Range.Start, context[1]), reverse=True
+        ):
+            try:
+                row = table.Rows(row_index)
+                if not row.Range.Text.replace("\r", "").replace("\x07", "").strip():
+                    row.Delete()
+            except Exception:
+                continue
 
         if slot_count >= len(recipients) or last_row_context is None:
             return slot_count, max(0, len(recipients) - slot_count)
@@ -2869,6 +2999,43 @@ class App:
             # невміщені адресати як попередження, не вставляючи їх поверх штампа.
             return slot_count, len(recipients) - slot_count
         return slot_count, 0
+
+    @staticmethod
+    def _renumber_recipient_rows(document, recipients: list[str]) -> int:
+        """Номери «1.», «2.» … у рядках таблиці з адресатами.
+
+        `_fill_recipient_slots` копіює рядок разом з номером, тож у всіх рядках
+        стояло б «1.». Номер міняється лише в першій комірці рядка, де стоїть
+        число («1», «1.»); решта тексту й форматування лишаються. Автонумерацію
+        Word (номера в тексті комірки немає) не чіпаємо — Word рахує її сам.
+        """
+        def norm(value: str) -> str:
+            return " ".join(str(value or "").replace("\x07", " ").split())
+
+        wanted = {norm(recipient) for recipient in recipients if norm(recipient)}
+        changed = 0
+        for table in document.Tables:
+            counter = 0
+            try:
+                for row in table.Rows:
+                    cells = row.Cells
+                    texts = [norm(cells(index).Range.Text) for index in range(1, cells.Count + 1)]
+                    if not any(text in wanted for text in texts[1:]):
+                        continue
+                    counter += 1
+                    number = re.fullmatch(r"(\d{1,3})\.?", texts[0] if texts else "")
+                    if not number or number.group(1) == str(counter):
+                        continue
+                    find_obj = cells(1).Range.Find
+                    find_obj.Text = number.group(1)
+                    if find_obj.Execute():
+                        find_obj.Parent.Text = str(counter)
+                        changed += 1
+            except Exception:
+                # Таблиця з вертикально об'єднаними комірками не дає пройти
+                # рядки — номери в ній лишаються як є.
+                continue
+        return changed
 
     def _copy_order_content(self, doc, tag_range, content_source: dict) -> int:
         """Переносить зміст наказу у повідомлення РАЗОМ ІЗ ФОРМАТУВАННЯМ.
@@ -3182,14 +3349,15 @@ class App:
             paragraph_range = paragraph.Range
             spans.append((paragraph_range.Start, paragraph_range.Text or ""))
 
+        contexts = message_item_contexts([raw.rstrip("\r\x07") for _, raw in spans])
         highlighted = 0
         # Йдемо з кінця: правки не зсувають позиції попередніх абзаців.
-        for start, raw in reversed(spans):
+        for (start, raw), context_before in reversed(list(zip(spans, contexts))):
             core = raw.rstrip("\r\x07")
             if not core.strip():
                 continue
 
-            ciphered, _, _ = cipher_unit_names(core, mapping)
+            ciphered, _, _ = cipher_unit_names(core, mapping, context_before=context_before)
             ciphered = apply_ukrainian_typography(clean_duplicated_units(ciphered))
             # Мʼякий перенос посеред фрази зшивається САМЕ ТУТ — у повідомленні
             # довга відкрита назва стає трьома словами, і рядок, розірваний у
@@ -3423,6 +3591,7 @@ class App:
         encrypted_content: str = "",
         recipients: list[str] | None = None,
         content_source: dict | None = None,
+        number_recipient_rows: bool = False,
     ) -> tuple[int, int, int]:
         # Якщо результат уже відкритий у Word, зберегти його неможливо.
         # Перевіряємо це ДО всієї роботи й повідомляємо зрозуміло.
@@ -3465,7 +3634,11 @@ class App:
                 executor_bookmarks.append(bookmark_name)
             recipient_slots = recipient_overflow = 0
             if recipients is not None:
-                recipient_slots, recipient_overflow = self._fill_recipient_slots(doc, recipients)
+                recipient_slots, recipient_overflow = self._fill_recipient_slots(
+                    doc, recipients, drop_unused_rows=recipients == [MESSAGE_BY_CALCULATION_TEXT]
+                )
+                if number_recipient_rows:
+                    self._renumber_recipient_rows(doc, recipients)
             highlighted_count = 0
             if encrypted_content or content_source:
                 find_obj = doc.Content.Find
@@ -3734,12 +3907,19 @@ class App:
             cover_output = os.path.join(out_folder, f"Повідомлення_супровід{suffix}.docx")
             content_output = os.path.join(out_folder, f"Повідомлення_шифрований_зміст{suffix}.docx")
 
+            # Обрано зразок «Розрахунок розсилки» — адресати йдуть у нього, а в
+            # супроводі замість переліку пишеться фраза (вимога 26.10.2026).
+            calc_template = self.message_calc_template_path.get().strip()
+            if calc_template and not os.path.isfile(calc_template):
+                self.log(f"УВАГА: зразок розрахунку розсилки не знайдено: {calc_template}")
+                calc_template = ""
+            cover_recipients = [MESSAGE_BY_CALCULATION_TEXT] if calc_template else recipients
             _, recipient_slots, recipient_overflow = self._create_message_file(
                 word,
                 self.message_cover_template_path.get(),
                 cover_output,
                 replacements,
-                recipients=recipients,
+                recipients=cover_recipients,
             )
             highlights, _, _ = self._create_message_file(
                 word,
@@ -3749,19 +3929,32 @@ class App:
                 encrypted_content,
                 content_source=content_source,
             )
+            created = [cover_output, content_output]
+            if calc_template:
+                calc_output = os.path.join(out_folder, f"Повідомлення_розрахунок_розсилки{suffix}.docx")
+                _, recipient_slots, recipient_overflow = self._create_message_file(
+                    word,
+                    calc_template,
+                    calc_output,
+                    replacements,
+                    recipients=recipients,
+                    number_recipient_rows=True,
+                )
+                created.append(calc_output)
             if recipient_overflow:
                 self.log(
-                    f"УВАГА: у шаблоні супроводу {recipient_slots} комірок {{кому_список}}, "
+                    f"УВАГА: у шаблоні {'розрахунку розсилки' if calc_template else 'супроводу'} "
+                    f"{recipient_slots} комірок {{кому_список}}, "
                     f"але адресатів {len(recipients)}. Не вмістилося: {recipient_overflow}."
                 )
             self.save_config()
             self.log(
-                f"Повідомлення створено: {cover_output}; {content_output}. "
+                f"Повідомлення створено: {'; '.join(created)}. "
                 f"Адресатів: {len(recipients)}; жовтих позначок: {highlights}."
             )
             messagebox.showinfo(
                 "Успіх",
-                "Створено 2 повідомлення.\n\n"
+                f"Створено файлів: {len(created)}.\n\n"
                 f"Заповнено комірок {{кому_список}}: {min(recipient_slots, len(recipients))} з {len(recipients)}\n"
                 f"Невпізнаних назв, виділених жовтим: {highlights}\n"
                 f"Частин, яких немає в таблиці: {table_gaps['new_units']}\n"
@@ -3821,7 +4014,12 @@ class App:
             self.log_p2("Відкриваємо задню сторінку у Word для редагування...")
             word = win32com.client.DispatchEx("Word.Application")
             word.Visible = True
-            doc = word.Documents.Open(os.path.abspath(path))
+            try:
+                doc = word.Documents.Open(os.path.abspath(path))
+            except Exception:
+                # Інакше лишалося порожнє вікно Word без документа.
+                force_quit_word(word)
+                raise
             doc.Activate()
         except Exception as e:
             self.log_p2(f"Помилка відкриття задньої сторінки: {str(e)}")
@@ -4640,7 +4838,7 @@ class App:
 
         order_base = sanitize_filename(os.path.splitext(os.path.basename(self.doc_path.get()))[0])
         unmatched_items = map_res_extracts.get("unmatched_items", [])
-        unmatched_report = os.path.join(self.out_folder.get(), f"Контроль_пропущених_пунктів_{order_base}.xlsx")
+        unmatched_report = control_report_path(self.out_folder.get(), "Контроль_пропущених_пунктів", order_base)
         _save_table_to_excel(
             unmatched_report,
             ["Пункт", "Текст пункту", "Причина"],
@@ -4654,7 +4852,7 @@ class App:
         else:
             self.log(f"Контрольний файл створено: {unmatched_report} (пропущених пунктів немає)")
 
-        routing_report = os.path.join(self.out_folder.get(), f"Контроль_маршрутизації_{order_base}.xlsx")
+        routing_report = control_report_path(self.out_folder.get(), "Контроль_маршрутизації", order_base)
         routing_data = [
             (
                 item.get("label", ""),
@@ -4768,9 +4966,7 @@ class App:
             self.log(f"УВАГА: ТЦК не визначено або його ОТЦК відсутній у таблиці; витяг не буде створено: {tck_reference}")
 
         order_base = sanitize_filename(os.path.splitext(os.path.basename(self.doc_path.get()))[0])
-        routing_report = os.path.join(
-            self.out_folder.get(), f"Контроль_маршрутизації_{order_base}.xlsx"
-        )
+        routing_report = control_report_path(self.out_folder.get(), "Контроль_маршрутизації", order_base)
         routing_data = [
             (
                 item.get("label", ""),
@@ -4789,9 +4985,7 @@ class App:
         )
 
         unmatched_items = map_res.get("unmatched_items", [])
-        missing_report = os.path.join(
-            self.out_folder.get(), f"Контроль_пропущених_пунктів_{order_base}.xlsx"
-        )
+        missing_report = control_report_path(self.out_folder.get(), "Контроль_пропущених_пунктів", order_base)
         _save_table_to_excel(
             missing_report,
             ["Пункт", "Текст пункту", "Причина"],
@@ -4844,9 +5038,7 @@ class App:
         # Склад кожного витягу з рядками наказу, з яких береться пункт. Саме тут
         # видно причину задвоєного пункту: два записи з ОДНАКОВИМИ рядками або
         # шапка, чиї рядки перекриваються з рядками самого пункту.
-        composition_report = os.path.join(
-            self.out_folder.get(), f"Контроль_складу_витягів_{order_base}.xlsx"
-        )
+        composition_report = control_report_path(self.out_folder.get(), "Контроль_складу_витягів", order_base)
         composition_rows = []
         duplicate_spans = 0
         for unit_key, unit_data in {**units_data, **management_data}.items():
@@ -5459,11 +5651,6 @@ class App:
                 end_position = max(item_range.Start, item_range.End - 1)
                 return start_page, page_of(end_position)
 
-            signer_pattern = re.compile(
-                r"^\s*(?:командир|командувач|начальник|заступник|керівник|голова|директор|"
-                r"т\.?\s*в\.?\s*о\.?|тимчасово\s+виконуюч(?:ий|а)?)",
-                re.IGNORECASE,
-            )
 
             # Витяги управління формуються тим самим проходом і за тим самим
             # зразком: різниця лише в порожніх {{кому}}/{{куди}} та в тому, що

@@ -11,9 +11,7 @@
 
 from __future__ import annotations
 
-import os
 import re
-from pathlib import Path
 
 from nodeautomationtoolkit.core.definition import node
 from nodeautomationtoolkit.core.table_types import DataTable
@@ -26,7 +24,6 @@ from nodeautomationtoolkit.builtin_nodes.recipient_mapping import (
     _fix_military_typos,
     _table_cipher,
     _match_case,
-    _short_closed_code,
     _format_full_closed_unit_text,
     _mask_anaphoric_unit_references,
     _unit_name_signature,
@@ -663,6 +660,7 @@ def cipher_unit_names(
     fuzzy_match: bool = True,
     rules: str | list | dict | None = None,
     problems: list | None = None,
+    context_before: str = "",
 ) -> tuple[str, int, list]:
     """Замінює відкриті назви частин на шифри, НЕ змінюючи структуру рядків.
 
@@ -678,6 +676,10 @@ def cipher_unit_names(
     таблиці, не додає вигаданої ланки. Такі збіги дописуються в `problems`
     (якщо список передано), щоб генератор показав їх користувачу:
     `("no_cipher", назва)` або `("corps_missing", назва, стовпець D)`.
+
+    `context_before` — попередні абзаци того самого пункту, коли шифрується
+    окремий абзац: за ними видно, що «цього самого центру» — це ТЦК, згаданий
+    раніше, і зворот лишається відкритим.
     """
     if not text:
         return "", 0, []
@@ -788,7 +790,7 @@ def cipher_unit_names(
             replaced_count += len(matches)
 
             def _make_phrase_rep(r_func):
-                return lambda m: _match_case(m.group(0), r_func(m))
+                return lambda m: _match_case(m.group(0), r_func(m, context_before))
 
             text = pat.sub(_make_phrase_rep(replacer), text)
 

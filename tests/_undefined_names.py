@@ -95,7 +95,8 @@ def _loaded_names(node):
 
 
 def find_undefined_names(path):
-    tree = ast.parse(open(path, encoding="utf-8").read(), filename=str(path))
+    with open(path, encoding="utf-8") as handle:
+        tree = ast.parse(handle.read(), filename=str(path))
     module_names = _bound_names(tree) | set(dir(builtins)) | {"__file__", "__name__", "__doc__"}
 
     problems = []

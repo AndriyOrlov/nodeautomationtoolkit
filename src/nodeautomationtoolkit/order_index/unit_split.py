@@ -27,7 +27,7 @@ _NUMBER_RE = re.compile(
     rf"(?<![\w{_APOS}(/-])(?:[АAВB]\s?\d{{4}}\b|\d{{1,4}}(?:-?[{_LO}{_UP}]{{1,3}})?(?=\s)|_{{2,}})"
 )
 _NOT_UNIT_AFTER_NUMBER_RE = re.compile(
-    rf"\s*(?:категорі|розряд|клас|ліжок|тарифн|рок|р\.|ступен)", re.IGNORECASE
+    r"\s*(?:категорі|розряд|клас|ліжок|тарифн|рок|р\.|ступен)", re.IGNORECASE
 )
 _CAPITAL_WORD_RE = re.compile(rf"(?<=\s)[{_UP}][{_LO}{_APOS}-]")
 

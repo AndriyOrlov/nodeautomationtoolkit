@@ -11,7 +11,7 @@ import sys
 sys.stdout.reconfigure(encoding="utf-8")
 
 E2E = sys.argv[1]
-PROJECT = sys.argv[2] if len(sys.argv) > 2 else "."
+PROJECT = sys.argv[2] if len(sys.argv) > 2 and sys.argv[2] != "--calc" else "."
 PROJECT = os.path.abspath(PROJECT)
 os.chdir(PROJECT)
 sys.path.insert(0, os.path.join(PROJECT, "src"))
@@ -58,6 +58,10 @@ app.excel_path = Var(os.path.join(E2E, "mapping.xlsx"))
 app.doc_path = Var(order)
 app.message_cover_template_path = Var(os.path.join(E2E, "message_cover.docx"))
 app.message_content_template_path = Var(os.path.join(E2E, "message_content.docx"))
+# `--calc` — третій зразок «Розрахунок розсилки»; супровід тоді «згідно з розрахунком».
+app.message_calc_template_path = Var(
+    os.path.join(E2E, "message_calculation.docx") if "--calc" in sys.argv else ""
+)
 app.message_out_folder = Var(out_folder)
 app.message_executor = Var("Тест Тестенко 00-000")
 app.message_skip_internal_management = Var(True)

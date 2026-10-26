@@ -441,3 +441,57 @@ def test_same_tck_reference_is_not_turned_into_military_unit(text):
 def test_same_center_without_tck_still_becomes_military_unit():
     result, _, _ = cipher_unit_names("офіцера цього самого центру", _mapping("51 АК"))
     assert result == "офіцера цієї самої військової частини"
+
+
+# ── «цього самого центру» після ТЦК, названого раніше в пункті ─────────────
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "1. Капітана ТЕСТЕНКА, офіцера Прикладного районного територіального центру "
+        "комплектування та соціальної підтримки – НАЧАЛЬНИКОМ ВІДДІЛЕННЯ ЦЬОГО САМОГО ЦЕНТРУ.",
+        "1. Капітана ТЕСТЕНКА, офіцера Прикладного РТЦК та СП – начальником цього самого центру.",
+    ],
+)
+def test_reference_to_tck_named_earlier_in_item_stays_open(text):
+    # ТЦК не шифрується (9.5.6) — і зворот на нього лишається «центру».
+    result, _, _ = cipher_unit_names(text, _mapping("51 АК"))
+    assert result == text
+
+
+def test_tck_in_previous_item_does_not_keep_next_reference_open():
+    text = (
+        "1. Капітана ТЕСТЕНКА, офіцера Прикладного РТЦК та СП.\n"
+        "2. Майора ПРИКЛАДЕНКА, офіцера навчального центру – начальником цього самого центру."
+    )
+    result, _, _ = cipher_unit_names(text, _mapping("51 АК"))
+    assert "цієї самої військової частини" in result
+    assert "цього самого центру" not in result
+
+
+def test_tck_in_previous_paragraph_of_same_item_is_context():
+    import importlib.util
+    from pathlib import Path
+
+    spec = importlib.util.spec_from_file_location(
+        "generate_extracts_tck_context_tests",
+        Path(__file__).resolve().parents[1] / "generate_extracts.py",
+    )
+    generator = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(generator)
+    paragraphs = [
+        "1. Капітана ТЕСТЕНКА, офіцера Прикладного РТЦК та СП –",
+        "НАЧАЛЬНИКОМ ВІДДІЛЕННЯ ЦЬОГО САМОГО ЦЕНТРУ.",
+        "",
+        "Майора ПРИКЛАДЕНКА, офіцера навчального центру –",
+        "НАЧАЛЬНИКОМ ЦЬОГО САМОГО ЦЕНТРУ.",
+    ]
+    contexts = generator.message_item_contexts(paragraphs)
+    results = [
+        cipher_unit_names(text, _mapping("51 АК"), context_before=context)[0]
+        for text, context in zip(paragraphs, contexts)
+    ]
+    assert results[1] == "НАЧАЛЬНИКОМ ВІДДІЛЕННЯ ЦЬОГО САМОГО ЦЕНТРУ."
+    # Після порожнього абзацу — новий пункт: ТЦК попереднього не рахується.
+    assert results[4] == "НАЧАЛЬНИКОМ ЦІЄЇ САМОЇ ВІЙСЬКОВОЇ ЧАСТИНИ."
