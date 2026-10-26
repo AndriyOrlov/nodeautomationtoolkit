@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import re
+from functools import lru_cache
 import zipfile
 from pathlib import Path
 from xml.etree import ElementTree as ET
@@ -517,6 +518,9 @@ def _continues_unfinished_line(previous_line: str) -> bool:
     return bool(text) and text[-1] not in ".:;!?"
 
 
+# Готовий вираз кешується: вбудований кеш `re` тримає лише 512 виразів, і на
+# таблиці з сотнями рядків кожен прохід компілював їх наново.
+@lru_cache(maxsize=16384)
 def _build_unit_fuzzy_pattern(open_name: str) -> re.Pattern:
     """
     Будує нечіткий регулярний вираз для пошуку назви військової частини у будь-яких відмінках.
@@ -1130,6 +1134,9 @@ def _extract_tck_region_hints(text: str) -> list[str]:
     return hints
 
 
+# Чиста функція рядка; кешується, бо `_find_corps_entry` викликає її
+# для кожного рядка таблиці на кожну частину (було O(рядків²) на абзац).
+@lru_cache(maxsize=8192)
 def _extract_corps_abbr(corps_str: str) -> str:
     """Витягує скорочену назву корпусу (напр. '25 армійський корпус' -> '25АК')."""
     clean = str(corps_str).strip()
@@ -1189,6 +1196,9 @@ def _auto_abbreviate_unit_name(open_name: str) -> str:
     return clean
 
 
+# Чиста функція рядка; кешується, бо `_find_corps_entry` викликає її
+# для кожного рядка таблиці на кожну частину (було O(рядків²) на абзац).
+@lru_cache(maxsize=8192)
 def _norm_corps_token(value: str) -> str:
     return re.sub(r"\s+", " ", str(value or "")).strip().casefold()
 

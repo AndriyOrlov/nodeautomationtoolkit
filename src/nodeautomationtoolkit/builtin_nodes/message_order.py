@@ -498,35 +498,33 @@ def find_content_start_line(text: str) -> int:
     return 0
 
 
-def cipher_unit_names(
-    text: str = "",
-    mapping: dict | None = None,
-    fuzzy_match: bool = True,
-    rules: str | list | dict | None = None,
-    problems: list | None = None,
-) -> tuple[str, int, list]:
-    """Замінює відкриті назви частин на шифри, НЕ змінюючи структуру рядків.
+# Підготовка патернів залежить лише від таблиці, а `cipher_unit_names` у
+# повідомленні викликається на КОЖЕН абзац. Раніше все будувалося заново щоразу
+# (сотні регулярних виразів і розвʼязування стовпця D на абзац) — на слабкому
+# ПК генерація тягнулася хвилинами. Кеш на одну таблицю за її вмістом
+# (відбитком), а не за обʼєктом: `generate_decision_order` передає копію тієї
+# самої таблиці. Інший вміст — будуємо заново.
+_PREPARED_CIPHER_CACHE: dict = {}
 
-    На відміну від `generate_decision_order`, не шукає початок змістовної
-    частини й не нормалізує порожні рядки. Саме тому придатна для обробки
-    ОКРЕМОГО абзацу, скопійованого з наказу разом із форматуванням — так
-    зміст повідомлення переноситься тим самим способом, що й у витягах.
 
-    Повертає `(текст, кількість замін, рядки звіту)`.
+def _mapping_fingerprint(mapping: dict | None) -> tuple:
+    return tuple(keep_open_names_of(mapping)), tuple(
+        (str(key), tuple(sorted((str(k), str(v)) for k, v in value.items())) if isinstance(value, dict) else str(value))
+        for key, value in (mapping or {}).items()
+    )
 
-    Шифр береться СТРОГО з таблиці (розд. 9.5.7): рядок із порожнім
-    стовпцем B нічого не шифрує, а корпус зі стовпця D, якого немає в
-    таблиці, не додає вигаданої ланки. Такі збіги дописуються в `problems`
-    (якщо список передано), щоб генератор показав їх користувачу:
-    `("no_cipher", назва)` або `("corps_missing", назва, стовпець D)`.
-    """
-    if not text:
-        return "", 0, []
 
-    # Описки виправляються ЛИШЕ для пошуку: у документ іде текст наказу як є,
-    # змінюються тільки знайдені назви частин.
-    source_text = text
-    search_text, source_starts, source_ends = _normalize_typos_with_offsets(source_text)
+def _prepare_cipher_patterns(mapping: dict | None, fuzzy_match: bool) -> tuple:
+    fingerprint = _mapping_fingerprint(mapping)
+    cached = _PREPARED_CIPHER_CACHE.get(fuzzy_match)
+    if cached is not None and cached[0] == fingerprint:
+        return cached[1]
+    prepared = _build_cipher_patterns(mapping, fuzzy_match)
+    _PREPARED_CIPHER_CACHE[fuzzy_match] = (fingerprint, prepared)
+    return prepared
+
+
+def _build_cipher_patterns(mapping: dict | None, fuzzy_match: bool) -> tuple:
     mapping_dict = {}
     for key, value in (mapping or {}).items():
         clean_key = _fix_military_typos(str(key))
@@ -537,9 +535,6 @@ def cipher_unit_names(
             mapping_dict[clean_key] = clean_value
         else:
             mapping_dict[clean_key] = value
-
-    replaced_count = 0
-    report_rows = []
 
     # Ядро назви береться лише тоді, коли воно однозначне: не збігається з
     # повною назвою іншого рядка й не повторюється в кількох рядках.
@@ -640,6 +635,42 @@ def cipher_unit_names(
         for row in patterns_to_apply
         if row[0] and row[7] and re.search(r"\d", str(row[6]))
     ]
+
+    return mapping_dict, patterns_to_apply, nested_candidates
+
+
+def cipher_unit_names(
+    text: str = "",
+    mapping: dict | None = None,
+    fuzzy_match: bool = True,
+    rules: str | list | dict | None = None,
+    problems: list | None = None,
+) -> tuple[str, int, list]:
+    """Замінює відкриті назви частин на шифри, НЕ змінюючи структуру рядків.
+
+    На відміну від `generate_decision_order`, не шукає початок змістовної
+    частини й не нормалізує порожні рядки. Саме тому придатна для обробки
+    ОКРЕМОГО абзацу, скопійованого з наказу разом із форматуванням — так
+    зміст повідомлення переноситься тим самим способом, що й у витягах.
+
+    Повертає `(текст, кількість замін, рядки звіту)`.
+
+    Шифр береться СТРОГО з таблиці (розд. 9.5.7): рядок із порожнім
+    стовпцем B нічого не шифрує, а корпус зі стовпця D, якого немає в
+    таблиці, не додає вигаданої ланки. Такі збіги дописуються в `problems`
+    (якщо список передано), щоб генератор показав їх користувачу:
+    `("no_cipher", назва)` або `("corps_missing", назва, стовпець D)`.
+    """
+    if not text:
+        return "", 0, []
+
+    # Описки виправляються ЛИШЕ для пошуку: у документ іде текст наказу як є,
+    # змінюються тільки знайдені назви частин.
+    source_text = text
+    search_text, source_starts, source_ends = _normalize_typos_with_offsets(source_text)
+    mapping_dict, patterns_to_apply, nested_candidates = _prepare_cipher_patterns(mapping, fuzzy_match)
+    replaced_count = 0
+    report_rows = []
 
     def _nested_chain(matched: str, outer_name: str, outer_cipher: str) -> str:
         """Ланки частин, назви яких записано в самій клітинці A знайденого рядка.

@@ -311,22 +311,26 @@ def remove_page_breaks_in_range(doc, start: int, end: int) -> int:
     абзац пропускали цілком, і зникав його текст (біографія на межі сторінок).
     Повертає новий кінець діапазону.
     """
+    # Кінець беремо з самого діапазону, а не «мінус один»: Word при видаленні
+    # розриву буває вставляє пробіл («розумне вирізання»), і рахунок
+    # збивався на символ — наступний абзац вставлявся ПЕРЕД знаком абзацу
+    # попереднього, а той втрачав відступ і порожній рядок після себе.
+    container = doc.Range(start, end)
     for _ in range(100):
-        if "\x0c" not in (doc.Range(start, end).Text or ""):
+        if "\x0c" not in (container.Text or ""):
             break
         found = False
         for code in ("^m", "^b"):
-            search = doc.Range(start, end)
+            search = container.Duplicate
             finder = search.Find
             finder.ClearFormatting()
             if finder.Execute(FindText=code, MatchWildcards=False, Forward=True, Wrap=0):
                 search.Delete()
-                end -= 1
                 found = True
                 break
         if not found:
             break
-    return end
+    return container.End
 
 
 def read_document_text(doc, normalize: bool = True, bio_lines: set | None = None) -> str:
@@ -1878,8 +1882,14 @@ def _carry_source_formatting(doc, start: int, end: int, source_paragraph) -> Non
     `9999999` — такі значення пропускаємо: у ньому шрифти вже задані явно
     й перенеслися разом із `FormattedText`.
     """
-    source_font = source_paragraph.Range.Font
-    source_format = source_paragraph.Range.ParagraphFormat
+    font_values, geometry = _read_source_formatting(source_paragraph.Range)
+    _apply_carried_formatting(doc, start, end, font_values, geometry)
+
+
+def _read_source_formatting(source_range) -> tuple[dict, dict]:
+    """Діючі шрифт і геометрія абзацу наказу (див. `_carry_source_formatting`)."""
+    source_font = source_range.Font
+    source_format = source_range.ParagraphFormat
 
     font_values = {}
     try:
@@ -1901,24 +1911,30 @@ def _carry_source_formatting(doc, start: int, end: int, source_paragraph) -> Non
             geometry[prop] = getattr(source_format, prop)
         except Exception:
             pass
+    return font_values, geometry
 
+
+def _apply_carried_formatting(doc, start: int, end: int, font_values: dict, geometry: dict) -> None:
+    """Записує прочитане `_read_source_formatting` у діапазон результату."""
     destination = doc.Range(start, end)
     for prop, value in font_values.items():
         try:
             setattr(destination.Font, prop, value)
         except Exception:
             pass
-    for index in range(1, destination.Paragraphs.Count + 1):
-        dest_format = destination.Paragraphs(index).Range.ParagraphFormat
+    # `ParagraphFormat` діапазону діє на ВСІ його абзаци — одне звернення до
+    # Word замість `Paragraphs(i)` на кожен абзац (на слабкому ПК це й було
+    # головним гальмом повідомлень).
+    dest_format = destination.ParagraphFormat
+    try:
+        dest_format.PageBreakBefore = False
+    except Exception:
+        pass
+    for prop, value in geometry.items():
         try:
-            dest_format.PageBreakBefore = False
+            setattr(dest_format, prop, value)
         except Exception:
             pass
-        for prop, value in geometry.items():
-            try:
-                setattr(dest_format, prop, value)
-            except Exception:
-                pass
 
 
 # =============================================================================
@@ -2851,12 +2867,37 @@ class App:
         insert_point = tag_range.Paragraphs(1).Range.Start
         tag_range.Paragraphs(1).Range.Delete()
         content_start = insert_point
+        # Формат кожного абзацу читаємо одразу, а пишемо ПІСЛЯ копіювання —
+        # суцільними відрізками з однаковим форматом: у наказі більшість
+        # пунктів оформлені однаково, і замість ~10 звернень на абзац
+        # виходить кілька на весь зміст. Пізніші вставки йдуть ПІСЛЯ вже
+        # записаних меж, тож ті не зсуваються.
+        carried: list[tuple[int, int, dict, dict]] = []
         try:
             skip_paragraphs = content_source.get("skip_paragraphs") or set()
+            # `Paragraphs(i)` щоразу проходить документ із початку — цикл був
+            # квадратичним. Беремо перший абзац один раз і йдемо `Next()`.
+            next_paragraph = source_doc.Paragraphs(first_para)
+            span_range = source_doc.Range(
+                next_paragraph.Range.Start, source_doc.Paragraphs(last_para).Range.End
+            )
+            if span_range.Tables.Count == 0:
+                # Без таблиць зміст копіюється суцільними блоками — одне
+                # `FormattedText` на блок замість одного на абзац. З таблицями
+                # лишається поабзацний шлях нижче: блок відтворив би таблицю,
+                # а поабзацний — ні, і результат змінився б.
+                insert_point = self._copy_order_blocks(
+                    doc, insert_point, next_paragraph, first_para, last_para, skip_paragraphs
+                )
+                next_paragraph = None
             for p_index in range(first_para, last_para + 1):
+                if next_paragraph is None:
+                    break
+                source_paragraph = next_paragraph
+                if p_index < last_para:
+                    next_paragraph = source_paragraph.Next()
                 if p_index in skip_paragraphs:
                     continue
-                source_paragraph = source_doc.Paragraphs(p_index)
                 source_range = source_paragraph.Range.Duplicate
                 source_text = source_range.Text or ""
                 if is_page_break_only_text(source_text):
@@ -2864,12 +2905,16 @@ class App:
                 destination = doc.Range(insert_point, insert_point)
                 destination.FormattedText = source_range.FormattedText
                 paragraph_start, insert_point = destination.Start, destination.End
-                _carry_source_formatting(
-                    doc, paragraph_start, insert_point, source_paragraph
-                )
+                font_values, geometry = _read_source_formatting(source_range)
                 if "\x0c" in source_text:
                     # Сам розрив прибираємо, текст абзацу лишається.
                     insert_point = remove_page_breaks_in_range(doc, paragraph_start, insert_point)
+                if carried and carried[-1][1] == paragraph_start and carried[-1][2:] == (font_values, geometry):
+                    carried[-1] = (carried[-1][0], insert_point, font_values, geometry)
+                else:
+                    carried.append((paragraph_start, insert_point, font_values, geometry))
+            for run_start, run_end, font_values, geometry in carried:
+                _apply_carried_formatting(doc, run_start, run_end, font_values, geometry)
         except Exception as error:
             # Частина абзаців уже вставлена — повертатись до простого тексту
             # не можна, інакше зміст задвоївся б.
@@ -2908,6 +2953,80 @@ class App:
                 pass
         return highlighted
 
+    @staticmethod
+    def _copy_order_blocks(doc, insert_point, first_paragraph, first_para, last_para, skip_paragraphs) -> int:
+        """Копіює абзаци наказу суцільними блоками; повертає новий кінець.
+
+        Блок обривається на пропущеному абзаці (внутрішнє переміщення) й на
+        абзаці, де є лише розрив сторінки, — так само, як у поабзацному шляху.
+        Формат кожного абзацу переноситься явно (`_carry_source_formatting`):
+        якщо в блоці він однаковий — одним записом на блок, інакше поабзацно,
+        за зсувом від початку блоку (FormattedText копіює текст 1-в-1).
+        """
+        blocks: list[list[tuple[int, int, object, bool]]] = []
+        current: list[tuple[int, int, object, bool]] = []
+        paragraph = first_paragraph
+        for p_index in range(first_para, last_para + 1):
+            source_paragraph = paragraph
+            if p_index < last_para:
+                paragraph = source_paragraph.Next()
+            if p_index in skip_paragraphs:
+                if current:
+                    blocks.append(current)
+                current = []
+                continue
+            source_range = source_paragraph.Range
+            source_text = source_range.Text or ""
+            if is_page_break_only_text(source_text):
+                if current:
+                    blocks.append(current)
+                current = []
+                continue  # абзац-розрив сторінки з наказу не переносимо
+            current.append((source_range.Start, source_range.End, source_range, "\x0c" in source_text))
+        if current:
+            blocks.append(current)
+
+        source_doc = first_paragraph.Range.Document
+        for block in blocks:
+            source_start, source_end = block[0][0], block[-1][1]
+            source_block = source_doc.Range(source_start, source_end)
+            destination = doc.Range(insert_point, insert_point)
+            destination.FormattedText = source_block.FormattedText
+            block_start, insert_point = destination.Start, destination.End
+
+            block_fonts, block_geometry = _read_source_formatting(source_block)
+            uniform = (
+                {"Name", "Size"} <= set(block_fonts)
+                and len(block_geometry) == 4
+                and all(value != 9999999 for value in block_geometry.values())  # wdUndefined
+            )
+            if uniform:
+                _apply_carried_formatting(doc, block_start, insert_point, block_fonts, block_geometry)
+            elif insert_point - block_start == source_end - source_start:
+                runs: list[tuple[int, int, dict, dict]] = []
+                for start, end, source_range, _has_break in block:
+                    font_values, geometry = _read_source_formatting(source_range)
+                    run_start = block_start + start - source_start
+                    run_end = block_start + end - source_start
+                    if runs and runs[-1][1] == run_start and runs[-1][2:] == (font_values, geometry):
+                        runs[-1] = (runs[-1][0], run_end, font_values, geometry)
+                    else:
+                        runs.append((run_start, run_end, font_values, geometry))
+                for run_start, run_end, font_values, geometry in runs:
+                    _apply_carried_formatting(doc, run_start, run_end, font_values, geometry)
+            else:
+                # Довжина не збіглася — межі абзаців за зсувом не визначити.
+                # Парою «абзац наказу ↔ абзац результату» за порядком.
+                pasted = [item.Range for item in doc.Range(block_start, insert_point).Paragraphs]
+                for (start, end, source_range, _has_break), target in zip(block, pasted):
+                    font_values, geometry = _read_source_formatting(source_range)
+                    _apply_carried_formatting(doc, target.Start, target.End, font_values, geometry)
+
+            if any(has_break for *_rest, has_break in block):
+                # Сам розрив прибираємо, текст абзацу лишається.
+                insert_point = remove_page_breaks_in_range(doc, block_start, insert_point)
+        return insert_point
+
     def _apply_message_layout_rules(self, doc, content_start: int, content_end: int) -> None:
         """Нерозривність блоків і заповнення сторінки — як у витягах.
 
@@ -2925,9 +3044,11 @@ class App:
         content_range.ParagraphFormat.KeepWithNext = False
         spans = []
         list_numbers = []
+        texts = []
         for paragraph in content_range.Paragraphs:
             paragraph_range = paragraph.Range
             spans.append((paragraph_range.Start, paragraph_range.End))
+            texts.append(paragraph_range.Text)
             try:
                 list_numbers.append(str(paragraph_range.ListFormat.ListString or ""))
             except Exception:
@@ -2951,16 +3072,17 @@ class App:
                 return "heading"
             return "continuation"
 
-        kinds = []
-        for (start, end), list_number in zip(spans, list_numbers):
-            kinds.append(paragraph_kind(doc.Range(start, end).Text, list_number))
+        kinds = [paragraph_kind(text, list_number) for text, list_number in zip(texts, list_numbers)]
+
+        # KeepTogether (непорожні абзаци) і KeepWithNext рахуємо для кожного
+        # абзацу, а пишемо суцільними відрізками однакових значень — одне
+        # звернення до Word на відрізок замість кількох на кожен абзац.
+        keep_flags = [False] * len(spans)
 
         # Останній абзац кожної групи «пункт + біографія» не тягне наступний.
-        for index, (start, end) in enumerate(spans):
+        for index in range(len(spans)):
             if kinds[index] == "blank":
                 continue
-            paragraph_format = doc.Range(start, end).ParagraphFormat
-            paragraph_format.KeepTogether = True
 
             next_meaningful = next(
                 (j for j in range(index + 1, len(kinds)) if kinds[j] != "blank"), None
@@ -2973,22 +3095,38 @@ class App:
                 # Пункт тримає свій біографічний блок; новий пункт або шапка
                 # починають окрему групу.
                 keep_with_next = kinds[next_meaningful] == "continuation"
-            paragraph_format.KeepWithNext = keep_with_next
+            keep_flags[index] = keep_with_next
 
             # Порожній абзац після шапки не повинен розривати її зв'язок із
             # першим пунктом. Порожній абзац після завершеного пункту, навпаки,
             # лишається дозволеною точкою розриву між двома пунктами.
             gap_end = next_meaningful if next_meaningful is not None else len(kinds)
             for blank_index in range(index + 1, gap_end):
-                doc.Range(*spans[blank_index]).ParagraphFormat.KeepWithNext = keep_with_next
+                keep_flags[blank_index] = keep_with_next
+
+        # KeepWithNext скинуто на False вище, тож пишемо лише відрізки з True.
+        def write_true_runs(flags: list[bool], prop: str) -> None:
+            run_start = None
+            for index, flag in enumerate(flags + [False]):
+                if flag and run_start is None:
+                    run_start = index
+                elif not flag and run_start is not None:
+                    paragraph_format = doc.Range(spans[run_start][0], spans[index - 1][1]).ParagraphFormat
+                    setattr(paragraph_format, prop, True)
+                    run_start = None
+
+        write_true_runs([kind != "blank" for kind in kinds], "KeepTogether")
+        write_true_runs(keep_flags, "KeepWithNext")
 
         # Заповнення сторінки: найбільший інтервал із діапазону, що дає
-        # найменшу кількість сторінок.
+        # найменшу кількість сторінок. Інтервал однаковий для всіх абзаців,
+        # тож він ставиться на весь зміст двома зверненнями, а не 2×N.
+        spacing_range = doc.Range(spans[0][0], spans[-1][1]) if spans else content_range
+
         def set_spacing(points: float) -> None:
-            for start, end in spans:
-                fmt = doc.Range(start, end).ParagraphFormat
-                fmt.LineSpacingRule = 4  # wdLineSpaceExactly
-                fmt.LineSpacing = points
+            fmt = spacing_range.ParagraphFormat
+            fmt.LineSpacingRule = 4  # wdLineSpaceExactly
+            fmt.LineSpacing = points
 
         best_points = 16.0
         best_pages = None
@@ -3007,15 +3145,16 @@ class App:
     def _cipher_inserted_content(doc, content_start: int, content_end: int, mapping: dict) -> int:
         """Шифрує вставлені абзаци поабзацно, зберігаючи їх форматування."""
         content_range = doc.Range(content_start, content_end)
-        spans = [
-            (content_range.Paragraphs(i).Range.Start, content_range.Paragraphs(i).Range.End)
-            for i in range(1, content_range.Paragraphs.Count + 1)
-        ]
+        # Один прохід колекцією: `Paragraphs(i)` у циклі квадратичний, а текст
+        # читаємо там само, без другого діапазону на кожен абзац.
+        spans = []
+        for paragraph in content_range.Paragraphs:
+            paragraph_range = paragraph.Range
+            spans.append((paragraph_range.Start, paragraph_range.Text or ""))
 
         highlighted = 0
         # Йдемо з кінця: правки не зсувають позиції попередніх абзаців.
-        for start, end in reversed(spans):
-            raw = doc.Range(start, end).Text or ""
+        for start, raw in reversed(spans):
             core = raw.rstrip("\r\x07")
             if not core.strip():
                 continue
