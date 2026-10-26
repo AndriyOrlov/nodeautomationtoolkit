@@ -498,6 +498,15 @@ from nodeautomationtoolkit.builtin_nodes.typography import (  # noqa: E402
 #: Пункт про смерть / загибель: лише йому дозволено шрифт менший за 14, якщо
 #: він не вміщується на сторінку (користувач, 29.09.2026). Розміри — по черзі.
 DEATH_ITEM_FONT_SIZES = (13, 12)
+
+# Додатковий прохід стиснення витягу, який після підбору інтервалу 16 → 14 пт
+# усе ще займає більше сторінок, ніж міг би (користувач, 26.10.2026: «є моменти,
+# коли можна втиснути все на 1 сторінку»). Спершу зменшуються лише ПОРОЖНІ рядки
+# між пунктами, потім — і текст, але не нижче 13 пт: менший точний інтервал при
+# шрифті 14 обрізає верх великих літер («Й», «Ї»). Прохід приймається лише тоді,
+# коли сторінок справді стає менше; інакше витяг лишається як був.
+EXTRA_BLANK_SPACINGS = (13.0, 12.0, 11.0, 10.0, 9.0, 8.0, 7.0, 6.0)
+EXTRA_TEXT_SPACINGS = (13.75, 13.5, 13.25, 13.0)
 _DEATH_ITEM_RE = re.compile(r"загинув|загинула|загибел|помер(?:ла)?\b|смерт", re.IGNORECASE)
 
 
@@ -6176,6 +6185,70 @@ class App:
                             f"  ℹ️ {cipher}: точний інтервал {chosen_spacing} пт — "
                             f"сторінок: {pages_count}, пунктів на першій: {items_on_first}."
                         )
+
+                    if pages_count > 1:
+                        lower, upper = spacing_bounds()
+                        blank_formats = []
+                        if lower is not None and upper is not None and upper > lower:
+                            for paragraph in doc.Range(lower, upper).Paragraphs:
+                                if is_blank_paragraph(paragraph):
+                                    blank_formats.append(paragraph.Range.ParagraphFormat)
+
+                        def set_blank_spacing(points):
+                            for blank_format in blank_formats:
+                                blank_format.LineSpacingRule = 4  # wdLineSpaceExactly
+                                blank_format.LineSpacing = points
+
+                        def pages_now():
+                            doc.Repaginate()
+                            return doc.ComputeStatistics(2)  # wdStatisticPages
+
+                        squeezed = None
+                        # Рівні тексту від підібраного вниз. На кожному спершу
+                        # одна перевірка з найменшими порожніми рядками: не
+                        # вміщується навіть так — цей рівень відкидаємо одразу.
+                        # Вміщується — двійковим пошуком беремо НАЙБІЛЬШІ порожні
+                        # рядки, з якими ще вміщується: стискаємо рівно настільки,
+                        # наскільки треба, а не до межі.
+                        for text_points in (chosen_spacing, *(
+                            points for points in EXTRA_TEXT_SPACINGS if points < chosen_spacing
+                        )):
+                            if text_points != chosen_spacing:
+                                apply_exact_line_spacing(text_points)
+                            blank_grid = [text_points] + [
+                                points for points in EXTRA_BLANK_SPACINGS if points < text_points
+                            ] if blank_formats else [text_points]
+                            set_blank_spacing(blank_grid[-1])
+                            if pages_now() >= pages_count:
+                                continue
+                            low, high = 0, len(blank_grid) - 1  # high свідомо вміщується
+                            while low < high:
+                                middle = (low + high) // 2
+                                set_blank_spacing(blank_grid[middle])
+                                if pages_now() < pages_count:
+                                    high = middle
+                                else:
+                                    low = middle + 1
+                            set_blank_spacing(blank_grid[low])
+                            if pages_now() >= pages_count:
+                                # Word виявився немонотонним — гарантоване значення.
+                                set_blank_spacing(blank_grid[-1])
+                                pages_now()
+                                low = len(blank_grid) - 1
+                            squeezed = (text_points, blank_grid[low])
+                            break
+                        if squeezed is None:
+                            # Не допомогло — повертаємо підібраний інтервал.
+                            apply_exact_line_spacing(chosen_spacing)
+                            pages_now()
+                        else:
+                            chosen_spacing = squeezed[0]
+                            new_pages = doc.ComputeStatistics(2)
+                            self.log(
+                                f"  🗜 {cipher}: стиснуто до {new_pages} стор. замість {pages_count} — "
+                                f"текст {squeezed[0]} пт, порожні рядки {squeezed[1]} пт."
+                            )
+                            pages_count = new_pages
 
                     # Виняток із правила «шрифт витягу — 14» (користувач, 29.09.2026):
                     # ЛИШЕ пункт про смерть / загибель, який і після підбору
