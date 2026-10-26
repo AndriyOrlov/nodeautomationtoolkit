@@ -41,3 +41,6 @@ python/
 positions.csv
 
 .claude/settings.local.json
+
+# Налаштування окремої програми повідомлень: шляхи й виконавець
+messages_config.json
