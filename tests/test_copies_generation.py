@@ -176,37 +176,27 @@ def test_extract_unbreakable_chain_logic():
     assert keep_with_next_flags[chain_end_idx] is False
 
 
-def _sheets_2up(pages):
-    """Аркуші при друку «2 на 1» за правилами збирання витягів."""
+def _pages_2up(pages):
+    """Логічні сторінки при друку «2 на 1» за правилами збирання витягів."""
     current = 0
-    for index, count in enumerate(pages):
+    for count in pages:
         if count > 1 and current % 2:
             current += 1  # багатосторінковий — з нового аркуша
         current += count
-        next_single = index + 1 < len(pages) and pages[index + 1] <= 1
-        if count > 1 and current % 2 and not next_single:
-            current += 1
-    return (current + 1) // 2
+        if count > 1 and current % 2:
+            current += 1  # зворот останнього аркуша лишається порожнім
+    return current
 
 
-def test_order_extracts_for_2up_fills_free_halves_with_singles():
+def test_order_extracts_for_2up_puts_multipage_first():
     from generate_extracts import order_extracts_for_2up
 
-    extracts = [("a", 1), ("b", 3), ("c", 1), ("d", 2), ("e", 3), ("f", 1)]
+    extracts = [("a", 1), ("b", 3), ("c", 1), ("d", 2), ("e", 1), ("f", 3)]
     ordered = order_extracts_for_2up(extracts)
-    assert sorted(ordered) == sorted(extracts)
-    assert [name for name, _ in ordered] == ["b", "a", "e", "c", "d", "f"]
-    assert _sheets_2up([pages for _, pages in ordered]) == 6
-
-
-def test_reordering_saves_a_sheet_when_two_odd_extracts_meet():
-    from generate_extracts import order_extracts_for_2up
-
-    extracts = [("a", 3), ("b", 3), ("c", 1), ("d", 1)]
-    ordered = order_extracts_for_2up(extracts)
-    assert [name for name, _ in ordered] == ["a", "c", "b", "d"]
-    assert _sheets_2up([3, 3, 1, 1]) == 5
-    assert _sheets_2up([pages for _, pages in ordered]) == 4
+    assert [name for name, _ in ordered] == ["b", "d", "f", "a", "c", "e"]
+    # Було: a | порожня | b b b | порожня | c | порожня | d d | e | порожня | f f f | порожня.
+    assert _pages_2up([pages for _, pages in extracts]) == 16
+    assert _pages_2up([pages for _, pages in ordered]) == 13
 
 
 def test_order_extracts_for_2up_keeps_order_without_multipage():

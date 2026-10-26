@@ -1266,25 +1266,20 @@ def _last_item_line(lines: list[str]) -> int:
 def order_extracts_for_2up(extracts: list) -> list:
     """Порядок витягів для друку «2 на 1», який економить папір.
 
-    Порядок витягів значення не має, а порожня права половина аркуша — це
-    зайвий папір (користувач, 26.10.2026). Тому:
-    * за кожним багатосторінковим витягом НЕПАРНОЇ довжини одразу йде
-      одинарний — він займає праву половину останнього аркуша замість
-      порожньої сторінки;
-    * далі багатосторінкові парної довжини, потім решта одинарних парами.
-    Усередині кожної групи зберігається вихідний порядок.
+    Порядок витягів значення не має, а зайва порожня сторінка — це зайвий
+    папір (користувач, 26.10.2026). Багатосторінковий витяг завжди починається
+    з нового аркуша, а після непарного — порожня сторінка (зворот його
+    останнього аркуша чужим витягом не займається). Порожня сторінка ПЕРЕД
+    багатосторінковим виникала лише тоді, коли перед ним стояла непарна
+    кількість одинарних. Тому спершу всі багатосторінкові, потім одинарні:
+    кожен багатосторінковий починається з нового аркуша сам, а одинарні йдуть
+    парами без пропусків. Усередині груп зберігається вихідний порядок.
 
     `extracts` — кортежі, де другий елемент — кількість сторінок.
     """
+    multis = [item for item in extracts if item[1] > 1]
     singles = [item for item in extracts if item[1] <= 1]
-    odd_multis = [item for item in extracts if item[1] > 1 and item[1] % 2]
-    even_multis = [item for item in extracts if item[1] > 1 and not item[1] % 2]
-    ordered = []
-    for item in odd_multis:
-        ordered.append(item)
-        if singles:
-            ordered.append(singles.pop(0))
-    return ordered + even_multis + singles
+    return multis + singles
 
 
 def plan_2up_page_layout(extract_pages: list[int]) -> list[dict]:
@@ -6379,8 +6374,8 @@ class App:
                     reordered = order_extracts_for_2up(temp_files)
                     if reordered != temp_files:
                         self.log(
-                            "Порядок витягів змінено для економії паперу: одинарні "
-                            "заповнюють вільні половини аркушів після багатосторінкових."
+                            "Порядок витягів змінено для економії паперу: спершу "
+                            "багатосторінкові, потім одинарні — без зайвих порожніх сторінок."
                         )
                     temp_files = reordered
 
@@ -6453,13 +6448,7 @@ class App:
                     strip_trailing_blank_paragraphs()
                     current_doc_pages = sheet_pages()
 
-                    # Наступний одинарний сам займе праву половину аркуша —
-                    # порожня сторінка потрібна лише перед багатосторінковим,
-                    # а це робить перевірка перед вставкою нижче.
-                    if (
-                        enable_2up and current_doc_pages > 1 and (current_doc_pages % 2 != 0)
-                        and temp_files[1][1] > 1
-                    ):
+                    if enable_2up and current_doc_pages > 1 and (current_doc_pages % 2 != 0):
                         add_blank_page()
                         current_doc_pages = sheet_pages()
                         self.log(
@@ -6507,11 +6496,7 @@ class App:
                         # Після багатосторінкового витягу наступний має починатися з
                         # НОВОГО аркуша: якщо документ закінчився на лівій половині
                         # (непарна сторінка) — доповнюємо порожньою.
-                        next_is_single = i + 1 < len(temp_files) and temp_files[i + 1][1] <= 1
-                        if (
-                            enable_2up and actual_pages > 1 and (current_doc_pages % 2 != 0)
-                            and not next_is_single
-                        ):
+                        if enable_2up and actual_pages > 1 and (current_doc_pages % 2 != 0):
                             add_blank_page()
                             current_doc_pages = sheet_pages()
                             self.log(
