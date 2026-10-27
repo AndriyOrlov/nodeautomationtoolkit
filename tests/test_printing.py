@@ -79,3 +79,15 @@ def test_two_page_copy_and_single_page_copy():
     assert [step.pages for step in two] == ["1", "2", "1", "2"]
     single = plan_steps(order, copy_pages=1, include_management=False)
     assert [(step.pages, step.copy_three) for step in single] == [("", False), ("", True)]
+
+
+def test_management_extracts_print_two_copies():
+    order = OrderFiles("556", "15.08.2026", management="m.docx")
+    [step] = plan_steps(order, 0, include_management=True)
+    assert step.copies == 2 and not step.two_per_sheet
+
+
+def test_copy_sheets_are_one_sided_with_the_back_page_on_the_reverse():
+    from nodeautomationtoolkit.generator.printing import copy_sheet_count
+
+    assert [copy_sheet_count(pages) for pages in (0, 1, 2, 4, 7)] == [0, 1, 1, 3, 6]

@@ -40,6 +40,13 @@ _SERVICE_MARK_RE = re.compile(r"службового\s+користування"
 _COPY_TWO_RE = re.compile(r"Прим\.?[ \t ]*№[ \t ]*2(?!\d)")
 
 
+def copy_sheet_count(pages: int) -> int:
+    """Аркушів на ОДИН примірник: усі аркуші односторонні, лише задня сторінка
+    (остання) — на звороті передостанньої. 4 сторінки → 3 аркуші."""
+    pages = int(pages or 0)
+    return pages - 1 if pages >= 2 else max(pages, 0)
+
+
 @dataclass
 class OrderFiles:
     """Файли одного наказу в теці пакета."""
@@ -65,6 +72,7 @@ class PrintStep:
     path: str
     pages: str = ""  # «1-4», «5»; порожньо — увесь документ
     two_per_sheet: bool = False
+    copies: int = 1
     copy_three: bool = False
     #: Що сказати в паузі ПІСЛЯ кроку (крім загального «відкладіть»).
     after: str = ""
@@ -118,7 +126,8 @@ def plan_steps(order: OrderFiles, copy_pages: int, include_management: bool, fee
     if order.extracts:
         steps.append(PrintStep(title, "Витяги — 2 сторінки на аркуш", order.extracts, two_per_sheet=True))
     if include_management and order.management:
-        steps.append(PrintStep(title, "Витяги до управління", order.management))
+        # Витяги до управління — 2 примірники, кожен витяг на окремому аркуші (26.10.2026).
+        steps.append(PrintStep(title, "Витяги до управління — 2 примірники", order.management, copies=2))
     if order.copy_two:
         for copy_three, number in ((False, 2), (True, 3)):
             if copy_pages >= 2:
@@ -232,7 +241,7 @@ def print_step(word, step: PrintStep, pdf_path: str = "") -> None:
                     Range=_WD_EXPORT_ALL,
                 )
             return
-        options = {"Background": False, "Copies": 1}
+        options = {"Background": False, "Copies": max(1, int(step.copies)), "Collate": True}
         if step.pages:
             options.update(Range=_WD_PRINT_PAGES, Pages=step.pages)
         else:

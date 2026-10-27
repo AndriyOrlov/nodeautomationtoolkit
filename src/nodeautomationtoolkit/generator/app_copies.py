@@ -20,6 +20,7 @@ from nodeautomationtoolkit.builtin_nodes.template_tags import (
 
 from .errors import explain_error
 from .naming import _slash_to_lines, back_page_tag_values, build_copy_two_filename, extract_metadata_from_filename, sanitize_filename
+from .printing import copy_sheet_count
 from .word_doc import copy_template_for_editing, force_quit_word
 
 
@@ -393,10 +394,11 @@ class CopiesMixin:
                         log=self.log_p2,
                     )
 
-                    sheets_1_copy = (final_pages + 1) // 2
+                    # Друк односторонній, лише задня сторінка — на звороті (26.10.2026).
+                    sheets_1_copy = copy_sheet_count(final_pages)
                     self.log_p2(
                         f"  ✅ Створено: {out_copy_name} (сторінок: {final_pages} | "
-                        f"аркушів для двостороннього друку: {sheets_1_copy} арк.)"
+                        f"аркушів на примірник: {sheets_1_copy}, на № 2 і № 3: {sheets_1_copy * 2})"
                     )
                     created_records.append((
                         idx,
@@ -437,8 +439,9 @@ class CopiesMixin:
             p2_stats_msg = (
                 f"📑 Кількість опрацьованих наказів: {total_orders} шт.\n"
                 f"📄 Сторінок в 1 примірнику (сумарно): {total_pages} стор.\n"
-                f"🖨️ Кількість фізичних аркушів паперу А4 (двосторонній друк, задня сторінка на звороті):\n"
-                f"   • На сформовані примірники № 2: {total_sheets_1_copy} арк. А4"
+                f"🖨️ Аркушів А4 (друк односторонній, задня сторінка — на звороті передостанньої):\n"
+                f"   • на примірники № 2: {total_sheets_1_copy} арк.\n"
+                f"   • на примірники № 2 і № 3 разом: {total_sheets_1_copy * 2} арк."
             )
 
             self.log_p2(f"\n📊 СТАТИСТИКА ТА РОЗРАХУНОК ДРУКУ:\n{p2_stats_msg}")

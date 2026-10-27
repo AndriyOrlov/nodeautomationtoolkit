@@ -8,6 +8,7 @@ import re
 from nodeautomationtoolkit.builtin_nodes.recipient_mapping import (
     _table_cipher,
     _format_full_closed_unit_text,
+    map_military_units,
 )
 
 
@@ -218,6 +219,28 @@ def build_message_recipient_list(mapping: dict, routes: dict) -> list[str]:
 
 #: Текст у {{кому_список}} супроводу, коли адресати — в окремому «Розрахунку розсилки».
 MESSAGE_BY_CALCULATION_TEXT = "Згідно з розрахунком розсилки"
+
+
+def message_content_routes(order_text: str, routes: dict, skip_lines: set, mapping: dict, bio_lines=()):
+    """Текст змісту повідомлення без пропущених рядків і маршрути САМЕ цього тексту.
+
+    Адресати («кому») і «куди» рахуються з того, що реально йде в повідомлення:
+    частина з шапки §, чий єдиний пункт (внутрішнє переміщення в управлінні)
+    прибрано, інакше лишалась серед адресатів без жодного пункту (26.10.2026).
+    Номери рядків біографії (`bio_lines`) перераховуються під новий текст.
+    Без пропущених рядків — ті самі маршрути, повторний розбір не потрібен.
+    """
+    lines = order_text.splitlines()
+    content_text = "\n".join(line for index, line in enumerate(lines) if index not in skip_lines)
+    if not skip_lines:
+        return content_text, routes
+    kept = [index for index in range(len(lines)) if index not in skip_lines]
+    renumbered = {old: new for new, old in enumerate(kept)}
+    return content_text, map_military_units(
+        text=content_text,
+        mapping=mapping,
+        bio_lines={renumbered[index] for index in (bio_lines or ()) if index in renumbered},
+    )
 
 
 def message_skipped_item_lines(routes: dict) -> tuple[set[int], list[str]]:

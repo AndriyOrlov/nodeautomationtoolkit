@@ -634,7 +634,7 @@ def test_print_page_shows_the_queue_from_the_batch_folder(shell, tmp_path):
         "Примірник № 3 + задня сторінка (лише друк)",
     ]
     shell.print_management.set(True)  # галочка одразу оновлює чергу
-    assert "Витяги до управління" in [row[1] for row in shell.print_queue_tree.rows()]
+    assert any(row[1].startswith("Витяги до управління") for row in shell.print_queue_tree.rows())
 
 
 @pytest.mark.parametrize(

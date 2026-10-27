@@ -43,7 +43,7 @@ class PrintingMixin:
         for order in scan_batch_folder(folder):
             for caption, path, wanted in (
                 ("Витяги — 2 сторінки на аркуш", order.extracts, True),
-                ("Витяги до управління", order.management, self.print_management.get()),
+                ("Витяги до управління — 2 примірники", order.management, self.print_management.get()),
                 ("Примірник № 2 + задня сторінка", order.copy_two, True),
                 ("Примірник № 3 + задня сторінка (лише друк)", order.copy_two, True),
             ):

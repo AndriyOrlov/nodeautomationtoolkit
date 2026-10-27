@@ -443,7 +443,7 @@ class QtShellMixin(OrdersWindowMixin):
         orders.add_action(self._lock(button("🗑 Очистити", "ghost", self.clear_p2_orders)))
         table, self.p2_orders_tree = self._orders_table(lambda: self._refresh_p2_source_summary())
         orders.body.addWidget(table)
-        orders.body.addWidget(hint_bar("Формується: Примірник № 2 · правила для № 3 ще не погоджені"))
+        orders.body.addWidget(hint_bar("Формується № 2 · № 3 — той самий, з «Прим. № 3», лише під час друку"))
         orders.body.addWidget(bind_label(label("", "SummaryLabel"), self.p2_source_summary))
         layout.addWidget(orders)
 
@@ -740,7 +740,7 @@ class QtShellMixin(OrdersWindowMixin):
         )
         rules = label(
             "Для кожного наказу по черзі: витяги (2 сторінки на аркуш) → витяги до управління (якщо "
-            "увімкнено) → примірник № 2: лицьові сторінки, потім верхній аркуш у ручну подачу й задня "
+            "увімкнено; 2 примірники, кожен витяг на окремому аркуші) → примірник № 2: лицьові сторінки, потім верхній аркуш у ручну подачу й задня "
             "сторінка на звороті → те саме для примірника № 3 (у № 2 «Прим. № 2» міняється на № 3 лише "
             "для друку). Після кожного кроку — пауза: Пробіл або Enter — далі, Esc — зупинити.",
             "MutedLabel",

@@ -27,7 +27,7 @@ from nodeautomationtoolkit.builtin_nodes.template_tags import (
 )
 
 from .errors import UserError, explain_error
-from .messages import MESSAGE_BY_CALCULATION_TEXT, _MESSAGE_ADDRESSEE_KIND_TAGS, build_addressee_kind_text, build_message_recipient_groups, message_item_contexts, message_skipped_item_lines
+from .messages import MESSAGE_BY_CALCULATION_TEXT, _MESSAGE_ADDRESSEE_KIND_TAGS, build_addressee_kind_text, build_message_recipient_groups, message_item_contexts, message_skipped_item_lines, message_content_routes
 from .naming import _slash_to_lines, extract_metadata_from_filename, format_message_date
 from .order_text import text_before_order_signer
 from .units import append_unit_stubs_to_table, collect_new_unit_names, describe_cipher_problems, unmatched_open_unit_spans
@@ -988,13 +988,28 @@ class MessagesMixin:
 
             table_gaps = self._report_table_gaps(order_text, mapping)
             routes = map_military_units(text=order_text, mapping=mapping, bio_lines=message_bio_lines)
-            recipient_groups = build_message_recipient_groups(mapping, routes)
+
+            # Внутрішнє переміщення в управлінні — не для повідомлень (галочка
+            # на вкладці). Витягів до управління це не стосується.
+            skip_lines, skipped_labels = set(), []
+            if self.message_skip_internal_management.get():
+                skip_lines, skipped_labels = message_skipped_item_lines(routes)
+            if skipped_labels:
+                self.log(
+                    "Не додано до повідомлення (внутрішнє переміщення в управлінні): "
+                    + ", ".join(skipped_labels)
+                )
+            # Адресати й «куди» — з того самого тексту, що йде в повідомлення (26.10.2026).
+            content_text, recipient_routes = message_content_routes(
+                order_text, routes, skip_lines, mapping, message_bio_lines
+            )
+            recipient_groups = build_message_recipient_groups(mapping, recipient_routes)
             recipients = (
                 recipient_groups["corps"] + recipient_groups["units"] + recipient_groups["tck"]
             )
             addressee_kind = build_addressee_kind_text(recipient_groups)
             destinations = []
-            for data in routes.get("unit_paragraphs", {}).values():
+            for data in recipient_routes.get("unit_paragraphs", {}).values():
                 destination = str(data.get("destination_where") or "").strip()
                 if destination and destination not in destinations:
                     destinations.append(destination)
@@ -1047,21 +1062,6 @@ class MessagesMixin:
 
             if self.message_executor.get().strip():
                 replacements["{{виконавець}}"] = self.message_executor.get().strip()
-
-            # Внутрішнє переміщення в управлінні — не для повідомлень (галочка
-            # на вкладці). Витягів до управління це не стосується.
-            skip_lines, skipped_labels = set(), []
-            if self.message_skip_internal_management.get():
-                skip_lines, skipped_labels = message_skipped_item_lines(routes)
-            if skipped_labels:
-                self.log(
-                    "Не додано до повідомлення (внутрішнє переміщення в управлінні): "
-                    + ", ".join(skipped_labels)
-                )
-            content_text = "\n".join(
-                line for index, line in enumerate(order_text.splitlines())
-                if index not in skip_lines
-            )
 
             decision = generate_decision_order(text=content_text, mapping=mapping, new_header="")
             encrypted_content = decision.get("decision_text", "")

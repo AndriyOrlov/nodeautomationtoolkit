@@ -232,3 +232,41 @@ def test_nothing_skipped_without_internal_moves():
     text = "\n".join(ORDER_LINES[:10]).replace(INTERNAL, outside)
     routes = map_military_units(text=text, mapping=MAPPING)
     assert _load_generator().message_skipped_item_lines(routes) == (set(), [])
+
+
+def _recipient_units(order_lines):
+    from nodeautomationtoolkit.generator.messages import (
+        build_message_recipient_groups,
+        message_content_routes,
+        message_skipped_item_lines,
+    )
+
+    text = "\n".join(order_lines)
+    routes = map_military_units(text=text, mapping=MAPPING)
+    skip_lines, _labels = message_skipped_item_lines(routes)
+    before = build_message_recipient_groups(MAPPING, routes)["units"]
+    _content, content_routes = message_content_routes(text, routes, skip_lines, MAPPING)
+    return before, build_message_recipient_groups(MAPPING, content_routes)["units"]
+
+
+HEADING_WITH_NODE = (
+    "Відповідно до пункту 1 Положення офіцерів 555 інформаційно-телекомунікаційного "
+    "вузла ЗВІЛЬНИТИ з займаних посад і ПРИЗНАЧИТИ:"
+)
+
+
+def test_unit_whose_only_item_was_skipped_is_not_a_recipient():
+    # Частина з шапки § — адресат лише через пункт, який у повідомлення не йде.
+    before, after = _recipient_units(["НАКАЗ", "§ 1", HEADING_WITH_NODE, "", INTERNAL, "1985 р.н."])
+    assert before and not after
+
+
+def test_unit_with_another_item_stays_a_recipient():
+    other = (
+        "2. Капітана ПРИКЛАДЕНКА Івана Петровича, офіцера відділу зв'язку - "
+        "СТАРШИМ ОФІЦЕРОМ ВІДДІЛУ ЗВ'ЯЗКУ."
+    )
+    before, after = _recipient_units(
+        ["НАКАЗ", "§ 1", HEADING_WITH_NODE, "", INTERNAL, "1985 р.н.", "", other, "1990 р.н."]
+    )
+    assert before and after == before
