@@ -2776,3 +2776,29 @@ Esc — стоп), бо надруковане відкладають; прим�
 
 — **Claude**
 
+---
+
+## 2026-10-29 — «Повідомлення» без власного EXE (Smart App Control)
+
+На іншому ПК (Windows 11) `Povidomlennya.exe` блокує «Інтелектуальне керування програмами»
+(Smart App Control): «не змогли перевірити її видавця». Кнопки «запустити все одно» немає;
+самопідписаний сертифікат не допомагає; безкоштовного довіреного сертифіката для закритої програми
+немає (лише SignPath Foundation для відкритого коду). Користувач відмовився від купівлі,
+сертифіката організації, вимкнення захисту й надсилання файлів у Microsoft.
+
+**Рішення:** `scripts/portable/build_messages_portable.py` → `dist\Povidomlennya_portable\`:
+офіційний embeddable Python (з `python\`; `python.exe`/`pythonw.exe`/`python314.dll` підписані
+Python Software Foundation), бібліотеки ставляться pip-ом ПРЯМО в `python\Lib\site-packages` пакета
+(`--target`, PySide6-Essentials — Qt-файли підписані The Qt Company; Fluent і рамка — `--no-deps`),
+код програми як `.py`, запуск `Povidomlennya.bat` (ASCII; `PYTHONNOUSERSITE=1` — не брати бібліотек
+із профілю користувача; `start pythonw.exe generate_messages_qt.py`). `ПРОЧИТАЙ.txt` — що робити,
+якщо заблокує .bat (ярлик на pythonw.exe). Непідписані лишаються pywin32, lxml, pillow — поширені,
+тож ймовірно відомі Microsoft; гарантії немає, перевіряти на цільовому ПК.
+- Самоперевірка в скрипті: усе імпортується з теки пакета. Перевірено: генерація повідомлень
+  Python-ом пакета (3 файли, підписант зчитаний), `.bat` відкриває вікно, процес — `pythonw.exe` пакета.
+- Розмір ≈ 313 МБ. Конфіг — `messages_config.json` у корені пакета (`config_folder`, не frozen).
+- Увага: `python\` у корені проєкту сам НЕ самодостатній — PySide6 бере з
+  `%APPDATA%\Python\Python314\site-packages`; пакет це обходить.
+
+— **Claude**
+
