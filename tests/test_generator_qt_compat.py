@@ -25,7 +25,6 @@ from PySide6.QtGui import QGuiApplication  # noqa: E402
 from PySide6.QtWidgets import (  # noqa: E402
     QApplication,
     QFileDialog,
-    QMessageBox,
     QTabWidget,
     QTreeWidget,
     QWidget,
@@ -234,9 +233,32 @@ def test_dialog_bridges_return_tk_shapes_on_cancel(qt_app, monkeypatch):
     assert compat.FileDialogBridge.asksaveasfilename(defaultextension=".md") == "C:/звіт.md"
 
     shown = []
-    monkeypatch.setattr(QMessageBox, "warning", staticmethod(lambda *args: shown.append(args[1:])))
+    monkeypatch.setattr(
+        compat, "_ask", lambda title, message, yes, no: shown.append((title, message, yes, no)) or (no is None)
+    )
     compat.MessageBoxBridge.showwarning("Помилка", "Оберіть наказ")
-    assert shown == [("Помилка", "Оберіть наказ")]
+    assert shown == [("Помилка", "Оберіть наказ", "Гаразд", None)]
+    assert compat.MessageBoxBridge.askyesno("Питання", "Перезаписати?") is False
+    assert shown[-1][2:] == ("Так", "Ні")
+
+
+@pytest.mark.parametrize(
+    "key, accepted",
+    [(Qt.Key.Key_Return, True), (Qt.Key.Key_Enter, True), (Qt.Key.Key_Escape, False)],
+)
+def test_message_dialog_is_a_window_with_enter_and_escape(qt_app, key, accepted):
+    from PySide6.QtCore import QTimer
+    from PySide6.QtTest import QTest
+
+    from nodeautomationtoolkit.generator_qt.message_dialog import MessageDialog
+
+    long_text = "\n".join(f"Файл {n}: Витяги наказу № {n} від 01.10.2026.docx уже існує" for n in range(80))
+    dialog = MessageDialog("Файли вже є", long_text, "Так", "Ні")
+    assert dialog.isWindow()  # окреме вікно, а не накладка всередині головного
+    QTimer.singleShot(0, lambda: QTest.keyClick(dialog, key))
+    assert (dialog.exec() == MessageDialog.DialogCode.Accepted) is accepted
+    # Довгий текст прокручується — кнопки лишаються в межах вікна.
+    assert dialog.yes_button.geometry().bottom() <= dialog.height()
 
 
 @pytest.mark.parametrize(

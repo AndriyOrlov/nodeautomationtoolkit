@@ -105,6 +105,14 @@ def main() -> int:
         shutil.copy2(ROOT / name, TARGET / name)
     shutil.copytree(ROOT / "src" / "nodeautomationtoolkit", TARGET / "src" / "nodeautomationtoolkit", ignore=_ignore)
 
+    # Байткод заздалегідь — Python-ом САМОГО пакета (той самий тег версії). Без цього
+    # перший запуск на ПК компілює всі модулі, а в теці без права запису — щоразу.
+    subprocess.run(
+        [python, "-m", "compileall", "-q", "-j", "0",
+         "src", "generate_messages_qt.py", "generate_extracts.py", str(site_packages)],
+        cwd=TARGET, env=env, check=False,
+    )
+
     (TARGET / "Povidomlennya.bat").write_bytes(LAUNCHER.encode("ascii"))
     (TARGET / "ПРОЧИТАЙ.txt").write_text(README, encoding="utf-8-sig")
 

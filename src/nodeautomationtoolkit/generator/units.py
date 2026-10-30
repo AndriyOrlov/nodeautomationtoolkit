@@ -8,7 +8,6 @@ import re
 import shutil
 from datetime import datetime
 from pathlib import Path
-import openpyxl
 from nodeautomationtoolkit.builtin_nodes.recipient_mapping import (
     _build_unit_fuzzy_pattern,
     keep_open_names_of,
@@ -331,6 +330,7 @@ def append_unit_stubs_to_table(table_path: str, names: list[str]) -> dict:
             wanted.append(clean)
     if not wanted or not source.is_file():
         return result
+    import openpyxl  # тут, а не на рівні модуля: на старті вікна openpyxl не потрібен (−0,3 с)
 
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
 

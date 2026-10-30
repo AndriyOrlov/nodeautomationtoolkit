@@ -104,7 +104,8 @@ def test_logic_surface_exists_and_tab_order_matches_tk(shell):
     assert shell.notebook.index(shell.tab_copies_page) == 0
     assert shell.notebook.index(shell.tab_extracts_page) == 1
     assert shell.notebook.index(shell.tab_messages_page) == 2
-    assert "всі витяги" in shell.btn_extracts.text().lower()
+    assert "створити витяги" in shell.btn_extracts.text().lower()
+    assert "управлін" in shell.btn_extracts.toolTip()  # лише адресні, без витягів до управління
     assert "управління" in shell.btn_management_extracts.text().lower()
 
 
@@ -650,3 +651,11 @@ def test_print_pause_continues_on_space_or_enter(qt_app, key, accepted):
     dialog = PrintPauseDialog("Наказ № 1 — Примірник № 2", "Верхній аркуш у ручну подачу.", "задня сторінка")
     QTimer.singleShot(0, lambda: QTest.keyClick(dialog, key))
     assert (dialog.exec() == PrintPauseDialog.DialogCode.Accepted) is accepted
+
+
+def test_splash_is_drawn_without_a_picture(qt_app):
+    from nodeautomationtoolkit.generator_qt.splash import HEIGHT, WIDTH, build_pixmap
+
+    picture = build_pixmap("Повідомлення за наказом")
+    assert (picture.width(), picture.height()) == (WIDTH, HEIGHT)
+    assert not picture.isNull()

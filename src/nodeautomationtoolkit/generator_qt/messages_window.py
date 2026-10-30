@@ -394,7 +394,7 @@ def create_messages_app_class(legacy):
     return type("MessagesApp", (MessagesShellMixin, legacy.App), {"legacy": legacy})
 
 
-def launch(legacy, argv: list[str] | None = None) -> int:
+def launch(legacy, argv: list[str] | None = None, splash=None) -> int:
     qt_app = QApplication.instance() or QApplication(list(argv if argv is not None else sys.argv))
     qt_app.setApplicationName("Повідомлення за наказом")
     theme.apply_theme(qt_app)
@@ -402,4 +402,6 @@ def launch(legacy, argv: list[str] | None = None) -> int:
     shell = create_messages_app_class(legacy)()
     theme.apply_theme(qt_app, shell.ui_theme.get())
     shell.main_window.show()
+    if splash is not None:
+        splash.finish(shell.main_window)
     return qt_app.exec()

@@ -14,11 +14,18 @@ from nodeautomationtoolkit.builtin_nodes.typography import (
 #: Перелік звань окремо: він потрібен і прив'язаним до початку рядка (звичайний
 #: підписний блок), і всередині рядка (коли звання стоїть поруч із посадою).
 _RANK_ALTERNATIVES = (
-    r"генерал(?:[-\s](?:майор|лейтенант|полковник))?|адмірал(?:[-\s]\w+)?|"
+    # Довші назви — ПЕРШИМИ: інакше «бригадний генерал» розпадався на посаду
+    # «бригадний» і звання «генерал», а «старший солдат» — на «старший» і «солдат»
+    # (у повідомленнях замість посади підписанта підставлялось «бригадний», 29.10.2026).
+    r"бригадний\s+генерал|"
+    r"генерал(?:[-\s](?:майор|лейтенант|полковник)|\s+армії(?:\s+України)?)?|"
+    r"(?:контр|віце)[-\s]адмірал|адмірал(?:[-\s]\w+)?|командор|"
     r"полковник|підполковник|майор|капітан(?:[-\s](?:лейтенант|[1-3]\s+рангу))?|"
-    r"старший\s+лейтенант|молодший\s+лейтенант|лейтенант|головний\s+сержант|"
-    r"штаб[-\s]сержант|майстер[-\s]сержант|старший\s+сержант|молодший\s+сержант|"
-    r"сержант|старшина|солдат|матрос"
+    r"старший\s+лейтенант|молодший\s+лейтенант|лейтенант|"
+    r"головний\s+майстер[-\s]сержант|старший\s+майстер[-\s]сержант|майстер[-\s]сержант|"
+    r"головний\s+корабельний\s+старшина|головний\s+старшина|старший\s+старшина|"
+    r"головний\s+сержант|штаб[-\s]сержант|старший\s+сержант|молодший\s+сержант|"
+    r"сержант|старшина|старший\s+солдат|солдат|старший\s+матрос|матрос"
 )
 
 
@@ -261,6 +268,90 @@ def _find_order_signer(text: str) -> dict[str, str] | None:
                 "rank": inline_rank.group(1),
                 "name": " ".join(name_words),
             }
+    return _find_signer_by_rank(lines, search_start, reference_index)
+
+
+#: Рядки, які належать останньому пункту (біографія, підстава), а не посаді підписанта.
+_ITEM_TAIL_RE = re.compile(
+    r"р\.\s*н\.|року\s+народження|рнокпп|освіта|у\s+зс|підстава|^\d{6,}",
+    re.IGNORECASE | re.UNICODE,
+)
+_NAME_WORD_RE = re.compile(r"[A-Za-zА-Яа-яІіЇїЄєҐґ'’`-]+")
+
+
+def _signer_name_after(lines: list[str], index: int, limit: int, tail: str) -> str:
+    """ПІБ: решта рядка після звання (остання колонка) або наступний рядок."""
+    columns = [part.strip(" .\t–—-:") for part in re.split(r"\t+|\.{3,}", tail) if part.strip(" .\t–—-:")]
+    name = columns[-1] if columns else ""
+    if len(_NAME_WORD_RE.findall(name)) >= 2:
+        return " ".join(_NAME_WORD_RE.findall(name))
+    for next_index in range(index + 1, min(limit, index + 4)):
+        candidate = lines[next_index]
+        if not candidate:
+            continue
+        if any(marker in candidate.casefold() for marker in _DISTRIBUTION_CUTOFF_MARKERS):
+            break
+        words = _NAME_WORD_RE.findall(candidate)
+        if len(words) >= 2 and candidate.casefold() not in {"підпис", "м. п."}:
+            return " ".join(words)
+        break
+    return ""
+
+
+def _find_signer_by_rank(lines: list[str], search_start: int, limit: int) -> dict[str, str] | None:
+    """Підписант із НЕСТАНДАРТНОЮ посадою: шукаємо від звання, а не від першого слова.
+
+    Посада може починатися з чого завгодно («Перший заступник…», «Начальник» у
+    родовому, назва органу), тож за ключовим словом блок не знаходився зовсім.
+    Тут після останнього пункту шукаємо рядок зі званням і ПІБ (звання на
+    початку рядка або посеред нього), а посадою беремо суцільні непорожні рядки
+    НАД ним — до порожнього рядка. Перед посадою мусить бути порожній рядок:
+    так рядки самого пункту (біографія, «Підстава: рапорт капітана…») не
+    приймаються за підписанта.
+    """
+    for index in range(search_start + 1, limit):
+        line = lines[index]
+        if not line or any(marker in line.casefold() for marker in _DISTRIBUTION_CUTOFF_MARKERS):
+            if line:
+                break
+            continue
+        position_in_line = ""
+        rank_match = _ORDER_SIGNER_RANK_RE.match(line)
+        if rank_match:
+            rank, tail = rank_match.group(1), line[rank_match.end():]
+        else:
+            inline = _ORDER_SIGNER_RANK_INLINE_RE.search(line)
+            if not inline or inline.start() == 0:
+                continue
+            rank, tail = inline.group(1), line[inline.end():]
+            position_in_line = line[: inline.start()].strip(" .\t–—-:")
+        name = _signer_name_after(lines, index, limit, tail)
+        if not name:
+            continue
+        position_lines: list[str] = []
+        start = index
+        cursor = index - 1
+        while cursor > search_start and lines[cursor] and len(position_lines) < 4:
+            if _ITEM_TAIL_RE.search(lines[cursor]) or _ITEM_START_RE.match(lines[cursor]):
+                break
+            position_lines.insert(0, lines[cursor])
+            start = cursor
+            cursor -= 1
+        if position_in_line:
+            position_lines.append(position_in_line)
+            if start == index:
+                start = index
+        if not position_lines:
+            continue
+        # Перед блоком — порожній рядок, інакше це текст останнього пункту.
+        if start - 1 <= search_start or lines[start - 1]:
+            continue
+        return {
+            "start_line": start,
+            "position": "\n".join(position_lines),
+            "rank": rank,
+            "name": name,
+        }
     return None
 
 

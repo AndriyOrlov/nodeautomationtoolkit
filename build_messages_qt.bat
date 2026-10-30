@@ -3,9 +3,9 @@ chcp 65001 >nul
 title Build Povidomlennya (Qt)
 cd /d "%~dp0"
 
-rem Builds the stand-alone messages program (generate_messages_qt.py) into ONE
-rem file with PyInstaller:
-rem   dist\Povidomlennya.exe
+rem Builds the stand-alone messages program (generate_messages_qt.py) into a
+rem FOLDER with PyInstaller (one-file exe unpacked 250 MB on every start):
+rem   dist\Povidomlennya\Povidomlennya.exe
 rem Settings are kept in messages_config.json next to the exe.
 rem Spec and temp files go to build\pyinstaller_messages (ignored by git).
 rem Interpreter lookup order:
@@ -41,10 +41,10 @@ echo.
 
 rem --add-data / --paths use absolute paths: with --specpath PyInstaller
 rem resolves relative ones against the spec folder, not the project root.
+if exist "dist\%APP_NAME%.exe" del /q "dist\%APP_NAME%.exe"
 "%PY%" -m PyInstaller ^
   --noconfirm ^
   --clean ^
-  --onefile ^
   --windowed ^
   --name "%APP_NAME%" ^
   --distpath "%ROOT%dist" ^
@@ -60,17 +60,18 @@ rem resolves relative ones against the spec folder, not the project root.
   --collect-all docx ^
   --hidden-import win32timezone ^
   --add-data "%ROOT%src\nodeautomationtoolkit\generator_qt\icons;nodeautomationtoolkit\generator_qt\icons" ^
+  --add-data "%ROOT%src\nodeautomationtoolkit\generator_qt\assets;nodeautomationtoolkit\generator_qt\assets" ^
   --add-data "%ROOT%src\nodeautomationtoolkit\personnel\dictionaries;nodeautomationtoolkit\personnel\dictionaries" ^
   --add-data "%ROOT%src\nodeautomationtoolkit\order_index\positions_all.csv;nodeautomationtoolkit\order_index" ^
   --add-data "%ROOT%src\nodeautomationtoolkit\order_index\unit_markers.txt;nodeautomationtoolkit\order_index" ^
   "%ROOT%generate_messages_qt.py"
 if errorlevel 1 goto :failed
 
-if not exist "dist\%APP_NAME%.exe" goto :failed
+if not exist "dist\%APP_NAME%\%APP_NAME%.exe" goto :failed
 
 echo.
-echo Готово: dist\%APP_NAME%.exe
-echo Це один файл - його можна копiювати куди завгодно.
+echo Готово: dist\%APP_NAME%\%APP_NAME%.exe
+echo Copy the WHOLE folder dist\%APP_NAME% - the exe needs the files next to it.
 echo.
 pause
 exit /b 0

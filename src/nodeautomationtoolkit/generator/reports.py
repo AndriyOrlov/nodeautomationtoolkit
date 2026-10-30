@@ -8,7 +8,6 @@ import os
 import hashlib
 import tempfile
 import time
-import openpyxl
 from nodeautomationtoolkit.builtin_nodes.recipient_mapping import (
     _format_item_numbers_range,
 )
@@ -18,6 +17,8 @@ from .naming import sanitize_filename
 
 def _save_table_to_excel(filepath: str, headers: list[str], rows: list):
     """Зберігає таблицю в Excel (.xlsx) за допомогою openpyxl."""
+    import openpyxl  # тут, а не на рівні модуля: на старті вікна openpyxl не потрібен (−0,3 с)
+
     os.makedirs(os.path.dirname(os.path.abspath(filepath)), exist_ok=True)
     wb = openpyxl.Workbook()
     ws = wb.active
@@ -76,6 +77,8 @@ def _saved_xlsx_rows(path: str) -> list[tuple]:
     """Читає вже створений контрольний XLSX без будь-якого перерахунку."""
     if not os.path.isfile(path):
         return []
+    import openpyxl  # тут, а не на рівні модуля: на старті вікна openpyxl не потрібен (−0,3 с)
+
     workbook = openpyxl.load_workbook(path, read_only=True, data_only=True)
     try:
         sheet = workbook.active

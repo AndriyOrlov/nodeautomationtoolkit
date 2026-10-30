@@ -21,7 +21,6 @@ from tkinter import filedialog, messagebox
 from tkinter.constants import *
 
 import win32com.client
-import openpyxl
 
 # Додаємо src до sys.path для імпорту модулів nodeautomationtoolkit
 project_root = os.path.dirname(os.path.abspath(__file__))

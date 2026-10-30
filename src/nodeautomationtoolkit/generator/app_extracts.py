@@ -236,11 +236,17 @@ class ExtractsMixin:
         finally:
             self._set_extract_action_buttons_state(NORMAL)
 
-    def run_extracts_action(self, scope: str = "all"):
-        """Створює адресний файл і окремий файл витягів до управління."""
-        return self._run_extracts_scope_action(
-            "all", "Усі витяги для", "Генерація всіх витягів", "генерацію всіх витягів"
-        )
+    #: Кнопки (користувач, 30.10.2026): «Створити витяги» — лише адресні, без витягів до
+    #: управління; «Витяги до управління» — лише вони; «Повний цикл» — усі разом.
+    _EXTRACT_SCOPE_TITLES = {
+        "general": ("Витяги для", "Генерація витягів", "генерацію витягів"),
+        "all": ("Усі витяги для", "Генерація всіх витягів", "генерацію всіх витягів"),
+    }
+
+    def run_extracts_action(self, scope: str = "general"):
+        """Адресні витяги (`general`) або всі разом з витягами до управління (`all`)."""
+        titles = self._EXTRACT_SCOPE_TITLES.get(scope, self._EXTRACT_SCOPE_TITLES["general"])
+        return self._run_extracts_scope_action(scope if scope in self._EXTRACT_SCOPE_TITLES else "general", *titles)
 
     def run_management_extracts_action(self):
         """Створює лише окремі витяги до управління без адресування й 2-на-1."""

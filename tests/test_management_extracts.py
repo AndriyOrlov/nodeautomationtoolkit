@@ -167,19 +167,23 @@ def test_extract_scope_separates_regular_and_management_buttons(routes):
     assert management == routes["management_paragraphs"]
 
 
-def test_main_extract_button_uses_all_scope_by_default():
-    """Основна кнопка створює адресний і управлінський файли разом."""
+def test_extract_buttons_scopes():
+    """«Створити витяги» — лише адресні; «Повний цикл» передає всі (30.10.2026)."""
     generator = _load_generator()
     calls = []
 
     class Stub:
+        _EXTRACT_SCOPE_TITLES = generator.App._EXTRACT_SCOPE_TITLES
+
         def _run_extracts_scope_action(self, *args):
             calls.append(args)
 
     generator.App.run_extracts_action(Stub())
+    generator.App.run_extracts_action(Stub(), scope="all")
 
     assert calls == [
-        ("all", "Усі витяги для", "Генерація всіх витягів", "генерацію всіх витягів")
+        ("general", "Витяги для", "Генерація витягів", "генерацію витягів"),
+        ("all", "Усі витяги для", "Генерація всіх витягів", "генерацію всіх витягів"),
     ]
 
 

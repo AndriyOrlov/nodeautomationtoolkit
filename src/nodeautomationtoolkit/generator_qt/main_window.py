@@ -592,7 +592,8 @@ class QtShellMixin(OrdersWindowMixin):
 
         strip = ActionStrip()
         self.btn_calc = self._lock(button("📊 1. Розрахувати розсилку", "secondary", self.run_rozrahunok_action))
-        self.btn_extracts = self._lock(button("⚡ 2. Створити всі витяги", "run", self.run_extracts_action))
+        self.btn_extracts = self._lock(button("⚡ 2. Створити витяги", "run", self.run_extracts_action))
+        self.btn_extracts.setToolTip("Лише адресні витяги — без витягів до управління")
         self.btn_management_extracts = self._lock(
             button("🏛 3. Витяги до управління", "secondary", self.run_management_extracts_action)
         )
@@ -601,7 +602,7 @@ class QtShellMixin(OrdersWindowMixin):
         )
         self.btn_full_cycle = self._lock(button("⇄ 4. Повний цикл", "secondary", self.run_full_cycle))
         self.btn_full_cycle.setToolTip(
-            "Примірники № 2 → розрахунок розсилки → адресні витяги + витяги до управління"
+            "Примірники № 2 → розрахунок розсилки → усі витяги: адресні й до управління"
         )
         for widget in (self.btn_calc, self.btn_extracts, self.btn_management_extracts, self.btn_full_cycle):
             strip.add(widget)
@@ -1057,7 +1058,7 @@ def create_qt_app_class(legacy):
     return type("QtGeneratorApp", (QtShellMixin, legacy.App), {"legacy": legacy})
 
 
-def launch(legacy, argv: list[str] | None = None) -> int:
+def launch(legacy, argv: list[str] | None = None, splash=None) -> int:
     qt_app = QApplication.instance() or QApplication(list(argv if argv is not None else sys.argv))
     qt_app.setApplicationName("Node Automation Toolkit")
     theme.apply_theme(qt_app)
@@ -1066,4 +1067,6 @@ def launch(legacy, argv: list[str] | None = None) -> int:
     # Тема з конфігу (`ui_theme`) відома лише після `load_config` у `App.__init__`.
     theme.apply_theme(qt_app, getattr(shell, "ui_theme", None) and shell.ui_theme.get())
     shell.main_window.show()
+    if splash is not None:
+        splash.finish(shell.main_window)
     return qt_app.exec()

@@ -22,14 +22,13 @@ from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import (
     QApplication,
     QFileDialog,
-    QMessageBox,
     QTabWidget,
     QTreeWidget,
     QTreeWidgetItem,
     QWidget,
 )
 
-from .fluent import MessageBox, PrimaryPushButton, PushButton, TogglePushButton, ToolButton, TransparentPushButton
+from .fluent import PrimaryPushButton, PushButton, TogglePushButton, ToolButton, TransparentPushButton
 
 END = "end"
 INSERT = "insert"
@@ -173,62 +172,47 @@ def filter_from_filetypes(filetypes: Iterable | None) -> str:
     return ";;".join(parts)
 
 
-def _fluent_box(title: str, message: str, yes_text: str, cancel_text: str | None) -> bool | None:
-    """Діалог Fluent над активним вікном. Без вікна (старт, тести) — None:
-    викликач падає назад на QMessageBox."""
+def _dialog_owner() -> QWidget | None:
     parent = _parent()
-    # Діалог Fluent — затемнення поверх вікна; над невидимим вікном (старт,
-    # тести) його не видно й закрити нічим, тож тоді — звичайний QMessageBox.
-    if parent is None or not parent.window().isVisible():
-        return None
-    box = MessageBox(str(title), str(message), parent.window())
-    box.yesButton.setText(yes_text)
-    if cancel_text is None:
-        box.cancelButton.hide()
-    else:
-        box.cancelButton.setText(cancel_text)
-    return bool(box.exec())
+    return parent.window() if parent is not None else None
+
+
+def _ask(title, message, yes_text: str, no_text: str | None) -> bool:
+    """Окреме вікно повідомлення поверх усіх (`message_dialog`). Тести підміняють саме це."""
+    from .message_dialog import ask
+
+    return ask(str(title), str(message), yes_text, no_text, _dialog_owner())
 
 
 class MessageBoxBridge:
-    """`tkinter.messagebox` поверх діалогів Fluent (запасний варіант — QMessageBox)."""
+    """`tkinter.messagebox` поверх власного діалогу-вікна.
+
+    Не затемнення Fluent усередині головного вікна: його не було видно, коли
+    вікно перекривав Word або текст не вміщався, і програма «зависала» (29.10.2026).
+    """
 
     @staticmethod
     def showinfo(title="", message="", **_options):
-        if _fluent_box(title, message, "Гаразд", None) is None:
-            QMessageBox.information(_parent(), str(title), str(message))
+        _ask(title, message, "Гаразд", None)
         return "ok"
 
     @staticmethod
     def showwarning(title="", message="", **_options):
-        if _fluent_box(title, message, "Гаразд", None) is None:
-            QMessageBox.warning(_parent(), str(title), str(message))
+        _ask(title, message, "Гаразд", None)
         return "ok"
 
     @staticmethod
     def showerror(title="", message="", **_options):
-        if _fluent_box(title, message, "Гаразд", None) is None:
-            QMessageBox.critical(_parent(), str(title), str(message))
+        _ask(title, message, "Гаразд", None)
         return "ok"
 
     @staticmethod
     def askyesno(title="", message="", **_options) -> bool:
-        answer = _fluent_box(title, message, "Так", "Ні")
-        if answer is None:
-            answer = QMessageBox.question(_parent(), str(title), str(message)) == QMessageBox.StandardButton.Yes
-        return answer
+        return _ask(title, message, "Так", "Ні")
 
     @staticmethod
     def askokcancel(title="", message="", **_options) -> bool:
-        answer = _fluent_box(title, message, "Гаразд", "Скасувати")
-        if answer is None:
-            answer = QMessageBox.question(
-                _parent(),
-                str(title),
-                str(message),
-                QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
-            ) == QMessageBox.StandardButton.Ok
-        return answer
+        return _ask(title, message, "Гаразд", "Скасувати")
 
 
 class FileDialogBridge:

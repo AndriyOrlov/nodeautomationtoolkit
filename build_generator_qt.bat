@@ -70,6 +70,7 @@ rem resolves relative ones against the spec folder, not the project root.
   --collect-all docx ^
   --hidden-import win32timezone ^
   --add-data "%ROOT%src\nodeautomationtoolkit\generator_qt\icons;nodeautomationtoolkit\generator_qt\icons" ^
+  --add-data "%ROOT%src\nodeautomationtoolkit\generator_qt\assets;nodeautomationtoolkit\generator_qt\assets" ^
   --add-data "%ROOT%src\nodeautomationtoolkit\personnel\dictionaries;nodeautomationtoolkit\personnel\dictionaries" ^
   --add-data "%ROOT%src\nodeautomationtoolkit\generator_qt\instruction.md;nodeautomationtoolkit\generator_qt" ^
   --add-data "%ROOT%src\nodeautomationtoolkit\order_index\positions_all.csv;nodeautomationtoolkit\order_index" ^
