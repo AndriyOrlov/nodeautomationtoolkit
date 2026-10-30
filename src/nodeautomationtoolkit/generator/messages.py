@@ -219,6 +219,14 @@ def build_message_recipient_list(mapping: dict, routes: dict) -> list[str]:
 
 #: Текст у {{кому_список}} супроводу, коли адресати — в окремому «Розрахунку розсилки».
 MESSAGE_BY_CALCULATION_TEXT = "Згідно з розрахунком розсилки"
+#: Окремий «Розрахунок розсилки» — лише коли частин БІЛЬШЕ за це число (користувач,
+#: 30.10.2026); до 10 включно всі адресати йдуть у таблицю супроводу.
+MESSAGE_CALCULATION_MIN_RECIPIENTS = 10
+
+
+def use_distribution_calculation(calc_template: str, recipients: list) -> bool:
+    """Чи робити окремий «Розрахунок розсилки» (є зразок і адресатів понад 10)."""
+    return bool(calc_template) and len(recipients) > MESSAGE_CALCULATION_MIN_RECIPIENTS
 
 
 def message_content_routes(order_text: str, routes: dict, skip_lines: set, mapping: dict, bio_lines=()):

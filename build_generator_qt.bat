@@ -82,8 +82,16 @@ if not exist "dist\%APP_NAME%\%APP_NAME%.exe" goto :failed
 rem Word macros (order check) next to the exe: NAT_CheckOrderWithProgram finds both there.
 xcopy /E /I /Y "%ROOT%word_macro" "dist\%APP_NAME%\word_macro" >nul
 
+rem Also a version WITHOUT an own exe (start via .bat): the signed official
+rem pythonw.exe runs the sources - for PCs where Smart App Control blocks the exe.
+echo.
+echo Building the version without an exe (start via .bat) ...
+"%PY%" "%ROOT%scripts\portable\build_portable.py" main
+if errorlevel 1 echo WARNING: the .bat version was not built - see the messages above.
+
 echo.
 echo Готово: dist\%APP_NAME%\%APP_NAME%.exe  (версiя %NEW_VERSION%)
+echo .bat version: dist\%APP_NAME%_bat\%APP_NAME%.bat
 echo Запускати треба разом з усiєю текою dist\%APP_NAME%.
 echo.
 pause

@@ -270,3 +270,12 @@ def test_unit_with_another_item_stays_a_recipient():
         ["НАКАЗ", "§ 1", HEADING_WITH_NODE, "", INTERNAL, "1985 р.н.", "", other, "1990 р.н."]
     )
     assert before and after == before
+
+
+def test_distribution_calculation_only_above_ten_recipients():
+    from nodeautomationtoolkit.generator.messages import use_distribution_calculation
+
+    ten = [f"Командиру військової частини А{n:04d}" for n in range(10)]
+    assert not use_distribution_calculation("calc.docx", ten)  # до 10 — усі в супроводі
+    assert use_distribution_calculation("calc.docx", ten + ["Командиру військової частини А9999"])
+    assert not use_distribution_calculation("", ten * 3)  # зразка немає — розрахунку немає

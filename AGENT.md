@@ -2851,3 +2851,27 @@ Python Software Foundation), бібліотеки ставляться pip-ом 
 усі (`run_extracts_action(scope="all")`). Раніше `run_extracts_action` ігнорував `scope` і завжди
 робив усі. Тест `test_extract_buttons_scopes`; інструкцію оновлено.
 
+---
+
+## 2026-10-30 — супровід із розрахунком розсилки; запуск без EXE в обох збірках
+
+**Супровід** (користувач: «табличку в шаблоні супроводу прибирати не треба, бо текст піде не туди»):
+- рядки таблиці з `{{кому_список}}` більше НЕ видаляються (`_fill_recipient_slots` без
+  `drop_unused_rows`); у режимі розрахунку перший `{{кому_список}}` = «Згідно з розрахунком
+  розсилки», решта порожні, `{{куди}}` = порожній абзац (лише в супроводі — `cover_replacements`);
+- **поріг:** окремий «Розрахунок розсилки» — лише коли адресатів БІЛЬШЕ 10
+  (`messages.MESSAGE_CALCULATION_MIN_RECIPIENTS`, `use_distribution_calculation`); до 10 — усі
+  адресати в супроводі, навіть якщо зразок розрахунку вибрано (журнал це пише).
+- Перевірено у Word (вигадана фікстура, 4 адресати): звичайний режим — 2 файли, 4 адресати в
+  супроводі; поріг 3 — супровід зберіг 4 рядки (1 з фразою, 3 порожні), розрахунок 1.–4.
+  Тест `test_distribution_calculation_only_above_ten_recipients`.
+
+**Запуск без EXE в обох збірках** («на всяк випадок, щоб не було помилок через смарт-фільтр»):
+`scripts/portable/build_portable.py main|messages` → `dist\GeneratorVytyagivQt_bat\` /
+`dist\Povidomlennya_bat\` (офіційний pythonw.exe + бібліотеки + код + compileall, `.bat` у корені,
+для головної — ще `word_macro`). Викликається наприкінці `build_generator_qt.bat` і
+`build_messages_qt.bat`; збій цього кроку лише попереджає, EXE лишається. `build_messages_portable.py`
+— обгортка для сумісності. Стара тека `dist\Povidomlennya_portable` замінена на `Povidomlennya_bat`.
+
+— **Claude**
+

@@ -27,7 +27,7 @@ from nodeautomationtoolkit.builtin_nodes.template_tags import (
 )
 
 from .errors import UserError, explain_error
-from .messages import MESSAGE_BY_CALCULATION_TEXT, _MESSAGE_ADDRESSEE_KIND_TAGS, build_addressee_kind_text, build_message_recipient_groups, message_item_contexts, message_skipped_item_lines, message_content_routes
+from .messages import MESSAGE_BY_CALCULATION_TEXT, use_distribution_calculation, _MESSAGE_ADDRESSEE_KIND_TAGS, build_addressee_kind_text, build_message_recipient_groups, message_item_contexts, message_skipped_item_lines, message_content_routes
 from .naming import _slash_to_lines, extract_metadata_from_filename, format_message_date
 from .order_text import text_before_order_signer
 from .units import append_unit_stubs_to_table, collect_new_unit_names, describe_cipher_problems, unmatched_open_unit_spans
@@ -85,8 +85,9 @@ class MessagesMixin:
             "• і те, і те → «командирам військових частин та начальникам ОТЦК та СП».\n\n"
             "Розрахунок розсилки (необов'язковий третій зразок): таблиця з "
             "{{кому_список}} у рядку, як у супроводі; рядки нумеруються 1., 2., … "
-            "Якщо його вибрано, у супроводі в {{кому_список}} пишеться "
-            "«Згідно з розрахунком розсилки», а зайві заготовлені рядки прибираються.\n\n"
+            "Створюється лише коли частин БІЛЬШЕ 10; тоді в супроводі таблиця лишається "
+            "як у зразку, у першому {{кому_список}} — «Згідно з розрахунком розсилки», "
+            "решта порожні, {{куди}} — порожній. До 10 частин усі адресати — у супроводі.\n\n"
             "У шаблоні зі змістом:\n"
             "{{зміст_шифр}} — пункти наказу із заміною відкритих назв частин "
             "на шифри з Excel. Назви, які лишилися без збігу, виділяються жовтим.\n\n"
@@ -260,9 +261,7 @@ class MessagesMixin:
         return None
 
     @staticmethod
-    def _fill_recipient_slots(
-        document, recipients: list[str], drop_unused_rows: bool = False
-    ) -> tuple[int, int]:
+    def _fill_recipient_slots(document, recipients: list[str]) -> tuple[int, int]:
         """Заповнює кожен {{кому_список}} одним наступним адресатом.
 
         Теги зазвичай лежать у рядках таблиці поруч зі штампом. Тому список
@@ -273,7 +272,6 @@ class MessagesMixin:
         """
         slot_count = 0
         last_row_context = None
-        unused_rows = []
         find_obj = document.Content.Find
         find_obj.Text = "{{кому_список}}"
         iterations = 0
@@ -284,23 +282,9 @@ class MessagesMixin:
             last_row_context = row_context or last_row_context
             value = recipients[slot_count] if slot_count < len(recipients) else ""
             find_obj.Parent.Text = value
-            if drop_unused_rows and not value and row_context:
-                unused_rows.append(row_context)
             slot_count += 1
             find_obj = document.Content.Find
             find_obj.Text = "{{кому_список}}"
-
-        # Заготовлені рядки, яким не дісталось адресата, прибираються, якщо в
-        # них більше нічого немає (супровід «згідно з розрахунком розсилки»).
-        for table, row_index, _ in sorted(
-            unused_rows, key=lambda context: (context[0].Range.Start, context[1]), reverse=True
-        ):
-            try:
-                row = table.Rows(row_index)
-                if not row.Range.Text.replace("\r", "").replace("\x07", "").strip():
-                    row.Delete()
-            except Exception:
-                continue
 
         if slot_count >= len(recipients) or last_row_context is None:
             return slot_count, max(0, len(recipients) - slot_count)
@@ -831,9 +815,10 @@ class MessagesMixin:
                 executor_bookmarks.append(bookmark_name)
             recipient_slots = recipient_overflow = 0
             if recipients is not None:
-                recipient_slots, recipient_overflow = self._fill_recipient_slots(
-                    doc, recipients, drop_unused_rows=recipients == [MESSAGE_BY_CALCULATION_TEXT]
-                )
+                # Заготовлені рядки таблиці НЕ прибираються навіть у режимі «Згідно з
+                # розрахунком розсилки»: інакше текст зразка під таблицею з'їжджав
+                # не туди (30.10.2026). Зайві рядки просто лишаються порожніми.
+                recipient_slots, recipient_overflow = self._fill_recipient_slots(doc, recipients)
                 if number_recipient_rows:
                     self._renumber_recipient_rows(doc, recipients)
             highlighted_count = 0
@@ -1104,18 +1089,29 @@ class MessagesMixin:
             cover_output = os.path.join(out_folder, f"Повідомлення_супровід{suffix}.docx")
             content_output = os.path.join(out_folder, f"Повідомлення_шифрований_зміст{suffix}.docx")
 
-            # Обрано зразок «Розрахунок розсилки» — адресати йдуть у нього, а в
-            # супроводі замість переліку пишеться фраза (вимога 26.10.2026).
+            # «Розрахунок розсилки» — лише коли частин понад 10 (30.10.2026): тоді адресати
+            # йдуть у нього, а в супроводі таблиця лишається як у зразку, у першому рядку
+            # «кому» — «Згідно з розрахунком розсилки», «куди» — порожній абзац.
             calc_template = self.message_calc_template_path.get().strip()
             if calc_template and not os.path.isfile(calc_template):
                 self.log(f"УВАГА: зразок розрахунку розсилки не знайдено: {calc_template}")
                 calc_template = ""
-            cover_recipients = [MESSAGE_BY_CALCULATION_TEXT] if calc_template else recipients
+            if calc_template and not use_distribution_calculation(calc_template, recipients):
+                self.log(
+                    f"Адресатів {len(recipients)} (не більше 10) — розрахунок розсилки не потрібен, "
+                    "усі адресати в супроводі."
+                )
+                calc_template = ""
+            cover_replacements = dict(replacements)
+            cover_recipients = recipients
+            if calc_template:
+                cover_recipients = [MESSAGE_BY_CALCULATION_TEXT]
+                cover_replacements["{{куди}}"] = ""
             _, recipient_slots, recipient_overflow = self._create_message_file(
                 word,
                 self.message_cover_template_path.get(),
                 cover_output,
-                replacements,
+                cover_replacements,
                 recipients=cover_recipients,
             )
             highlights, _, _ = self._create_message_file(
