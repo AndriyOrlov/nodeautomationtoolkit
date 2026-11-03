@@ -308,8 +308,25 @@ class ExtractsMixin:
             # _set_copy_two_sources уже наповнив список і позначив їх.
             if not self.last_copy_two_paths:
                 self.log("Примірники не створено — розрахунок і витяги виконуємо за самими наказами.")
-            self.run_rozrahunok_action()
-            self.run_extracts_action(scope="all")
+            # Кожен наступний крок отримує ЯВНИЙ список файлів, а не читає галочки
+            # таблиць: галочки й виділення міняються під час роботи, і пакет міг
+            # скорочуватись до одного наказу (03.11.2026).
+            copies = [path for path in self.last_copy_two_paths if os.path.isfile(path)]
+            if copies:
+                stage_paths, alongside = copies, True
+            else:
+                stage_paths, alongside = list(order_paths), False
+            self.save_config()
+            failures = self._run_batch(
+                stage_paths, self.run_rozrahunok, "Розрахунок для", alongside=alongside
+            )
+            self._report_batch_result(len(stage_paths), failures, "Розрахунок розсилки", "розрахунок розсилки")
+            failures = self._run_batch(
+                stage_paths, lambda: self.run_extracts(scope="all"), "Витяги для", alongside=alongside
+            )
+            self._report_batch_result(
+                len(stage_paths), failures, "Усі витяги для", "генерацію всіх витягів"
+            )
             self.log("⚙️ Повний цикл завершено.")
         finally:
             self._batch_running = False
