@@ -578,7 +578,7 @@ def _build_cipher_patterns(mapping: dict | None, fuzzy_match: bool) -> tuple:
             # в словнику, тож саме вони й проковтували текст пункту (4.2.9).
             # Для маршрутизації ці рядки далі потрібні — там вони не змінені.
             continue
-        closed_code = _format_full_closed_unit_text(mapped_val, mapping_dict)
+        closed_code = _format_full_closed_unit_text(mapped_val, mapping_dict, full_chain=True)
         raw_cipher = _table_cipher(mapped_val, open_name)
         corps_info = str(mapped_val.get("corps") or "").strip() if isinstance(mapped_val, dict) else ""
         corps_unresolved = bool(corps_info) and not _table_cipher(

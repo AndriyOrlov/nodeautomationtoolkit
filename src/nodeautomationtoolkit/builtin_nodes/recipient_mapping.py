@@ -2979,8 +2979,12 @@ _SUBORDINATE_UNIT_KIND_RE = re.compile(
 )
 
 
-def _format_full_closed_unit_text(mapped_val: dict | str, mapping_dict: dict) -> str:
-    """Форматує закриту назву ВЧ: 'військової частини АXXXX', а якщо вказано корпус — 'військової частини АXXXX військової частини АYYYY'. Для ТЦК зберігає назву без змін."""
+def _format_full_closed_unit_text(mapped_val: dict | str, mapping_dict: dict, full_chain: bool = False) -> str:
+    """Форматує закриту назву ВЧ: 'військової частини АXXXX', а якщо вказано корпус — 'військової частини АXXXX військової частини АYYYY'. Для ТЦК зберігає назву без змін.
+
+    `full_chain` (повідомлення, 03.11.2026): ланцюг за стовпцем D не зупиняється
+    на корпусі, а йде до кінця — батальйон → частина → АК/ОК → ОК → КСВ.
+    """
     if isinstance(mapped_val, dict):
         open_name = str(mapped_val.get("open_name", "")).strip()
         cipher = str(mapped_val.get("cipher") or mapped_val.get("closed_name") or "").strip()
@@ -3030,7 +3034,7 @@ def _format_full_closed_unit_text(mapped_val: dict | str, mapping_dict: dict) ->
         links = [unit_code]
         seen = {re.sub(r"\s+", "", cipher).upper()}
         link_ref = corps_name
-        for _ in range(5):  # запобіжник від зациклених посилань у таблиці
+        for _ in range(8):  # запобіжник від зациклених посилань у таблиці
             link_entry = _find_corps_entry(link_ref, _extract_corps_abbr(link_ref), mapping_dict)
             link_cipher = _table_cipher(link_entry)
             link_key = re.sub(r"\s+", "", link_cipher).upper()
@@ -3042,7 +3046,7 @@ def _format_full_closed_unit_text(mapped_val: dict | str, mapping_dict: dict) ->
             # ланка в закритий текст частини не йшла й не має з'являтися зараз.
             # «Бригада … армійського корпусу» у стовпці A — ще не корпус.
             link_name = str(link_entry.get("open_name") or link_ref).casefold()
-            if re.search(r"корпус|командуван", link_name) and not _SUBORDINATE_UNIT_KIND_RE.search(link_name):
+            if not full_chain and re.search(r"корпус|командуван", link_name) and not _SUBORDINATE_UNIT_KIND_RE.search(link_name):
                 break
             link_ref = str(link_entry.get("corps", "")).strip()
             if not link_ref:

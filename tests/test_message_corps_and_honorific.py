@@ -401,13 +401,15 @@ def _column_d_chain_mapping(brigade_name="22 окрема тестова бри�
 def test_battalion_alone_gets_whole_chain_from_column_d(brigade_name):
     result, _, _ = cipher_unit_names("командира роти 11 окремого тестового батальйону", _column_d_chain_mapping(brigade_name))
     assert result == (
-        "командира роти військової частини А1111 військової частини А2222 військової частини А3333"
+        "командира роти військової частини А1111 військової частини А2222 військової частини А3333 "
+        "військової частини А0777"
     )
 
 
-def test_chain_stops_at_corps_as_before():
+def test_chain_goes_past_corps_to_ok():
+    # 03.11.2026: у повідомленнях ланцюг більше не зупиняється на корпусі.
     result, _, _ = cipher_unit_names("офіцера 22 окремої тестової бригади", _column_d_chain_mapping())
-    assert result == "офіцера військової частини А2222 військової частини А3333"
+    assert result == "офіцера військової частини А2222 військової частини А3333 військової частини А0777"
 
 
 def test_looped_column_d_does_not_hang():

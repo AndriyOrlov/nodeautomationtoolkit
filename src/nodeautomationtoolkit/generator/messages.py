@@ -13,6 +13,27 @@ from nodeautomationtoolkit.builtin_nodes.recipient_mapping import (
 
 
 
+#: Рівні над корпусом, яким повідомлення НЕ надсилається (03.11.2026, тимчасово):
+#: ОК — точно; КСВ — користувач ще уточнить, тоді прибрати «КСВ» з переліку.
+MESSAGE_SKIPPED_COMMANDS = ("ОК", "КСВ")
+
+_COMMAND_KIND_PATTERNS = {
+    "ОК": (r"\bоперативн\w*\s+командуван", r"^\s*ОК(?:\s|«|\"|$)"),
+    "КСВ": (r"\bсухопутн\w*\s+військ", r"^\s*К?СВ(?:\s|$)"),
+}
+
+
+def is_message_skipped_command(entry: dict) -> bool:
+    """Рядок таблиці — ОК чи КСВ (за стовпцем A або скороченням C)."""
+    open_name = str(entry.get("open_name") or "")
+    abbreviation = str(entry.get("abbreviation") or entry.get("abbr") or "")
+    for kind in MESSAGE_SKIPPED_COMMANDS:
+        name_re, abbr_re = _COMMAND_KIND_PATTERNS[kind]
+        if re.search(name_re, open_name, re.IGNORECASE) or re.search(abbr_re, abbreviation):
+            return True
+    return False
+
+
 def build_message_recipient_groups(mapping: dict, routes: dict) -> dict[str, list[str]]:
     """Адресати повідомлення, згруповані за типом: `corps`, `units`, `tck`.
 
@@ -93,6 +114,9 @@ def build_message_recipient_groups(mapping: dict, routes: dict) -> dict[str, lis
             or re.fullmatch(r"\s*\d{1,3}\s*АК\s*", abbreviation, re.IGNORECASE)
         )
 
+    def is_skipped_command(entry: dict | None) -> bool:
+        return bool(entry) and is_message_skipped_command(entry)
+
     matched_names = set()
     match_report = routes.get("match_report")
     for row in getattr(match_report, "rows", []) or []:
@@ -135,7 +159,7 @@ def build_message_recipient_groups(mapping: dict, routes: dict) -> dict[str, lis
             entry_cipher.casefold(),
             entry_open.casefold(),
         )
-        if is_tck_entry(entry) or entry_key in matched_entry_keys:
+        if is_tck_entry(entry) or is_skipped_command(entry) or entry_key in matched_entry_keys:
             continue
         matched_entries.append(entry)
         matched_entry_keys.add(entry_key)
@@ -149,6 +173,8 @@ def build_message_recipient_groups(mapping: dict, routes: dict) -> dict[str, lis
         u_key_tuple = (u_cipher.casefold(), u_open.casefold())
         if u_key_tuple not in matched_entry_keys:
             entry = find_mapping_entry(u_cipher) or find_mapping_entry(u_open) or find_mapping_entry(str(u_key))
+            if is_skipped_command(entry) or is_skipped_command(u_data):
+                continue
             if entry and isinstance(entry, dict):
                 e_key = (str(entry.get("cipher") or "").strip().casefold(), str(entry.get("open_name") or "").strip().casefold())
                 if e_key not in matched_entry_keys:
@@ -163,7 +189,8 @@ def build_message_recipient_groups(mapping: dict, routes: dict) -> dict[str, lis
     for entry in matched_entries:
         corps_name = str(entry.get("corps") or "").strip()
         corps_entry = find_corps_entry(corps_name) if corps_name else None
-        if corps_entry is not None:
+        # Частина безпосередньо під ОК: ОК повідомлення не отримує, адресат — сама частина.
+        if corps_entry is not None and not is_skipped_command(corps_entry):
             c_key = (
                 str(corps_entry.get("cipher") or "").strip().casefold(),
                 str(corps_entry.get("open_name") or "").strip().casefold(),
