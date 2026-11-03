@@ -118,7 +118,8 @@ def test_run_fields_live_on_every_generation_tab(shell):
     shell.message_out_folder.set("C:/Повідомлення")
 
     assert _edits_with_text(shell.tab_extracts_page, "Виконавець витягів")
-    assert _edits_with_text(shell.tab_extracts_page, "C:/Витяги")
+    # Примірники й витяги — одна спільна папка результату (03.11.2026).
+    assert _edits_with_text(shell.tab_extracts_page, "C:/Примірники")
     assert _edits_with_text(shell.tab_copies_page, "Виконавець примірників")
     assert _edits_with_text(shell.tab_copies_page, "C:/Примірники")
     assert _edits_with_text(shell.tab_messages_page, "Виконавець повідомлень")
@@ -181,7 +182,7 @@ def test_selecting_order_loads_its_saved_analysis_without_regeneration(shell, le
     second = _order(tmp_path, "Наказ № 72 від 15.09.2026.docx")
 
     def save_reports(order_path, sender):
-        output = Path(order_path).parent / "Extracts_Output"
+        output = Path(order_path).parent / "Готово"
         output.mkdir(exist_ok=True)
         base = legacy.sanitize_filename(Path(order_path).stem)
         legacy._save_table_to_excel(

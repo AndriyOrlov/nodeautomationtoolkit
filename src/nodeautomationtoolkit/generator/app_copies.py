@@ -19,7 +19,7 @@ from nodeautomationtoolkit.builtin_nodes.template_tags import (
 )
 
 from .errors import explain_error
-from .naming import _slash_to_lines, back_page_tag_values, build_copy_two_filename, extract_metadata_from_filename, sanitize_filename
+from .naming import RESULT_SUBFOLDER, _slash_to_lines, back_page_tag_values, build_copy_two_filename, extract_metadata_from_filename, sanitize_filename
 from .printing import copy_sheet_count
 from .word_doc import copy_template_for_editing, force_quit_word
 
@@ -56,7 +56,7 @@ class CopiesMixin:
             # Папку результату переобчислюємо під нове джерело, доки
             # користувач не вибрав її вручну.
             if not self.p2_out_folder_manual.get():
-                self.p2_out_folder.set(os.path.join(path, "Примірники_2"))
+                self.p2_out_folder.set(os.path.join(path, RESULT_SUBFOLDER))
             self._refresh_p2_orders_view()
             self.save_config()
 
@@ -175,7 +175,7 @@ class CopiesMixin:
             self.p2_single_file.set(self.p2_manual_order_paths[0])
             if not self.p2_out_folder_manual.get():
                 self.p2_out_folder.set(
-                    os.path.join(os.path.dirname(self.p2_manual_order_paths[0]), "Примірники_2")
+                    os.path.join(os.path.dirname(self.p2_manual_order_paths[0]), RESULT_SUBFOLDER)
                 )
         self._refresh_p2_orders_view()
         self.save_config()
@@ -219,7 +219,7 @@ class CopiesMixin:
                 if self.p2_source_mode.get() == "folder"
                 else os.path.dirname(order_files[0])
             )
-            out_root = os.path.join(base_dir, "Примірники_2")
+            out_root = os.path.join(base_dir, RESULT_SUBFOLDER)
             self.p2_out_folder.set(out_root)
         os.makedirs(out_root, exist_ok=True)
         self.save_config()

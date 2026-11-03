@@ -9,7 +9,7 @@ import tkinter as tk
 from tkinter import filedialog, messagebox
 import win32com.client
 
-from .naming import is_generated_copy_filename
+from .naming import RESULT_SUBFOLDER, is_generated_copy_filename
 from .order_text import text_before_order_signer
 from .reports import load_saved_analysis_reports
 from .word_doc import force_quit_word, read_document_text
@@ -165,7 +165,7 @@ class OrdersMixin:
         output_folder = (
             os.path.dirname(order_path)
             if alongside
-            else os.path.join(os.path.dirname(order_path), "Extracts_Output")
+            else os.path.join(os.path.dirname(order_path), RESULT_SUBFOLDER)
         )
         self.doc_path.set(order_path)
         self.out_folder.set(output_folder)
@@ -251,7 +251,7 @@ class OrdersMixin:
             # інтерфейсі, з нього ж працюють повідомлення й порівняння.
             self.doc_path.set(self.manual_order_paths[0])
             self.out_folder.set(
-                os.path.join(os.path.dirname(self.manual_order_paths[0]), "Extracts_Output")
+                os.path.join(os.path.dirname(self.manual_order_paths[0]), RESULT_SUBFOLDER)
             )
             self._refresh_order_signer()
         self._refresh_orders_view()
@@ -327,12 +327,12 @@ class OrdersMixin:
 
         `alongside=True` — це примірник № 2 із пакетної обробки: витяги та
         звіти розрахунку кладемо ПОРЯД із ним, у ту саму папку наказу.
-        Для вручну обраного наказу лишається окрема `Extracts_Output`,
+        Для вручну обраного наказу лишається окрема підпапка `Готово`,
         щоб не засмічувати папку, де лежать самі накази.
         """
         self.doc_path.set(doc_path)
         order_dir = os.path.dirname(os.path.abspath(doc_path))
-        self.out_folder.set(order_dir if alongside else os.path.join(order_dir, "Extracts_Output"))
+        self.out_folder.set(order_dir if alongside else os.path.join(order_dir, RESULT_SUBFOLDER))
         os.makedirs(self.out_folder.get(), exist_ok=True)
 
     # =========================================================================

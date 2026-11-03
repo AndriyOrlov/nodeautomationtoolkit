@@ -937,7 +937,15 @@ class MessagesMixin:
             messagebox.showwarning("Помилка", "Файл наказу не знайдено.")
             return
 
-        out_folder = self.message_out_folder.get() or os.path.join(os.path.dirname(order_path), "Messages_Output")
+        # Повідомлення — у ОКРЕМО вибрану папку (користувач, 03.11.2026), не в «Готово».
+        out_folder = self.message_out_folder.get()
+        if not out_folder:
+            out_folder = filedialog.askdirectory(
+                title="Оберіть папку для повідомлень", initialdir=os.path.dirname(order_path)
+            )
+            if not out_folder:
+                return
+            self.message_out_folder.set(out_folder)
         try:
             os.makedirs(out_folder, exist_ok=True)
         except OSError as error:

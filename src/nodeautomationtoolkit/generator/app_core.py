@@ -66,7 +66,9 @@ class CoreMixin:
         self.p2_orders_folder = tk.StringVar()
         self.p2_single_file = tk.StringVar()
         self.p2_back_page_path = tk.StringVar()
-        self.p2_out_folder = tk.StringVar()
+        # Одна папка результату для примірників і витягів (користувач, 03.11.2026):
+        # інакше після примірників доводилось перемикати теку вручну.
+        self.p2_out_folder = self.out_folder
         # Чи обрано папку результату вручну. Якщо ні — вона щоразу
         # переобчислюється від поточного джерела, інакше примірники
         # продовжували б писатись у папку попереднього наказу.
