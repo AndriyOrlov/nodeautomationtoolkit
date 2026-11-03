@@ -2845,11 +2845,22 @@ _UNIT_HEAD_NOUN_FORMS = sorted(
     reverse=True,
 )
 
+# Номер і прикметники між зворотом і родовою назвою: «цього самого 3
+# армійського корпусу». Лише однозначні прикметникові закінчення, щоб
+# іменник («цього самого командира бригади») не сприйнявся за означення.
+_UNIT_REFERENCE_MODIFIERS = (
+    r"(?:\s+\d{1,4}(?:-?(?:го|й|ї|му|ій|м))?)?"
+    r"(?:\s+[а-яіїєґ'’ʼ\-]{2,}(?:ого|ої|ому|ій|ім|им|ою|ий|их))*"
+)
+
 _UNIT_REFERENCE_PATTERN = re.compile(
     r"\b(" + "|".join(re.escape(f) for f in sorted(_DETERMINER_LOOKUP, key=len, reverse=True)) + r")"
     r"(?:\s+(ж|же))?"
     r"(?:\s+(" + "|".join(re.escape(f) for f in sorted(_SAM_SURFACE_FORMS, key=len, reverse=True)) + r"))?"
-    r"\s+(?:" + "|".join(re.escape(f) for f in _UNIT_HEAD_NOUN_FORMS) + r")\b"
+    + _UNIT_REFERENCE_MODIFIERS
+    + r"\s+(?:" + "|".join(re.escape(f) for f in _UNIT_HEAD_NOUN_FORMS) + r")\b"
+    # «корпусу морської піхоти» — тип частини, а не уточнення поза зворотом.
+    r"(?:\s+морськ\w*\s+піхот\w*)?"
     # ТЦК не є військовою частиною і в повідомленнях лишається відкритою
     # назвою, тому «центру комплектування…» не перетворюємо.
     r"(?!\s+комплектуванн)",
