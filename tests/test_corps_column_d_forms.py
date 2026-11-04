@@ -5,6 +5,9 @@
 «N АК». Рядок корпусу тоді не знаходився: ключ будувався без шифру, і на один
 корпус виходило ДВА витяги, причому у другому «Кому»/«Куди» лишалися від
 підпорядкованої частини.
+
+04.11.2026: ОК у розсилку не входить (рішення користувача), тож єдиний витяг
+тепер отримує сама бригада, а не командування, на яке посилається D.
 """
 
 import sys
@@ -60,11 +63,11 @@ def _mapping(corps_column):
     [CORPS_ABBR, CORPS_NAME],
     ids=["D=скорочення", "D=повна-назва"],
 )
-def test_one_extract_for_the_corps_however_column_d_names_it(corps_column):
+def test_one_extract_however_column_d_names_the_command(corps_column):
     routes = map_military_units(text=ORDER, mapping=_mapping(corps_column))
     units = routes["unit_paragraphs"]
 
     assert len(units) == 1, f"очікувався один витяг, отримано: {sorted(units)}"
     entry = next(iter(units.values()))
-    assert entry["recipient_to"] == "Командиру військової частини А0777"
-    assert entry["destination_where"] == "м. Корпусне"
+    assert entry["recipient_to"] == "Командиру військової частини А0267"
+    assert entry["destination_where"] == "м. Бригадне"

@@ -8,6 +8,7 @@ import re
 from nodeautomationtoolkit.builtin_nodes.recipient_mapping import (
     _table_cipher,
     _format_full_closed_unit_text,
+    is_distribution_excluded,
     map_military_units,
 )
 
@@ -135,8 +136,8 @@ def build_message_recipient_groups(mapping: dict, routes: dict) -> dict[str, lis
             entry_cipher.casefold(),
             entry_open.casefold(),
         )
-        if is_tck_entry(entry) or entry_key in matched_entry_keys:
-            continue
+        if is_tck_entry(entry) or entry_key in matched_entry_keys or is_distribution_excluded(entry):
+            continue  # ОК і КСВ у розсилку не входять (04.11.2026)
         matched_entries.append(entry)
         matched_entry_keys.add(entry_key)
 
@@ -149,6 +150,8 @@ def build_message_recipient_groups(mapping: dict, routes: dict) -> dict[str, lis
         u_key_tuple = (u_cipher.casefold(), u_open.casefold())
         if u_key_tuple not in matched_entry_keys:
             entry = find_mapping_entry(u_cipher) or find_mapping_entry(u_open) or find_mapping_entry(str(u_key))
+            if entry and isinstance(entry, dict) and is_distribution_excluded(entry):
+                continue
             if entry and isinstance(entry, dict):
                 e_key = (str(entry.get("cipher") or "").strip().casefold(), str(entry.get("open_name") or "").strip().casefold())
                 if e_key not in matched_entry_keys:
@@ -163,6 +166,8 @@ def build_message_recipient_groups(mapping: dict, routes: dict) -> dict[str, lis
     for entry in matched_entries:
         corps_name = str(entry.get("corps") or "").strip()
         corps_entry = find_corps_entry(corps_name) if corps_name else None
+        if corps_entry is not None and is_distribution_excluded(corps_entry):
+            corps_entry = None  # стовпець D = ОК/КСВ: окремим адресатом не стає
         if corps_entry is not None:
             c_key = (
                 str(corps_entry.get("cipher") or "").strip().casefold(),

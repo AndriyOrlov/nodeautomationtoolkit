@@ -1581,6 +1581,11 @@ def map_military_units(
             mapping_dict[clean_k] = clean_v
         else:
             mapping_dict[clean_k] = v
+    # Стовпець D = ОК/КСВ: частина не передає свій витяг командуванню, адресатом
+    # лишається вона сама (ОК і КСВ у розсилку не входять, 04.11.2026).
+    for clean_v in mapping_dict.values():
+        if isinstance(clean_v, dict) and _corps_reference_is_excluded(clean_v.get("corps", ""), mapping_dict):
+            clean_v["corps"] = ""
 
     lines = [line.rstrip() for line in text.splitlines()]
 
@@ -2367,8 +2372,19 @@ def map_military_units(
             )
         )
 
+        # ОК і КСВ у розсилку не входять (04.11.2026): їхній рядок A лише займає
+        # свою ділянку тексту, а адресатом пункту не стає.
+        def is_excluded_pair(pair: tuple[str, str]) -> bool:
+            return is_distribution_excluded(mapping_dict.get(pair[1]) or pair[1])
+
+        context_pairs = set(active_section_units) | set(header_zvidky_units)
+        excluded_pairs = {pair for pair in item_destinations | context_pairs if is_excluded_pair(pair)}
+        item_destinations -= excluded_pairs
+        # Шапка § називає лише ОК — контекстом лишається адресат преамбули наказу.
+        base_source = (set(active_section_units) - excluded_pairs) or (set(header_zvidky_units) - excluded_pairs)
+        excluded_recipient_names = sorted({open_name for _key, open_name in excluded_pairs})
+
         # Формуємо підсумковий набір отримувачів пункту (Джерело ЗВІДКИ + Призначення КУДИ)
-        base_source = active_section_units or set(header_zvidky_units)
         matched_units_in_block = set(base_source) | item_destinations
 
         def audit_recipient_names(recipient_pairs: set[tuple[str, str]]) -> list[str]:
@@ -2424,6 +2440,8 @@ def map_military_units(
             applied_rules.append("зміна до управління: витяг виключено із загального переліку")
         if internal_management_move:
             applied_rules.append("внутрішнє переміщення в управлінні")
+        if excluded_recipient_names:
+            applied_rules.append("ОК/КСВ у розсилку не входить: " + ", ".join(excluded_recipient_names))
         routing_audit.append(
             {
                 "label": block.get("label", ""),
@@ -2537,6 +2555,15 @@ def map_military_units(
                     "label": block.get("label", ""),
                     "text": "\n".join(block.get("lines", [])).strip(),
                     "reason": "Зміна до управління: витяг не створюється у загальному переліку.",
+                }
+            )
+        elif excluded_recipient_names:
+            # Адресатом був лише ОК/КСВ — пункт свідомо не розсилається, це не пропуск.
+            skipped_items.append(
+                {
+                    "label": block.get("label", ""),
+                    "text": "\n".join(block.get("lines", [])).strip(),
+                    "reason": "ОК і КСВ у розсилку не входять: " + ", ".join(excluded_recipient_names) + ".",
                 }
             )
         else:
@@ -2980,6 +3007,39 @@ def is_service_branch_command(mapped_val: dict | str) -> bool:
     name = mapped_val.get("open_name", "") if isinstance(mapped_val, dict) else mapped_val
     clean = str(name or "").replace("\xad", "").translate(_LATIN_LOOKALIKES)
     return bool(_SERVICE_BRANCH_COMMAND_RE.match(clean))
+
+
+# Оперативне командування та КСВ не отримують ні витягів, ні повідомлень
+# (рішення користувача 04.11.2026: «ОК і КСВ у розсилку не входять»).
+_OPERATIONAL_COMMAND_RE = re.compile(r"^\s*оперативн\w*\s+командуванн", re.IGNORECASE | re.UNICODE)
+_EXCLUDED_ABBREVIATION_RE = re.compile(r"^\s*(?:ОК|КСВ)(?:\s|$|[«\"“])", re.UNICODE)
+
+
+def is_distribution_excluded(mapped_val: dict | str) -> bool:
+    """Чи рядок таблиці — ОК або командування виду ЗС: такий адресат у розсилку не йде."""
+    if isinstance(mapped_val, dict):
+        name = str(mapped_val.get("open_name") or "")
+        abbreviation = str(mapped_val.get("abbreviation") or mapped_val.get("abbr") or "")
+    else:
+        name, abbreviation = str(mapped_val or ""), ""
+    clean = name.lstrip("#").replace("\xad", "").translate(_LATIN_LOOKALIKES)
+    return bool(
+        _OPERATIONAL_COMMAND_RE.match(clean)
+        or is_service_branch_command(clean)
+        or _EXCLUDED_ABBREVIATION_RE.match(clean)
+        or _EXCLUDED_ABBREVIATION_RE.match(abbreviation)
+    )
+
+
+def _corps_reference_is_excluded(corps_col: str, mapping_dict: dict) -> bool:
+    """Чи стовпець D посилається на ОК/КСВ — тоді частина не підпорядковується йому в розсилці."""
+    corps_col = str(corps_col or "").strip()
+    if not corps_col:
+        return False
+    if is_distribution_excluded(corps_col):
+        return True
+    corps_entry = _find_corps_entry(corps_col, _extract_corps_abbr(corps_col), mapping_dict)
+    return bool(corps_entry) and is_distribution_excluded(corps_entry)
 
 
 def is_tck_entry(mapped_val: dict | str) -> bool:
