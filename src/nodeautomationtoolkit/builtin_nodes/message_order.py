@@ -25,6 +25,7 @@ from nodeautomationtoolkit.builtin_nodes.recipient_mapping import (
     _table_cipher,
     _match_case,
     _format_full_closed_unit_text,
+    _is_high_command_entry,
     _mask_anaphoric_unit_references,
     _unit_name_signature,
     RecipientMapping,
@@ -511,13 +512,16 @@ def _mapping_fingerprint(mapping: dict | None) -> tuple:
     )
 
 
-def _prepare_cipher_patterns(mapping: dict | None, fuzzy_match: bool) -> tuple:
+def _prepare_cipher_patterns(
+    mapping: dict | None, fuzzy_match: bool, full_chain: bool = False, high_commands: frozenset | None = None
+) -> tuple:
     fingerprint = _mapping_fingerprint(mapping)
-    cached = _PREPARED_CIPHER_CACHE.get(fuzzy_match)
+    cache_key = (fuzzy_match, full_chain, high_commands)
+    cached = _PREPARED_CIPHER_CACHE.get(cache_key)
     if cached is not None and cached[0] == fingerprint:
         return cached[1]
-    prepared = _build_cipher_patterns(mapping, fuzzy_match)
-    _PREPARED_CIPHER_CACHE[fuzzy_match] = (fingerprint, prepared)
+    prepared = _build_cipher_patterns(mapping, fuzzy_match, full_chain, high_commands)
+    _PREPARED_CIPHER_CACHE[cache_key] = (fingerprint, prepared)
     return prepared
 
 
@@ -539,7 +543,9 @@ def clear_table_caches() -> None:
         cached.cache_clear()
 
 
-def _build_cipher_patterns(mapping: dict | None, fuzzy_match: bool) -> tuple:
+def _build_cipher_patterns(
+    mapping: dict | None, fuzzy_match: bool, full_chain: bool = False, high_commands: frozenset | None = None
+) -> tuple:
     mapping_dict = {}
     for key, value in (mapping or {}).items():
         clean_key = _fix_military_typos(str(key))
@@ -578,7 +584,9 @@ def _build_cipher_patterns(mapping: dict | None, fuzzy_match: bool) -> tuple:
             # в словнику, тож саме вони й проковтували текст пункту (4.2.9).
             # Для маршрутизації ці рядки далі потрібні — там вони не змінені.
             continue
-        closed_code = _format_full_closed_unit_text(mapped_val, mapping_dict, full_chain=True)
+        closed_code = _format_full_closed_unit_text(
+            mapped_val, mapping_dict, full_chain=full_chain, high_commands=high_commands
+        )
         raw_cipher = _table_cipher(mapped_val, open_name)
         corps_info = str(mapped_val.get("corps") or "").strip() if isinstance(mapped_val, dict) else ""
         corps_unresolved = bool(corps_info) and not _table_cipher(
@@ -661,6 +669,8 @@ def cipher_unit_names(
     rules: str | list | dict | None = None,
     problems: list | None = None,
     context_before: str = "",
+    full_chain: bool = False,
+    high_commands: frozenset | None = None,
 ) -> tuple[str, int, list]:
     """Замінює відкриті назви частин на шифри, НЕ змінюючи структуру рядків.
 
@@ -677,6 +687,10 @@ def cipher_unit_names(
     (якщо список передано), щоб генератор показав їх користувачу:
     `("no_cipher", назва)` або `("corps_missing", назва, стовпець D)`.
 
+    `full_chain` — «подовжена версія» (галочка, 03.11.2026): ланцюг за стовпцем D
+    іде вище корпусу до ОК і КСВ — тих, що НАЗВАНІ в наказі (`high_commands`, див.
+    `high_commands_in_text`). Без неї — як раніше, до корпусу.
+
     `context_before` — попередні абзаци того самого пункту, коли шифрується
     окремий абзац: за ними видно, що «цього самого центру» — це ТЦК, згаданий
     раніше, і зворот лишається відкритим.
@@ -688,7 +702,7 @@ def cipher_unit_names(
     # змінюються тільки знайдені назви частин.
     source_text = text
     search_text, source_starts, source_ends = _normalize_typos_with_offsets(source_text)
-    mapping_dict, patterns_to_apply, nested_candidates = _prepare_cipher_patterns(mapping, fuzzy_match)
+    mapping_dict, patterns_to_apply, nested_candidates = _prepare_cipher_patterns(mapping, fuzzy_match, full_chain, high_commands)
     replaced_count = 0
     report_rows = []
 
@@ -806,6 +820,25 @@ def cipher_unit_names(
     return text, replaced_count, report_rows
 
 
+def high_commands_in_text(text: str, mapping: dict | None, fuzzy_match: bool = True) -> frozenset:
+    """Шифри ОК/КСВ, названих у тексті наказу (пошук за колонкою A).
+
+    Для «подовженої версії»: ланка ОК/КСВ із колонки D іде в ланцюг лише тоді,
+    коли цей рівень згадано в наказі (користувач, 03.11.2026).
+    """
+    if not text:
+        return frozenset()
+    _, _, report_rows = cipher_unit_names(text, mapping, fuzzy_match=fuzzy_match)
+    # Назви у звіті — ключі ПІСЛЯ виправлення описок, тож і рядки беремо звідти.
+    mapping_dict = _prepare_cipher_patterns(mapping, fuzzy_match)[0]
+    found = set()
+    for open_name, *_ in report_rows:
+        entry = mapping_dict.get(open_name)
+        if _is_high_command_entry(entry):
+            found.add(re.sub(r"\s+", "", _table_cipher(entry)).upper())
+    return frozenset(found - {""})
+
+
 def _collapse_unit_phrase_repeats(text: str) -> str:
     """Згортає підряд повторені «військової частини» та однакові шифри.
 
@@ -894,6 +927,8 @@ def generate_decision_order(
     new_header: str = "",
     fuzzy_match: bool = True,
     rules: str | list | dict | None = None,
+    full_chain: bool = False,
+    high_commands: frozenset | None = None,
 ) -> dict:
     """Генерує закритий текст для режиму повідомлення."""
     if not text.strip():
@@ -930,6 +965,8 @@ def generate_decision_order(
         RecipientMapping(mapping_dict, keep_open_names=keep_open_names_of(mapping)),
         fuzzy_match=fuzzy_match,
         rules=rules,
+        full_chain=full_chain,
+        high_commands=high_commands,
     )
 
     # 4.2. Порожні рядки: 1 перед пунктом, 2 перед підписантом

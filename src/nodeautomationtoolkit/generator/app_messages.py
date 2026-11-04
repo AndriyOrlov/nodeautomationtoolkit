@@ -17,6 +17,7 @@ from nodeautomationtoolkit.builtin_nodes.recipient_mapping import (
 from nodeautomationtoolkit.builtin_nodes.message_order import (
     generate_decision_order,
     cipher_unit_names,
+    high_commands_in_text,
     clear_table_caches,
     find_content_start_line,
     reflow_soft_breaks,
@@ -462,7 +463,9 @@ class MessagesMixin:
         # шифрування вмикається лише там, де воно справді потрібне.
         highlighted = 0
         if content_source.get("cipher", True):
-            highlighted = self._cipher_inserted_content(doc, content_start, insert_point, mapping)
+            highlighted = self._cipher_inserted_content(
+                doc, content_start, insert_point, mapping, **self._message_chain_options()
+            )
 
         if bookmark_name and doc.Bookmarks.Exists(bookmark_name):
             content_range = doc.Bookmarks(bookmark_name).Range
@@ -665,7 +668,9 @@ class MessagesMixin:
         doc.Repaginate()
 
     @staticmethod
-    def _cipher_inserted_content(doc, content_start: int, content_end: int, mapping: dict) -> int:
+    def _cipher_inserted_content(
+        doc, content_start: int, content_end: int, mapping: dict, **chain_options
+    ) -> int:
         """Шифрує вставлені абзаци поабзацно, зберігаючи їх форматування."""
         content_range = doc.Range(content_start, content_end)
         # Один прохід колекцією: `Paragraphs(i)` у циклі квадратичний, а текст
@@ -683,7 +688,9 @@ class MessagesMixin:
             if not core.strip():
                 continue
 
-            ciphered, _, _ = cipher_unit_names(core, mapping, context_before=context_before)
+            ciphered, _, _ = cipher_unit_names(
+                core, mapping, context_before=context_before, **chain_options
+            )
             ciphered = apply_ukrainian_typography(clean_duplicated_units(ciphered))
             # Мʼякий перенос посеред фрази зшивається САМЕ ТУТ — у повідомленні
             # довга відкрита назва стає трьома словами, і рядок, розірваний у
@@ -865,6 +872,19 @@ class MessagesMixin:
     # лише в Qt-оболонці (`QtShellMixin`); Tk-версія тільки попереджає.
     ADD_NEW_UNITS_TO_TABLE = False
 
+    def _message_full_chain(self) -> bool:
+        """Галочка «Подовжена версія»: шифри ланцюга вище корпусу — ОК і КСВ."""
+        variable = getattr(self, "message_full_chain", None)
+        return bool(variable.get()) if variable is not None else False
+
+    def _message_chain_options(self) -> dict:
+        """Параметри ланцюга для шифрування: ОК/КСВ — лише названі в цьому наказі."""
+        full_chain = self._message_full_chain()
+        return {
+            "full_chain": full_chain,
+            "high_commands": getattr(self, "_message_high_commands", frozenset()) if full_chain else None,
+        }
+
     def _report_table_gaps(self, order_text: str, mapping: dict) -> dict:
         """Показує, чого бракує в таблиці для закритого змісту повідомлення.
 
@@ -872,7 +892,7 @@ class MessagesMixin:
         """
         body = "\n".join(order_text.splitlines()[find_content_start_line(order_text):])
         problems: list = []
-        cipher_unit_names(body, mapping, problems=problems)
+        cipher_unit_names(body, mapping, problems=problems, **self._message_chain_options())
         for line in describe_cipher_problems(problems):
             self.log(line)
 
@@ -979,6 +999,10 @@ class MessagesMixin:
             # У повідомленнях дата не розкривається словами (на відміну від витягів).
             order_date_formatted = format_message_date(order_date)
 
+            # «Подовжена версія»: ОК/КСВ ідуть у ланцюг, лише якщо їх названо в наказі.
+            self._message_high_commands = (
+                high_commands_in_text(order_text, mapping) if self._message_full_chain() else frozenset()
+            )
             table_gaps = self._report_table_gaps(order_text, mapping)
             routes = map_military_units(text=order_text, mapping=mapping, bio_lines=message_bio_lines)
 
@@ -1056,7 +1080,9 @@ class MessagesMixin:
             if self.message_executor.get().strip():
                 replacements["{{виконавець}}"] = self.message_executor.get().strip()
 
-            decision = generate_decision_order(text=content_text, mapping=mapping, new_header="")
+            decision = generate_decision_order(
+                text=content_text, mapping=mapping, new_header="", **self._message_chain_options()
+            )
             encrypted_content = decision.get("decision_text", "")
 
             # Відповідність рядків тексту абзацам Word — так само, як у витягах.

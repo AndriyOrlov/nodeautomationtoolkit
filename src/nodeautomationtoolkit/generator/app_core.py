@@ -38,6 +38,8 @@ class CoreMixin:
         self.duplex_2up_layout = tk.BooleanVar(value=True)
         # Повідомлення: не переносити пункти внутрішнього переміщення в управлінні.
         self.message_skip_internal_management = tk.BooleanVar(value=True)
+        # Повідомлення: «подовжена версія» — шифри ланцюга вище корпусу (ОК, КСВ).
+        self.message_full_chain = tk.BooleanVar(value=False)
 
         # Підписант оригіналу наказу (Командувач/Командир — зчитується автоматично з наказу)
         self.order_signer_position = tk.StringVar()
@@ -271,6 +273,8 @@ class CoreMixin:
                         self.message_skip_internal_management.set(
                             data["message_skip_internal_management"]
                         )
+                    if "message_full_chain" in data:
+                        self.message_full_chain.set(data["message_full_chain"])
 
                     self.p2_orders_folder.set(data.get("p2_orders_folder", ""))
                     self.p2_single_file.set(data.get("p2_single_file", ""))
@@ -348,6 +352,7 @@ class CoreMixin:
             "group_corps": self.group_corps_var.get(),
             "duplex_2up_layout": self.duplex_2up_layout.get(),
             "message_skip_internal_management": self.message_skip_internal_management.get(),
+            "message_full_chain": self.message_full_chain.get(),
             "p2_orders_folder": self.p2_orders_folder.get(),
             "p2_single_file": self.p2_single_file.get(),
             "p2_source_mode": self.p2_source_mode.get(),

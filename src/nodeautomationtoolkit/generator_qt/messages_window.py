@@ -107,6 +107,12 @@ class MessagesShellMixin:
                 "не переноситься у шифрований зміст."
             )
             row.addWidget(skip_box)
+            chain_box = check_box("Подовжена версія", self.message_full_chain)
+            chain_box.setToolTip(
+                "Увімкнено — ланцюг за стовпцем D іде вище корпусу: ОК і КСВ, "
+                "якщо їх названо в наказі. Вимкнено — як раніше, до корпусу."
+            )
+            row.addWidget(chain_box)
             row.addStretch(1)
 
         root.addWidget(

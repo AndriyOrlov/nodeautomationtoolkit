@@ -606,9 +606,12 @@ def _build_unit_fuzzy_pattern(open_name: str) -> re.Pattern:
     # Інакше шаблон «Волинський обласний ТЦК» брав «Волинській області» з
     # одного речення, а «центр комплектування» — вже з наступного Львівського
     # ТЦК, створюючи паразитного адресата.
+    # «командування» — теж голова назви (ОК, КСВ): у ланцюгу «…оперативного
+    # командування «Тест» командування Сухопутних військ» шаблон КСВ інакше
+    # починався з ПЕРШОГО «командування» і ковтав назву ОК (03.11.2026).
     unit_head_guard = (
         r"(?!\b(?:батальйон|бригад|полк|центр|корпус|дивізіон|загін|загон|"
-        r"вузол|вузл|госпітал|арсенал|інститут|університет|академі|баз)\w*\b)"
+        r"вузол|вузл|госпітал|арсенал|інститут|університет|академі|баз|командуван)\w*\b)"
     )
     gap = (
         r"(?:(?!\b\d{1,4}\b)(?!\s[-–—]\s)(?![.;:])"
@@ -2992,11 +2995,44 @@ _SUBORDINATE_UNIT_KIND_RE = re.compile(
 )
 
 
-def _format_full_closed_unit_text(mapped_val: dict | str, mapping_dict: dict, full_chain: bool = False) -> str:
+# Назва має ПОЧИНАТИСЯ з рівня: «бригада … оперативного командування» чи
+# «навчальний центр Сухопутних військ» — звичайні частини, а не ОК/КСВ.
+_OK_NAME_RE = re.compile(r"^[\s#]*(?:№?\s*\d+\s+)?оперативн\w*\s+командуван", re.IGNORECASE)
+_KSV_NAME_RE = re.compile(r"^[\s#]*(?:командуван\w*\s+)?сухопутн\w*\s+військ", re.IGNORECASE)
+_OK_ABBR_RE = re.compile(r"^\s*ОК(?:\s|«|\"|$)")
+_KSV_ABBR_RE = re.compile(r"^\s*К?СВ(?:\s|$)")
+
+
+def _high_command_kind(entry: dict | None) -> str:
+    """«ОК», «КСВ» або «» — рівень над корпусом за стовпцем A або C."""
+    if not isinstance(entry, dict):
+        return ""
+    open_name = str(entry.get("open_name") or "")
+    abbreviation = str(entry.get("abbreviation") or entry.get("abbr") or "")
+    if _OK_NAME_RE.search(open_name) or _OK_ABBR_RE.search(abbreviation):
+        return "ОК"
+    if _KSV_NAME_RE.search(open_name) or _KSV_ABBR_RE.search(abbreviation):
+        return "КСВ"
+    return ""
+
+
+def _is_high_command_entry(entry: dict | None) -> bool:
+    """Рядок таблиці — ОК чи КСВ (рівні над корпусом)."""
+    return bool(_high_command_kind(entry))
+
+
+def _format_full_closed_unit_text(
+    mapped_val: dict | str,
+    mapping_dict: dict,
+    full_chain: bool = False,
+    high_commands: frozenset | None = None,
+) -> str:
     """Форматує закриту назву ВЧ: 'військової частини АXXXX', а якщо вказано корпус — 'військової частини АXXXX військової частини АYYYY'. Для ТЦК зберігає назву без змін.
 
     `full_chain` (повідомлення, 03.11.2026): ланцюг за стовпцем D не зупиняється
     на корпусі, а йде до кінця — батальйон → частина → АК/ОК → ОК → КСВ.
+    `high_commands` — шифри ОК/КСВ, НАЗВАНИХ у наказі: лише вони йдуть у ланцюг
+    (None — усі). Неназвана ланка пропускається, ланцюг іде далі.
     """
     if isinstance(mapped_val, dict):
         open_name = str(mapped_val.get("open_name", "")).strip()
@@ -3053,6 +3089,18 @@ def _format_full_closed_unit_text(mapped_val: dict | str, mapping_dict: dict, fu
             link_key = re.sub(r"\s+", "", link_cipher).upper()
             if not link_cipher or link_key in seen:
                 break
+            # Звичайна версія: ланок ОК і КСВ немає зовсім — і за частиною, і
+            # за корпусом, який сам посилається в D на ОК.
+            if _is_high_command_entry(link_entry):
+                if not full_chain:
+                    break
+                # Подовжена версія: ОК/КСВ — лише якщо їх названо в наказі.
+                if high_commands is not None and link_key not in high_commands:
+                    seen.add(link_key)
+                    link_ref = str(link_entry.get("corps", "")).strip()
+                    if not link_ref:
+                        break
+                    continue
             seen.add(link_key)
             links.append(_to_unit_phrase(link_cipher))
             # На корпусі (командуванні) ланцюг завершується, як і раніше: вища

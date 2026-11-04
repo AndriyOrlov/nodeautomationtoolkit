@@ -8,6 +8,7 @@ import re
 from nodeautomationtoolkit.builtin_nodes.recipient_mapping import (
     _table_cipher,
     _format_full_closed_unit_text,
+    _high_command_kind,
     map_military_units,
 )
 
@@ -17,21 +18,10 @@ from nodeautomationtoolkit.builtin_nodes.recipient_mapping import (
 #: ОК — точно; КСВ — користувач ще уточнить, тоді прибрати «КСВ» з переліку.
 MESSAGE_SKIPPED_COMMANDS = ("ОК", "КСВ")
 
-_COMMAND_KIND_PATTERNS = {
-    "ОК": (r"\bоперативн\w*\s+командуван", r"^\s*ОК(?:\s|«|\"|$)"),
-    "КСВ": (r"\bсухопутн\w*\s+військ", r"^\s*К?СВ(?:\s|$)"),
-}
-
 
 def is_message_skipped_command(entry: dict) -> bool:
-    """Рядок таблиці — ОК чи КСВ (за стовпцем A або скороченням C)."""
-    open_name = str(entry.get("open_name") or "")
-    abbreviation = str(entry.get("abbreviation") or entry.get("abbr") or "")
-    for kind in MESSAGE_SKIPPED_COMMANDS:
-        name_re, abbr_re = _COMMAND_KIND_PATTERNS[kind]
-        if re.search(name_re, open_name, re.IGNORECASE) or re.search(abbr_re, abbreviation):
-            return True
-    return False
+    """Рядок таблиці — ОК чи КСВ, яким повідомлення не надсилається."""
+    return _high_command_kind(entry) in MESSAGE_SKIPPED_COMMANDS
 
 
 def build_message_recipient_groups(mapping: dict, routes: dict) -> dict[str, list[str]]:

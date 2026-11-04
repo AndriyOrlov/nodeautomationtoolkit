@@ -94,3 +94,16 @@ def test_new_order_clears_the_previous_signer(messages_app, monkeypatch, tmp_pat
     monkeypatch.setattr(type(app), "_read_word_text", lambda self, path, normalize=True: "1. Пункт.")
     app._set_order(str(order))
     assert app.order_signer_name.get() == ""
+
+
+def test_extended_chain_checkbox_is_off_by_default_and_drives_the_option(messages_app):
+    app = messages_app
+    boxes = [box for box in app.main_window.findChildren(QCheckBox) if box.text() == "Подовжена версія"]
+    assert len(boxes) == 1
+    assert boxes[0].isChecked() is False
+    assert app._message_chain_options() == {"full_chain": False, "high_commands": None}
+    boxes[0].setChecked(True)
+    QApplication.processEvents()
+    assert app.message_full_chain.get() is True
+    assert app._message_chain_options()["full_chain"] is True
+    boxes[0].setChecked(False)
