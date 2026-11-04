@@ -29,6 +29,7 @@ from nodeautomationtoolkit.builtin_nodes.recipient_mapping import (
     _mask_anaphoric_unit_references,
     _unit_name_signature,
     RecipientMapping,
+    is_service_branch_command,
     is_tck_entry,
     keep_open_names_of,
     _ORDER_SIGNER_START_RE,
@@ -275,15 +276,42 @@ def _unit_core_name(open_name: str) -> str:
 # Збройних Сил України». Саме обʼєднання (оперативне/повітряне командування)
 # шифрується як звичайний рядок таблиці, а цей хвіст інформації не несе й у
 # закритому повідомленні не потрібен (розд. 9.5.8).
-_SERVICE_BRANCH = (
-    r"(?:Сухопутних\s+військ|Повітряних\s+Сил|Десантно-штурмових\s+військ"
-    r"|Військово-Морських\s+Сил|Сил\s+спеціальних\s+операцій"
-    r"|Сил\s+територіальної\s+оборони|Сил\s+підтримки|Медичних\s+сил)"
-)
+# У Word між літерами буває мʼякий перенос, а замість кириличних — латинські
+# двійники («вiйськ»): тоді хвіст лишався після ОК (04.11.2026).
+_LOOKALIKE_LETTERS = {
+    "а": "аa", "в": "вB", "е": "еe", "і": "іi", "к": "кK", "м": "мM", "н": "нH",
+    "о": "оo", "р": "рp", "с": "сc", "т": "тT", "у": "уy", "х": "хx",
+}
+
+
+def _loose_phrase(phrase: str) -> str:
+    """Шаблон фрази, стійкий до мʼякого переносу й латинських двійників."""
+    words = []
+    for word in phrase.split():
+        parts = []
+        for char in word:
+            if char == "-":
+                parts.append("[-‐‑–]\xad?")
+            else:
+                letters = _LOOKALIKE_LETTERS.get(char.lower(), char.lower())
+                parts.append(f"[{letters}]\xad?")
+        words.append("".join(parts))
+    return r"\s+".join(words)
+
+
+_SERVICE_BRANCH = "(?:" + "|".join(
+    _loose_phrase(phrase)
+    for phrase in (
+        "Сухопутних військ", "Повітряних Сил", "Десантно-штурмових військ",
+        "Військово-Морських Сил", "Сил спеціальних операцій",
+        "Сил територіальної оборони", "Сил підтримки", "Медичних сил",
+    )
+) + ")"
+_ARMED_FORCES = _loose_phrase("Збройних Сил України")
 _SERVICE_BRANCH_TAIL_RE = re.compile(
     rf"((?:{_CLOSED_UNIT_PHRASE})(?:\s+{_CLOSED_UNIT_PHRASE})*)"
-    rf"(?:\s+{_SERVICE_BRANCH}(?:\s+Збройних\s+Сил\s+України)?"
-    rf"|\s+Збройних\s+Сил\s+України)",
+    rf"(?:\s+{_SERVICE_BRANCH}(?:\s+{_ARMED_FORCES})?"
+    rf"|\s+{_ARMED_FORCES})",
     re.IGNORECASE | re.UNICODE,
 )
 
@@ -583,6 +611,11 @@ def _build_cipher_patterns(
             # («Тестовий ОТЦК та СП») сенсу не мала, а рядки ТЦК — найдовші
             # в словнику, тож саме вони й проковтували текст пункту (4.2.9).
             # Для маршрутизації ці рядки далі потрібні — там вони не змінені.
+            continue
+        if is_service_branch_command(mapped_val) or is_service_branch_command(open_name):
+            # КСВ не шифрується (04.11.2026). Ділянку рядок теж не займає: його
+            # нечіткий збіг проковтував «…командування «Тест» Сухопутних військ»
+            # і ОК ставало «оперативного військової частини АXXXX».
             continue
         closed_code = _format_full_closed_unit_text(
             mapped_val, mapping_dict, full_chain=full_chain, high_commands=high_commands

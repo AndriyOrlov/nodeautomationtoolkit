@@ -8,20 +8,15 @@ import re
 from nodeautomationtoolkit.builtin_nodes.recipient_mapping import (
     _table_cipher,
     _format_full_closed_unit_text,
-    _high_command_kind,
+    is_distribution_excluded,
     map_military_units,
 )
 
 
 
-#: Рівні над корпусом, яким повідомлення НЕ надсилається (03.11.2026, тимчасово):
-#: ОК — точно; КСВ — користувач ще уточнить, тоді прибрати «КСВ» з переліку.
-MESSAGE_SKIPPED_COMMANDS = ("ОК", "КСВ")
-
-
 def is_message_skipped_command(entry: dict) -> bool:
-    """Рядок таблиці — ОК чи КСВ, яким повідомлення не надсилається."""
-    return _high_command_kind(entry) in MESSAGE_SKIPPED_COMMANDS
+    """Рядок таблиці — ОК чи КСВ: у розсилку не входять (04.11.2026, витяги й повідомлення)."""
+    return is_distribution_excluded(entry)
 
 
 def build_message_recipient_groups(mapping: dict, routes: dict) -> dict[str, list[str]]:
@@ -104,9 +99,6 @@ def build_message_recipient_groups(mapping: dict, routes: dict) -> dict[str, lis
             or re.fullmatch(r"\s*\d{1,3}\s*АК\s*", abbreviation, re.IGNORECASE)
         )
 
-    def is_skipped_command(entry: dict | None) -> bool:
-        return bool(entry) and is_message_skipped_command(entry)
-
     matched_names = set()
     match_report = routes.get("match_report")
     for row in getattr(match_report, "rows", []) or []:
@@ -149,8 +141,8 @@ def build_message_recipient_groups(mapping: dict, routes: dict) -> dict[str, lis
             entry_cipher.casefold(),
             entry_open.casefold(),
         )
-        if is_tck_entry(entry) or is_skipped_command(entry) or entry_key in matched_entry_keys:
-            continue
+        if is_tck_entry(entry) or entry_key in matched_entry_keys or is_distribution_excluded(entry):
+            continue  # ОК і КСВ у розсилку не входять (04.11.2026)
         matched_entries.append(entry)
         matched_entry_keys.add(entry_key)
 
@@ -163,7 +155,7 @@ def build_message_recipient_groups(mapping: dict, routes: dict) -> dict[str, lis
         u_key_tuple = (u_cipher.casefold(), u_open.casefold())
         if u_key_tuple not in matched_entry_keys:
             entry = find_mapping_entry(u_cipher) or find_mapping_entry(u_open) or find_mapping_entry(str(u_key))
-            if is_skipped_command(entry) or is_skipped_command(u_data):
+            if is_distribution_excluded(entry or {}) or is_distribution_excluded(u_data):
                 continue
             if entry and isinstance(entry, dict):
                 e_key = (str(entry.get("cipher") or "").strip().casefold(), str(entry.get("open_name") or "").strip().casefold())
@@ -179,8 +171,9 @@ def build_message_recipient_groups(mapping: dict, routes: dict) -> dict[str, lis
     for entry in matched_entries:
         corps_name = str(entry.get("corps") or "").strip()
         corps_entry = find_corps_entry(corps_name) if corps_name else None
-        # Частина безпосередньо під ОК: ОК повідомлення не отримує, адресат — сама частина.
-        if corps_entry is not None and not is_skipped_command(corps_entry):
+        if corps_entry is not None and is_distribution_excluded(corps_entry):
+            corps_entry = None  # стовпець D = ОК/КСВ: окремим адресатом не стає
+        if corps_entry is not None:
             c_key = (
                 str(corps_entry.get("cipher") or "").strip().casefold(),
                 str(corps_entry.get("open_name") or "").strip().casefold(),

@@ -109,8 +109,8 @@ class MessagesShellMixin:
             row.addWidget(skip_box)
             chain_box = check_box("Подовжена версія", self.message_full_chain)
             chain_box.setToolTip(
-                "Увімкнено — ланцюг за стовпцем D іде вище корпусу: ОК і КСВ, "
-                "якщо їх названо в наказі. Вимкнено — як раніше, до корпусу."
+                "Увімкнено — ланцюг за стовпцем D іде вище корпусу до ОК, якщо ОК "
+                "названо в наказі. Вимкнено — як раніше, до корпусу. КСВ не шифрується."
             )
             row.addWidget(chain_box)
             row.addStretch(1)
