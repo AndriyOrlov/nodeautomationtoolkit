@@ -2966,6 +2966,22 @@ def _table_cipher(mapped_val: dict | str | None, open_name: str = "") -> str:
     return cipher
 
 
+# Командування виду Збройних Сил («Командування Сухопутних військ …»). У
+# повідомленнях шифрується все до оперативного командування включно, а вище —
+# ні (рішення користувача 04.11.2026: «ОК шифруємо, а КСВ ні»).
+_SERVICE_BRANCH_COMMAND_RE = re.compile(
+    r"^\s*командуванн\w*\s+(?:сухопутн|повітрян|десантно|військово|морськ|медичн|сил\b)",
+    re.IGNORECASE | re.UNICODE,
+)
+
+
+def is_service_branch_command(mapped_val: dict | str) -> bool:
+    """Чи є рядок таблиці командуванням виду ЗС (КСВ тощо) — його не шифруємо."""
+    name = mapped_val.get("open_name", "") if isinstance(mapped_val, dict) else mapped_val
+    clean = str(name or "").replace("\xad", "").translate(_LATIN_LOOKALIKES)
+    return bool(_SERVICE_BRANCH_COMMAND_RE.match(clean))
+
+
 def is_tck_entry(mapped_val: dict | str) -> bool:
     """Чи є рядок словника територіальним центром комплектування (ТЦК).
 
@@ -3043,6 +3059,8 @@ def _format_full_closed_unit_text(mapped_val: dict | str, mapping_dict: dict) ->
         link_ref = corps_name
         for _ in range(5):  # запобіжник від зациклених посилань у таблиці
             link_entry = _find_corps_entry(link_ref, _extract_corps_abbr(link_ref), mapping_dict)
+            if is_service_branch_command(link_entry or link_ref):
+                break  # КСВ — вище за ОК, у закритий текст не йде
             link_cipher = _table_cipher(link_entry)
             link_key = re.sub(r"\s+", "", link_cipher).upper()
             if not link_cipher or link_key in seen:
