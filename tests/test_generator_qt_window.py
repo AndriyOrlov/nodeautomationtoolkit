@@ -629,14 +629,19 @@ def test_print_page_shows_the_queue_from_the_batch_folder(shell, tmp_path):
 
     shell.print_folder.set(str(tmp_path / "Примірники_2"))
     shell.refresh_print_queue()
+    # Один рядок на наказ, з галочкою (05.11.2026).
     rows = shell.print_queue_tree.rows()
-    assert [row[1] for row in rows] == [
-        "Витяги — 2 сторінки на аркуш",
-        "Примірник № 2 + задня сторінка",
-        "Примірник № 3 + задня сторінка (лише друк)",
-    ]
+    assert [(row[0], row[1]) for row in rows] == [("☑", "Наказ № 556 від 15.08.2026")]
+    assert rows[0][2] == (
+        "Витяги — 2 сторінки на аркуш; Примірник № 2 + задня сторінка; "
+        "Примірник № 3 + задня сторінка (лише друк)"
+    )
     shell.print_management.set(True)  # галочка одразу оновлює чергу
-    assert any(row[1].startswith("Витяги до управління") for row in shell.print_queue_tree.rows())
+    assert "Витяги до управління" in shell.print_queue_tree.rows()[0][2]
+    # Зняти галочку — наказ не друкується, але лишається в черзі без позначки.
+    shell._mark_all_print_orders(False)
+    assert [row[0] for row in shell.print_queue_tree.rows()] == ["☐"]
+    shell._mark_all_print_orders(True)
 
 
 @pytest.mark.parametrize(

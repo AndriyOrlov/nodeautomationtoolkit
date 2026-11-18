@@ -40,6 +40,10 @@ class CoreMixin:
         self.message_skip_internal_management = tk.BooleanVar(value=True)
         # Повідомлення: «подовжена версія» — шифри ланцюга вище корпусу (ОК, КСВ).
         self.message_full_chain = tk.BooleanVar(value=False)
+        # Програма «Повідомлення»: після повідомлень — витяги до управління (05.11.2026).
+        self.message_management_extracts = tk.BooleanVar(value=True)
+        # …і звичайні (адресні) витяги, як кнопка «Створити витяги» (05.11.2026).
+        self.message_general_extracts = tk.BooleanVar(value=True)
 
         # Підписант оригіналу наказу (Командувач/Командир — зчитується автоматично з наказу)
         self.order_signer_position = tk.StringVar()
@@ -125,8 +129,21 @@ class CoreMixin:
         self.ui_theme = tk.StringVar(value="dark")
         # Друк пакета: тека, витяги до управління за бажанням, як класти в ручну подачу.
         self.print_folder = tk.StringVar()
+        # Окрема тека витягів для друку (05.11.2026); порожньо — та сама, що й примірників.
+        self.print_extracts_folder = tk.StringVar()
         self.print_management = tk.BooleanVar(value=False)
+        # Що друкувати — окремо витяги й примірники № 2/3 (18.11.2026).
+        self.print_extracts = tk.BooleanVar(value=True)
+        self.print_copies = tk.BooleanVar(value=True)
         self.print_feed_hint = tk.StringVar()
+        # Принтер для друку (порожньо — принтер Windows за замовчуванням) і його
+        # автоматичний двобічний друк (05.11.2026).
+        self.print_printer = tk.StringVar()
+        self.print_auto_duplex = tk.BooleanVar(value=False)
+        # Лотки (номер Word/драйвера; порожньо — як у принтера): лицьові сторінки й зворот,
+        # куди кладеться аркуш після паузи (05.11.2026).
+        self.print_front_tray = tk.StringVar()
+        self.print_back_tray = tk.StringVar()
         self.message_out_folder = tk.StringVar()
         self.message_executor = tk.StringVar()
 
@@ -275,6 +292,10 @@ class CoreMixin:
                         )
                     if "message_full_chain" in data:
                         self.message_full_chain.set(data["message_full_chain"])
+                    if "message_management_extracts" in data:
+                        self.message_management_extracts.set(data["message_management_extracts"])
+                    if "message_general_extracts" in data:
+                        self.message_general_extracts.set(data["message_general_extracts"])
 
                     self.p2_orders_folder.set(data.get("p2_orders_folder", ""))
                     self.p2_single_file.set(data.get("p2_single_file", ""))
@@ -328,8 +349,15 @@ class CoreMixin:
                     self.message_calc_template_path.set(data.get("message_calc_template_path", ""))
                     self.ui_theme.set(data.get("ui_theme") or "dark")
                     self.print_folder.set(data.get("print_folder", ""))
+                    self.print_extracts_folder.set(data.get("print_extracts_folder", ""))
                     self.print_management.set(bool(data.get("print_management", False)))
+                    self.print_extracts.set(bool(data.get("print_extracts", True)))
+                    self.print_copies.set(bool(data.get("print_copies", True)))
                     self.print_feed_hint.set(data.get("print_feed_hint", ""))
+                    self.print_printer.set(data.get("print_printer", ""))
+                    self.print_auto_duplex.set(bool(data.get("print_auto_duplex", False)))
+                    self.print_front_tray.set(str(data.get("print_front_tray", "")))
+                    self.print_back_tray.set(str(data.get("print_back_tray", "")))
                     self.message_out_folder.set(data.get("message_out_folder", ""))
                     self.message_executor.set(data.get("message_executor", ""))
 
@@ -353,6 +381,8 @@ class CoreMixin:
             "duplex_2up_layout": self.duplex_2up_layout.get(),
             "message_skip_internal_management": self.message_skip_internal_management.get(),
             "message_full_chain": self.message_full_chain.get(),
+            "message_management_extracts": self.message_management_extracts.get(),
+            "message_general_extracts": self.message_general_extracts.get(),
             "p2_orders_folder": self.p2_orders_folder.get(),
             "p2_single_file": self.p2_single_file.get(),
             "p2_source_mode": self.p2_source_mode.get(),
@@ -381,8 +411,15 @@ class CoreMixin:
             "message_calc_template_path": self.message_calc_template_path.get(),
             "ui_theme": self.ui_theme.get(),
             "print_folder": self.print_folder.get(),
+            "print_extracts_folder": self.print_extracts_folder.get(),
             "print_management": self.print_management.get(),
+            "print_extracts": self.print_extracts.get(),
+            "print_copies": self.print_copies.get(),
             "print_feed_hint": self.print_feed_hint.get(),
+            "print_printer": self.print_printer.get(),
+            "print_auto_duplex": self.print_auto_duplex.get(),
+            "print_front_tray": self.print_front_tray.get(),
+            "print_back_tray": self.print_back_tray.get(),
             "message_out_folder": self.message_out_folder.get(),
             "message_executor": self.message_executor.get(),
         }

@@ -505,7 +505,7 @@ class ExtractsMixin:
 
         self.log("Готово! Завершено розрахунок розсилки.")
 
-    def run_extracts(self, scope: str = "all"):
+    def run_extracts(self, scope: str = "all", notify_empty: bool = True):
         scope_titles = {
             "general": "ГЕНЕРАЦІЯ АДРЕСНИХ ВИТЯГІВ",
             "management": "ГЕНЕРАЦІЯ ВИТЯГІВ ДО УПРАВЛІННЯ",
@@ -646,7 +646,8 @@ class ExtractsMixin:
             else:
                 empty_message = "Жодної військової частини або пункту до управління не знайдено."
             self.log(empty_message)
-            messagebox.showwarning("Результат", empty_message)
+            if notify_empty:
+                messagebox.showwarning("Результат", empty_message)
             return
         if management_data:
             self.log(

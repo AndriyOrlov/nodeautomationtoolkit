@@ -16,6 +16,9 @@ import sys
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication, QDialog, QFrame, QGridLayout, QHBoxLayout, QScrollArea, QVBoxLayout, QWidget
 
+from nodeautomationtoolkit.generator.errors import explain_error
+from nodeautomationtoolkit.generator.order_text import text_before_order_signer
+
 from . import compat, theme
 from .fluent import FluentIcon, NavigationItemPosition, TitleLabel
 from .main_window import DropFluentWindow, _package_version, install_qt_bridge
@@ -113,6 +116,18 @@ class MessagesShellMixin:
                 "названо в наказі. Вимкнено — як раніше, до корпусу. КСВ не шифрується."
             )
             row.addWidget(chain_box)
+            general_box = check_box("Звичайні витяги", self.message_general_extracts)
+            general_box.setToolTip(
+                "Увімкнено — після повідомлень у ту саму папку створюються адресні витяги, "
+                "як кнопка «Створити витяги» у великій програмі (потрібен зразок витягу)."
+            )
+            row.addWidget(general_box)
+            management_box = check_box("Витяги до управління", self.message_management_extracts)
+            management_box.setToolTip(
+                "Увімкнено — після повідомлень у ту саму папку створюються витяги до "
+                "управління (потрібен зразок витягу в «Налаштуваннях»)."
+            )
+            row.addWidget(management_box)
             row.addStretch(1)
 
         root.addWidget(
@@ -229,6 +244,12 @@ class MessagesShellMixin:
             self.message_cover_template_path.get(),
         )
 
+    def select_template(self):
+        self._pick_file(
+            self.template_path, [("Word files", "*.docx *.doc")],
+            self.message_cover_template_path.get(),
+        )
+
     def select_message_output_folder(self):
         path = self.legacy.filedialog.askdirectory(
             initialdir=self._start_folder(self.message_out_folder.get(), self.doc_path.get())
@@ -309,10 +330,54 @@ class MessagesShellMixin:
         self._busy = True
         QApplication.setOverrideCursor(Qt.CursorShape.BusyCursor)
         try:
-            return super().run_generate_messages()
+            result = super().run_generate_messages()
+            if getattr(self, "last_messages_created", False):
+                self._run_extracts_after_messages()
+            return result
         finally:
             QApplication.restoreOverrideCursor()
             self._busy = False
+
+    def _extracts_scope(self) -> str:
+        """Які витяги робити після повідомлень: обидві галочки → усі, одна — лише її."""
+        general = self.message_general_extracts.get()
+        management = self.message_management_extracts.get()
+        if general and management:
+            return "all"
+        if general:
+            return "general"
+        if management:
+            return "management"
+        return ""
+
+    def _run_extracts_after_messages(self) -> None:
+        """Витяги — у ту саму папку, що й повідомлення (05.11.2026).
+
+        Логіка та сама, що й кнопки «Створити витяги» / «Витяги до управління»
+        великої програми; лише папка — папка повідомлень, а виконавець —
+        виконавець повідомлень.
+        """
+        scope = self._extracts_scope()
+        if not scope:
+            return
+        template = self.template_path.get()
+        if not template or not os.path.isfile(template):
+            self.log("Витяги не створено: у «Налаштуваннях» не вибрано зразок витягу.")
+            return
+        saved = (self.out_folder.get(), self.executor.get())
+        self.out_folder.set(self.message_out_folder.get())
+        if not self.executor.get().strip():
+            self.executor.set(self.message_executor.get())
+        try:
+            self.run_extracts(scope=scope, notify_empty=False)
+        except Exception as error:
+            explanation = explain_error(error)
+            self.log(f"ПОМИЛКА витягів:\n{explanation}")
+            self.legacy.messagebox.showerror("Витяги не створені", explanation)
+        finally:
+            self.out_folder.set(saved[0])
+            self.executor.set(saved[1])
+            self.legacy.clear_table_caches()
 
     def open_message_output_folder(self):
         folder = self.message_out_folder.get()
@@ -338,7 +403,19 @@ class MessagesShellMixin:
         return None
 
     def _refresh_order_signer(self, text=None):
-        return "", {"position": "", "rank": "", "name": ""}
+        # Витяги до управління передають текст наказу: обрізаємо його по
+        # підписанту, але поля підписанта (їх уже зчитано й, можливо,
+        # виправлено) не чіпаємо.
+        if text is None:
+            return "", {"position": "", "rank": "", "name": ""}
+        return text_before_order_signer(text)
+
+    # Таблиць результатів витягів у цьому вікні немає — підсумок у журналі.
+    def _populate_result_tab(self, key, columns, rows):
+        return None
+
+    def show_layout_warnings(self, warnings):
+        return None
 
 
 class SettingsDialog(QDialog):
@@ -367,6 +444,7 @@ class SettingsDialog(QDialog):
                 shell.message_calc_template_path,
                 shell.select_message_calc_template,
             ),
+            ("Зразок витягу:", shell.template_path, shell.select_template),
         )
         for row, (caption, variable, pick) in enumerate(rows):
             grid.addWidget(label(caption, "FieldLabel"), row, 0)
@@ -377,7 +455,8 @@ class SettingsDialog(QDialog):
 
         hint = label(
             "Тут — лише таблиця й зразки. Виконавець, папка результату, підписант і засвідчувач — "
-            "у головному вікні, у картці «Реквізити цього прогону».",
+            "у головному вікні, у картці «Реквізити цього прогону». Зразок витягу потрібен для "
+            "витягів до управління: їх створено поруч із повідомленнями, якщо в наказі є такі пункти.",
             "MutedLabel",
         )
         hint.setWordWrap(True)

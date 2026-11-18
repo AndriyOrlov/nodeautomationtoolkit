@@ -938,6 +938,9 @@ class MessagesMixin:
         return {"problems": len(problems) + len(similar), "new_units": len(new_units)}
 
     def run_generate_messages(self):
+        # Чи створено повідомлення в ЦЬОМУ запуску — за нею програма повідомлень
+        # вирішує, чи робити після них витяги до управління (05.11.2026).
+        self.last_messages_created = False
         self.save_config()
         required = (
             self.excel_path.get(),
@@ -1175,6 +1178,7 @@ class MessagesMixin:
                     f"але адресатів {len(recipients)}. Не вмістилося: {recipient_overflow}."
                 )
             self.save_config()
+            self.last_messages_created = True
             self.log(
                 f"Повідомлення створено: {'; '.join(created)}. "
                 f"Адресатів: {len(recipients)}; жовтих позначок: {highlights}."

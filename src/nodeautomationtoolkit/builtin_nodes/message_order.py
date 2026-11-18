@@ -329,6 +329,55 @@ def _strip_orphan_closing_quote(text: str) -> str:
     """Прибирає лапку, що лишилась від назви в лапках: «…А0088»» → «…А0088»."""
     return _ORPHAN_CLOSING_QUOTE_RE.sub(r"\1", str(text or ""))
 
+# Той самий хвіст у кінці назви зі стовпця A: «Оперативне командування «Північ»
+# Сухопутних військ Збройних Сил України». У наказі його часто не пишуть, тож
+# назва без хвоста — запасний варіант пошуку (06.11.2026).
+_NAME_SERVICE_BRANCH_TAIL_RE = re.compile(
+    rf"\s*[,»”\"]?\s+(?:{_SERVICE_BRANCH}(?:\s+{_ARMED_FORCES})?|{_ARMED_FORCES})\s*$",
+    re.IGNORECASE | re.UNICODE,
+)
+
+
+def _name_without_service_branch(open_name: str) -> str:
+    """Назва без «Сухопутних військ Збройних Сил України» в кінці або порожньо."""
+    source = re.sub(r"\s+", " ", str(open_name or "")).strip()
+    match = _NAME_SERVICE_BRANCH_TAIL_RE.search(source)
+    if not match:
+        return ""
+    head = source[: match.start()].rstrip(" ,")
+    closing = source[match.start():match.end()].lstrip()[:1]
+    if closing in "»”\"" and closing:
+        head += closing
+    return head if len(head.split()) >= 2 else ""
+
+
+# «командувача військ оперативного командування «Північ»» → після шифру
+# «командувача військ військової частини А4444». У повідомленні це посада
+# командира частини: «командира військової частини А4444» (06.11.2026).
+_COMMANDER_FORMS = {
+    "": "", "а": "а", "у": "у", "еві": "у", "ем": "ом",
+}
+_TROOPS_COMMANDER_RE = re.compile(
+    rf"\b(командувач)(а|у|еві|ем)?\s+військ\s+(?=(?:{_CLOSED_UNIT_PHRASE}))",
+    re.IGNORECASE | re.UNICODE,
+)
+
+
+def _troops_commander_to_unit_commander(text: str) -> str:
+    def _replace(match: re.Match) -> str:
+        word = match.group(1)
+        ending = _COMMANDER_FORMS.get((match.group(2) or "").lower(), "")
+        base = "командир"
+        if word.isupper():
+            base = base.upper()
+            ending = ending.upper()
+        elif word[:1].isupper():
+            base = base.capitalize()
+        return f"{base}{ending} "
+
+    return _TROOPS_COMMANDER_RE.sub(_replace, str(text or ""))
+
+
 def _strip_service_branch_after_closed_unit(text: str) -> str:
     """Прибирає «Сухопутних військ Збройних Сил України» одразу після шифру."""
     return _SERVICE_BRANCH_TAIL_RE.sub(r"\1", str(text or ""))
@@ -344,7 +393,8 @@ def _strip_honorific_after_closed_unit(text: str) -> str:
         result = _HONORIFIC_AFTER_CLOSED_UNIT_RE.sub(r"\1", result)
         result = _strip_unquoted_honorific_after_closed_unit(result)
         result = _strip_orphan_closing_quote(result)
-        result = _strip_service_branch_after_closed_unit(result)
+        # Вид Збройних Сил (КСВ) після шифру НЕ прибирається: КСВ не шифрується
+        # і лишається в тексті як є (користувач, 06.11.2026).
     return result
 
 
@@ -590,8 +640,7 @@ def _build_cipher_patterns(
     full_name_keys = {soften_unit_text(name).casefold() for name in mapping_dict}
     core_name_counts: dict[str, int] = {}
     for name in mapping_dict:
-        core = _unit_core_name(name)
-        if core:
+        for core in {_unit_core_name(name), _name_without_service_branch(name)} - {""}:
             core_key = soften_unit_text(core).casefold()
             core_name_counts[core_key] = core_name_counts.get(core_key, 0) + 1
 
@@ -626,9 +675,19 @@ def _build_cipher_patterns(
             _find_corps_entry(corps_info, _extract_corps_abbr(corps_info), mapping_dict)
         )
 
-        variants = [(True, open_name)]
-        core = _unit_core_name(open_name)
-        if core:
+        # Назва зі стовпця A з хвостом «Сухопутних військ Збройних Сил України»
+        # шукається БЕЗ нього: хвіст — це КСВ, він лишається відкритим у тексті,
+        # а не ковтається шифром ОК (06.11.2026).
+        tailless = _name_without_service_branch(open_name)
+        primary = open_name
+        if tailless and core_name_counts.get(soften_unit_text(tailless).casefold(), 0) == 1 and (
+            soften_unit_text(tailless).casefold() not in full_name_keys
+        ):
+            primary = tailless
+        variants = [(True, primary)]
+        for core in (_unit_core_name(primary), _name_without_service_branch(open_name)):
+            if not core or any(core == known for _full, known in variants):
+                continue
             core_key = soften_unit_text(core).casefold()
             if core_name_counts.get(core_key, 0) == 1 and core_key not in full_name_keys:
                 variants.append((False, core))
@@ -829,6 +888,7 @@ def cipher_unit_names(
     # його ДО згортання повторів, інакше воно розділяє два однакові шифри
     # («…А0000 “Едельвейс” військової частини А0000») і повтор не згортається.
     text = _strip_honorific_after_closed_unit(text)
+    text = _troops_commander_to_unit_commander(text)
 
     # 2. Звороти-посилання: «цієї самої бригади» → «цієї самої військової частини»
     for pat, replacer in _UNIT_PHRASE_REPLACEMENTS:

@@ -18,6 +18,7 @@ from PySide6.QtCore import QObject, Qt, Signal
 from PySide6.QtGui import QCloseEvent, QDragEnterEvent, QDragMoveEvent, QDropEvent, QGuiApplication
 from PySide6.QtWidgets import (
     QApplication,
+    QComboBox,
     QFrame,
     QHBoxLayout,
     QScrollArea,
@@ -30,7 +31,12 @@ from . import compat, theme
 from .compare_window import CompareWindow
 from .fluent import FluentIcon, FluentWindow, NavigationItemPosition, TitleLabel
 from .instruction_dialog import InstructionDialog
-from nodeautomationtoolkit.generator.printing import default_printer
+from nodeautomationtoolkit.generator.printing import (
+    default_printer,
+    list_printers,
+    printer_supports_duplex,
+    printer_trays,
+)
 
 from .orders_window import OrdersWindowMixin
 from .print_dialog import PrintPauseDialog
@@ -109,6 +115,13 @@ def _package_version() -> str:
         return installed_version("nodeautomationtoolkit")
     except Exception:
         return ""
+
+
+def _render_print_order_row(bridge, item, values: tuple) -> None:
+    """Рядок черги друку: галочка (колонка 0), наказ, що друкується, файли; ключ не показується."""
+    render_analysis_row(bridge, item, tuple(values[:4]))
+    if values and values[0] in (compat.MARK_ON, compat.MARK_OFF):
+        item.setText(0, "")
 
 
 def _short_folder(path: str) -> str:
@@ -716,40 +729,102 @@ class QtShellMixin(OrdersWindowMixin):
         page, layout = self._page()
 
         source = SectionCard("Пакет для друку", accent="indigo")
-        source.add_action(self._lock(button("📁 Обрати теку", "secondary", self.select_print_folder)))
         source.add_action(button("⇄ Оновити чергу", "ghost", self.refresh_print_queue))
-        row = QHBoxLayout()
-        row.setSpacing(8)
-        row.addWidget(label("Тека пакета:", "FieldLabel"))
-        row.addWidget(line_edit(self.print_folder, "порожньо — тека примірників № 2"), 1)
-        source.body.addLayout(row)
+        # Примірники № 2/3 і витяги можуть лежати в різних теках (05.11.2026).
+        for caption, variable, hint, pick in (
+            ("Тека примірників № 2/3:", self.print_folder, "порожньо — тека примірників № 2",
+             self.select_print_folder),
+            ("Тека витягів:", self.print_extracts_folder, "порожньо — та сама тека",
+             self.select_print_extracts_folder),
+        ):
+            row = QHBoxLayout()
+            row.setSpacing(8)
+            row.addWidget(label(caption, "FieldLabel"))
+            row.addWidget(line_edit(variable, hint), 1)
+            row.addWidget(self._lock(button("📁 Обрати", "secondary", pick)))
+            source.body.addLayout(row)
+        # Один рядок на наказ із галочкою: друкуються лише позначені (05.11.2026).
         table = make_table(
-            ["НАКАЗ", "ЩО ДРУКУЄТЬСЯ", "ФАЙЛ"],
+            ["", "НАКАЗ", "ЩО ДРУКУЄТЬСЯ", "ФАЙЛИ"],
             selection="none",
-            stretch_column=2,
-            widths={0: 220, 1: 320},
+            stretch_column=3,
+            widths={0: 42, 1: 200, 2: 420},
             min_height=220,
         )
-        self.print_queue_tree = compat.TreeBridge(table, render_analysis_row)
+        self.print_queue_tree = compat.TreeBridge(table, _render_print_order_row)
+        self.print_queue_tree.mark_callbacks.append(self._on_print_marks_changed)
         source.body.addWidget(table)
+        marks = QHBoxLayout()
+        marks.addWidget(button("☑ Вибрати всі", "ghost", lambda: self._mark_all_print_orders(True)))
+        marks.addWidget(button("☐ Зняти вибір", "ghost", lambda: self._mark_all_print_orders(False)))
+        marks.addStretch(1)
+        source.body.addLayout(marks)
         layout.addWidget(source)
 
         settings = SectionCard("Як друкувати", accent="slate")
-        settings.body.addWidget(check_box("Друкувати витяги до управління", self.print_management))
+        what_row = QHBoxLayout()
+        what_row.setSpacing(16)
+        what_row.addWidget(check_box("Витяги", self.print_extracts))
+        what_row.addWidget(check_box("Витяги до управління", self.print_management))
+        what_row.addWidget(check_box("Примірники № 2 і № 3", self.print_copies))
+        what_row.addStretch(1)
+        settings.body.addWidget(label("Що друкувати:", "FieldLabel"))
+        settings.body.addLayout(what_row)
         hint_row = QHBoxLayout()
         hint_row.setSpacing(8)
         hint_row.addWidget(label("Як класти в ручну подачу:", "FieldLabel"))
         hint_row.addWidget(line_edit(self.print_feed_hint, "наприклад: лицем догори, верхом до принтера"), 1)
         settings.body.addLayout(hint_row)
-        printer = default_printer()
+
+        # Принтер і його двобічний друк (05.11.2026: додався принтер з автоматичним дуплексом).
+        printer_row = QHBoxLayout()
+        printer_row.setSpacing(8)
+        printer_row.addWidget(label("Принтер:", "FieldLabel"))
+        self.print_printer_box = QComboBox()
+        default_name = default_printer()
+        self.print_printer_box.addItem(f"За замовчуванням Windows ({default_name or 'не визначено'})", "")
+        for name in list_printers():
+            self.print_printer_box.addItem(name, name)
+        chosen = self.print_printer_box.findData(self.print_printer.get())
+        self.print_printer_box.setCurrentIndex(chosen if chosen >= 0 else 0)
+        self.print_printer_box.currentIndexChanged.connect(self._on_print_printer_changed)
+        printer_row.addWidget(self.print_printer_box, 1)
+        settings.body.addLayout(printer_row)
+
+        # Лотки: аркуш для звороту кладеться в окремий лоток (05.11.2026).
+        tray_row = QHBoxLayout()
+        tray_row.setSpacing(8)
+        self.print_tray_boxes = {}
+        for caption, variable in (
+            ("Лоток для лицьових сторінок:", self.print_front_tray),
+            ("Лоток для звороту:", self.print_back_tray),
+        ):
+            tray_row.addWidget(label(caption, "FieldLabel"))
+            box = QComboBox()
+            box.currentIndexChanged.connect(
+                lambda _index, box=box, variable=variable: self._on_print_tray_changed(box, variable)
+            )
+            self.print_tray_boxes[id(variable)] = (box, variable)
+            tray_row.addWidget(box, 1)
+        settings.body.addLayout(tray_row)
+        self._fill_print_trays()
         settings.body.addWidget(
-            label(f"Принтер: {printer or 'не визначено'} — принтер Windows за замовчуванням.", "MutedLabel")
+            check_box("Принтер сам друкує з двох боків (автоматичний двобічний друк)", self.print_auto_duplex)
         )
+        self.print_duplex_hint = label("", "MutedLabel")
+        self.print_duplex_hint.setWordWrap(True)
+        settings.body.addWidget(self.print_duplex_hint)
+        self._refresh_print_duplex_hint()
+
         rules = label(
             "Для кожного наказу по черзі: витяги (2 сторінки на аркуш) → витяги до управління (якщо "
-            "увімкнено; 2 примірники, кожен витяг на окремому аркуші) → примірник № 2: лицьові сторінки, потім верхній аркуш у ручну подачу й задня "
-            "сторінка на звороті → те саме для примірника № 3 (у № 2 «Прим. № 2» міняється на № 3 лише "
-            "для друку). Після кожного кроку — пауза: Пробіл або Enter — далі, Esc — зупинити.",
+            "увімкнено; 2 примірники, кожен витяг на окремому аркуші) → примірник № 2: усі аркуші "
+            "однобічні, двобічний лише останній. Ручна подача: сторінки до передостанньої, потім задня "
+            "сторінка, верхній аркуш у ручну подачу й передостання сторінка на її звороті. Автоматичний "
+            "двобічний друк: сторінки до передостанньої, потім останній аркуш принтер друкує з двох "
+            "боків сам → те саме для примірника № 3 (у № 2 «Прим. № 2» міняється на № 3 лише для "
+            "друку). Пауза — після кожного кроку, крім сторінок до передостанньої (задня йде одразу за "
+            "ними): Пробіл або Enter — далі, Esc — зупинити.",
             "MutedLabel",
         )
         rules.setWordWrap(True)
@@ -759,12 +834,15 @@ class QtShellMixin(OrdersWindowMixin):
         strip = ActionStrip()
         strip.add(self._lock(button("🖨 Друкувати пакет", "run", self.run_print_action)))
         strip.add(self._lock(button("📄 Перевірити у PDF", "secondary", self.run_print_check_pdf)))
-        strip.add(self._lock(button("🖨 Пробний аркуш (ручна подача)", "secondary", self.run_print_test_sheet)))
+        strip.add(self._lock(button("🖨 Пробний аркуш", "secondary", self.run_print_test_sheet)))
         self._strip_status[3] = strip.finish().status
         layout.addWidget(strip)
 
         layout.addWidget(self._log_card("Журнал друку", self.log_model, "log_text", self.clear_log), 1)
         self.print_management.subscribe(lambda _value: self.refresh_print_queue())
+        self.print_extracts.subscribe(lambda _value: self.refresh_print_queue())
+        self.print_copies.subscribe(lambda _value: self.refresh_print_queue())
+        self.print_auto_duplex.subscribe(lambda _value: (self.refresh_print_queue(), self._refresh_print_duplex_hint()))
         self.refresh_print_queue()
         return page
 
@@ -773,17 +851,81 @@ class QtShellMixin(OrdersWindowMixin):
         if bridge is None:
             return
         bridge.delete(*bridge.get_children())
-        rows = self.print_queue_rows()
-        for row in rows:
-            bridge.insert("", compat.END, values=row)
-        if not rows:
-            bridge.insert("", compat.END, values=("—", "— Оберіть теку пакета: там, де примірники № 2 і витяги —", "—"))
+        orders = self.print_queue_orders()
+        for marked, title, what, files, key in orders:
+            mark = compat.MARK_ON if marked else compat.MARK_OFF
+            bridge.insert("", compat.END, values=(mark, title, what, files, key))
+        if not orders:
+            bridge.insert("", compat.END, values=("—", "—", "— Оберіть теки: примірники № 2/3 і витяги —", "—"))
+
+    def _on_print_marks_changed(self) -> None:
+        bridge = self.print_queue_tree
+        for iid in bridge.get_children():
+            values = bridge.item(iid, "values")
+            if len(values) >= 5 and values[0] in (compat.MARK_ON, compat.MARK_OFF):
+                self.set_print_order_marked(values[4], values[0] == compat.MARK_ON)
+
+    def _mark_all_print_orders(self, marked: bool) -> None:
+        for _marked, _title, _what, _files, key in self.print_queue_orders():
+            self.set_print_order_marked(key, marked)
+        self.refresh_print_queue()
 
     def select_print_folder(self) -> None:
         start = self.print_folder.get() or self.p2_out_folder.get()
         path = self.legacy.filedialog.askdirectory(initialdir=start if start and os.path.isdir(start) else "")
         if path:
             self.print_folder.set(os.path.abspath(path))
+            self.save_config()
+            self.refresh_print_queue()
+
+    def _on_print_printer_changed(self, _index: int) -> None:
+        self.print_printer.set(self.print_printer_box.currentData() or "")
+        self.save_config()
+        self._refresh_print_duplex_hint()
+        self._fill_print_trays()
+
+    def _fill_print_trays(self) -> None:
+        """Лотки вибраного принтера; збережений вибір лишається, якщо такий лоток є."""
+        name = self.print_printer.get() or default_printer()
+        trays = printer_trays(name) if name else []
+        for box, variable in getattr(self, "print_tray_boxes", {}).values():
+            wanted = variable.get()
+            box.blockSignals(True)
+            box.clear()
+            box.addItem("Як у налаштуваннях принтера", "")
+            for number, title in trays:
+                box.addItem(title, str(number))
+            index = box.findData(wanted)
+            box.setCurrentIndex(index if index >= 0 else 0)
+            box.blockSignals(False)
+            if index < 0 and wanted:
+                variable.set("")  # у цього принтера такого лотка немає
+
+    def _on_print_tray_changed(self, box, variable) -> None:
+        variable.set(box.currentData() or "")
+        self.save_config()
+
+    def _refresh_print_duplex_hint(self) -> None:
+        hint = getattr(self, "print_duplex_hint", None)
+        if hint is None:
+            return
+        name = self.print_printer.get() or default_printer()
+        capable = printer_supports_duplex(name) if name else False
+        text = (
+            f"Драйвер «{name}» заявляє двобічний друк. " if capable
+            else f"Драйвер «{name or 'принтера'}» двобічного друку не заявляє. "
+        )
+        if self.print_auto_duplex.get():
+            text += "Перевірте пробним аркушем: має вийти ОДИН аркуш з двох боків."
+        else:
+            text += "Зараз — ручна подача: задня сторінка друкується на звороті вручну."
+        hint.setText(text)
+
+    def select_print_extracts_folder(self) -> None:
+        start = self.print_extracts_folder.get() or self.print_folder.get() or self.p2_out_folder.get()
+        path = self.legacy.filedialog.askdirectory(initialdir=start if start and os.path.isdir(start) else "")
+        if path:
+            self.print_extracts_folder.set(os.path.abspath(path))
             self.save_config()
             self.refresh_print_queue()
 

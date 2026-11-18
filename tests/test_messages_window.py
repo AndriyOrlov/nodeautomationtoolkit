@@ -107,3 +107,93 @@ def test_extended_chain_checkbox_is_off_by_default_and_drives_the_option(message
     assert app.message_full_chain.get() is True
     assert app._message_chain_options()["full_chain"] is True
     boxes[0].setChecked(False)
+
+
+def test_management_extracts_go_to_the_messages_folder(messages_app, monkeypatch, tmp_path):
+    app = messages_app
+    template = tmp_path / "zrazok.docx"
+    template.write_bytes(b"")
+    calls = []
+
+    def fake_messages(self):
+        self.last_messages_created = outcome["ok"]
+
+    monkeypatch.setattr(app.legacy.App, "run_generate_messages", fake_messages)
+    monkeypatch.setattr(
+        app, "run_extracts",
+        lambda scope, notify_empty=True: calls.append(
+            (scope, notify_empty, app.out_folder.get(), app.executor.get())
+        ),
+    )
+    monkeypatch.setattr(app, "_settings_missing", lambda: [])
+    # Розрахунок розсилки тут — лише Word-файл повідомлень (>10 адресатів), не XLSX витягів.
+    monkeypatch.setattr(app, "run_rozrahunok", lambda: calls.append(("xlsx-calc",)))
+    for variable, value in (
+        (app.template_path, str(template)),
+        (app.message_out_folder, str(tmp_path / "Повідомлення")),
+        (app.out_folder, "C:/Готово-тест"),
+        (app.executor, ""),
+        (app.message_executor, "Виконавець-тест"),
+    ):
+        variable.set(value)
+
+    outcome = {"ok": False}
+    app.run_generate_messages()
+    assert calls == []  # повідомлення не створено — витягів теж немає
+
+    outcome["ok"] = True
+    app.run_generate_messages()
+    # Обидві галочки (за замовчуванням) — усі витяги: адресні й до управління.
+    assert calls == [("all", False, str(tmp_path / "Повідомлення"), "Виконавець-тест")]
+    # Папка й виконавець великої програми не змінилися.
+    assert app.out_folder.get() == "C:/Готово-тест"
+    assert app.executor.get() == ""
+
+    app.template_path.set("")
+    calls.clear()
+    app.run_generate_messages()
+    assert calls == []  # без зразка витягу — лише запис у журналі
+
+    app.template_path.set(str(template))
+    for general, management, expected in (
+        (True, False, ["general"]),
+        (False, True, ["management"]),
+        (False, False, []),  # обидві зняті — лише повідомлення
+    ):
+        calls.clear()
+        app.message_general_extracts.set(general)
+        app.message_management_extracts.set(management)
+        app.run_generate_messages()
+        assert [call[0] for call in calls] == expected
+    app.message_general_extracts.set(True)
+    app.message_management_extracts.set(True)
+    app.template_path.set("")
+
+
+def test_extracts_checkboxes_are_on_by_default(messages_app):
+    app = messages_app
+    for caption, variable in (
+        ("Звичайні витяги", app.message_general_extracts),
+        ("Витяги до управління", app.message_management_extracts),
+    ):
+        boxes = [box for box in app.main_window.findChildren(QCheckBox) if box.text() == caption]
+        assert len(boxes) == 1 and boxes[0].isChecked(), caption
+        assert variable.get() is True
+
+
+def test_settings_have_the_extract_template_row(messages_app):
+    app = messages_app
+    dialog = SettingsDialog(app, app.main_window)
+    app.template_path.set("C:/zrazok-vytiahu-test.docx")
+    assert _edits(dialog, "C:/zrazok-vytiahu-test.docx")
+    dialog.close()
+    app.template_path.set("")
+
+
+def test_signer_cut_keeps_the_signer_fields(messages_app):
+    app = messages_app
+    app.order_signer_name.set("Поле-тест")
+    usable, _signer = app._refresh_order_signer("НАКАЗУЮ:\n1. Пункт.\n")
+    assert "1. Пункт." in usable
+    assert app.order_signer_name.get() == "Поле-тест"
+    app.order_signer_name.set("")

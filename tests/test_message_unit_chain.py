@@ -44,7 +44,7 @@ def test_separate_battalion_row_gives_all_four_links(battalion_d):
 
     result, _, _ = cipher_unit_names(f"командира взводу 5 батальйону 5 штурмової бригади {TAIL}", mapping)
 
-    assert result == f"командира взводу {FULL_CHAIN}"
+    assert result == f"командира взводу {FULL_CHAIN} Сухопутних військ Збройних Сил України"  # КСВ лишається (06.11.2026)
 
 
 @pytest.mark.parametrize(
@@ -61,7 +61,7 @@ def test_cell_with_two_units_keeps_the_nested_link(cell, battalion_d):
         f"командира взводу 5 батальйону 5 штурмової бригади {TAIL}", mapping, problems=problems
     )
 
-    assert result == f"командира взводу {FULL_CHAIN}"
+    assert result == f"командира взводу {FULL_CHAIN} Сухопутних військ Збройних Сил України"  # КСВ лишається (06.11.2026)
     assert problems == []
 
 
